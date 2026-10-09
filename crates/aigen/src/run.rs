@@ -102,7 +102,7 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
 
 fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model, job: &Job, control: &Control<'_>, timeout: u64) -> Result<Generated> {
     let base = comfy::base_url(&settings.comfy_url)?;
-    let (width, height) = render_size(job.width, job.height, model.megapixels, 16);
+    let (width, height) = render_size(job.width, job.height, model.megapixels, model.family.size_multiple());
     let render = Job { width, height, ..job.clone() };
     let workflow = comfy::workflow(model, &render)?;
     (control.progress)(0.02, "Sending to ComfyUI…");

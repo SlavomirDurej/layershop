@@ -71,7 +71,8 @@ loads. The workflows follow ComfyUI's own text-to-image templates and use only b
 | HiDream O1 | one checkpoint | noise scale, KSampler |
 | HiDream I1 | diffusion model, four text encoders, VAE | SD3 shift, KSampler |
 | Ideogram 4 | diffusion model + unconditional model, text encoder (`ideogram4`), VAE | AuraFlow shift, dual-model guider |
-| Qwen Image | diffusion model, text encoder (`qwen_image`), VAE | AuraFlow shift, KSampler |
+| Qwen Image | diffusion model, text encoder (`qwen_image`, Qwen 2.5 VL), VAE | AuraFlow shift, KSampler |
+| Qwen Image 2.1 | diffusion model, text encoder (`qwen_image`, Qwen 3 VL 8B), the 2.1 VAE | its own prompt node, KSampler; edges in multiples of 32 |
 | Checkpoint (SD / SDXL) | one checkpoint | KSampler |
 | Custom workflow | whatever your workflow loads | yours |
 

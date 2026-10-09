@@ -52,7 +52,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::Krea2 => "krea2",
         Family::Flux2 | Family::Ernie => "flux2",
         Family::Ideogram4 => "ideogram4",
-        Family::QwenImage => "qwen_image",
+        Family::QwenImage | Family::QwenImage21 => "qwen_image",
         _ => "stable_diffusion",
     }
 }
@@ -111,13 +111,23 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
         };
     }
     let cfg = finite(model.cfg, 1.0);
-    let mut positive = g.node("CLIPTextEncode", json!({"text": job.prompt, "clip": clip}));
-    // Without classifier-free guidance the negative prompt is never evaluated: a zeroed
-    // conditioning saves encoding it. Ideogram 4's negative model takes one, too.
-    let negative = if cfg <= 1.0 || f == Family::Ideogram4 {
-        g.node("ConditioningZeroOut", json!({"conditioning": positive}))
+    let (mut positive, negative) = if f == Family::QwenImage21 {
+        // Its own node encodes both prompts (and reference images, of which there are none here).
+        let id = g.add(
+            "TextEncodeQwenImage21",
+            json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "resolution": 1024, "vae": vae}),
+        );
+        (json!([id, 0]), json!([id, 1]))
     } else {
-        g.node("CLIPTextEncode", json!({"text": model.negative_prompt, "clip": clip}))
+        let positive = g.node("CLIPTextEncode", json!({"text": job.prompt, "clip": clip}));
+        // Without classifier-free guidance the negative prompt is never evaluated: a zeroed
+        // conditioning saves encoding it. Ideogram 4's negative model takes one, too.
+        let negative = if cfg <= 1.0 || f == Family::Ideogram4 {
+            g.node("ConditioningZeroOut", json!({"conditioning": positive}))
+        } else {
+            g.node("CLIPTextEncode", json!({"text": model.negative_prompt, "clip": clip}))
+        };
+        (positive, negative)
     };
     let guidance = finite(model.guidance, 0.0);
     if f.has_guidance() && guidance > 0.0 {
@@ -426,6 +436,24 @@ mod tests {
         assert!(!c.iter().any(|x| x == "FluxGuidance"));
         m.guidance = 4.0;
         assert!(classes(&workflow(&m, &job()).unwrap()).iter().any(|x| x == "FluxGuidance"));
+    }
+
+    #[test]
+    fn qwen_image_2_1_encodes_with_its_own_node() {
+        let w = workflow(&Family::QwenImage21.preset(), &job()).unwrap();
+        let c = classes(&w);
+        assert!(c.iter().any(|x| x == "TextEncodeQwenImage21") && !c.iter().any(|x| x == "CLIPTextEncode"), "{c:?}");
+        let nodes = w.as_object().unwrap();
+        let (id, encode) = nodes.iter().find(|(_, n)| n["class_type"] == "TextEncodeQwenImage21").unwrap();
+        assert_eq!(encode["inputs"]["prompt"], "a red frog");
+        assert!(encode["inputs"]["vae"].is_array());
+        let sampler = nodes.values().find(|n| n["class_type"] == "KSampler").unwrap();
+        assert_eq!(sampler["inputs"]["positive"], json!([id, 0]));
+        assert_eq!(sampler["inputs"]["negative"], json!([id, 1]));
+        // The larger Qwen 3 VL encoder and the 2.1 VAE: the older Qwen Image files don't fit it.
+        let text = w.to_string();
+        assert!(text.contains("qwen3vl_8b") && text.contains("qwen_image_2.1_vae") && !text.contains("qwen_2.5_vl"), "{text}");
+        assert_eq!(Family::QwenImage21.size_multiple(), 32);
     }
 
     #[test]

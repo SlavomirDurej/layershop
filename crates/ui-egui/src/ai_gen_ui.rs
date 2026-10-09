@@ -348,7 +348,7 @@ fn generate_blocked(app: &PhotocraftApp, model: &Model) -> Option<String> {
 /// The size `model` is asked to render for a `w` × `h` area (Gemini: the aspect ratio).
 fn render_size(model: &Model, w: u32, h: u32) -> (u32, u32) {
     match model.provider {
-        Provider::Comfy => photocraft_aigen::size::render_size(w, h, model.megapixels, 16),
+        Provider::Comfy => photocraft_aigen::size::render_size(w, h, model.megapixels, model.family.size_multiple()),
         Provider::Openai => photocraft_aigen::cloud::openai_size(model, w, h),
         Provider::Gemini => photocraft_aigen::cloud::gemini_ratio(w, h),
     }

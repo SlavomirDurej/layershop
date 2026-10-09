@@ -63,6 +63,8 @@ pub enum Family {
     HidreamI1,
     Ideogram4,
     QwenImage,
+    /// Qwen Image 2.1: a different text encoder, VAE and prompt node from Qwen Image.
+    QwenImage21,
     /// An all-in-one checkpoint (Stable Diffusion, SDXL, …).
     Checkpoint,
     /// The user's own workflow (API format) with `%prompt%`-style placeholders.
@@ -70,7 +72,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 11] = [
+    pub const ALL: [Family; 12] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux2,
@@ -80,6 +82,7 @@ impl Family {
         Family::HidreamI1,
         Family::Ideogram4,
         Family::QwenImage,
+        Family::QwenImage21,
         Family::Checkpoint,
         Family::Custom,
     ];
@@ -95,6 +98,7 @@ impl Family {
             Family::HidreamI1 => "hidreamI1",
             Family::Ideogram4 => "ideogram4",
             Family::QwenImage => "qwenImage",
+            Family::QwenImage21 => "qwenImage21",
             Family::Checkpoint => "checkpoint",
             Family::Custom => "custom",
         }
@@ -115,6 +119,7 @@ impl Family {
             Family::HidreamI1 => "HiDream I1",
             Family::Ideogram4 => "Ideogram 4",
             Family::QwenImage => "Qwen Image",
+            Family::QwenImage21 => "Qwen Image 2.1",
             Family::Checkpoint => "Checkpoint (SD / SDXL)",
             Family::Custom => "Custom workflow",
         }
@@ -138,6 +143,11 @@ impl Family {
     /// Has a "shift" (model sampling) control.
     pub fn has_shift(self) -> bool {
         matches!(self, Family::ZImage | Family::HidreamI1 | Family::Ideogram4 | Family::QwenImage | Family::HidreamO1)
+    }
+
+    /// The multiple each edge of the rendered image must be.
+    pub fn size_multiple(self) -> u32 {
+        if self == Family::QwenImage21 { 32 } else { 16 }
     }
 
     /// Has a distilled-guidance control (FLUX), separate from CFG.
@@ -244,6 +254,15 @@ impl Family {
                 steps: 20,
                 cfg: 2.5,
                 shift: 3.1,
+                ..base
+            },
+            Family::QwenImage21 => Model {
+                name: "Qwen Image 2.1".into(),
+                unet: "qwen_image_2.1_int8_convrot.safetensors".into(),
+                clip: "qwen3vl_8b_fp8_scaled.safetensors".into(),
+                vae: "qwen_image_2.1_vae_bf16.safetensors".into(),
+                steps: 25,
+                cfg: 1.0,
                 ..base
             },
             Family::Checkpoint => Model { steps: 25, cfg: 7.0, scheduler: "normal".into(), ..base },

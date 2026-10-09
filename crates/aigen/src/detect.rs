@@ -50,6 +50,8 @@ fn family_of(file: &str) -> Option<Family> {
         Family::HidreamI1
     } else if n.contains("ideogram") {
         Family::Ideogram4
+    } else if n.contains("qwen_image_2.1") || n.contains("qwen-image-2.1") || n.contains("qwen_image_21") {
+        Family::QwenImage21
     } else if n.contains("qwen_image") || n.contains("qwen-image") {
         Family::QwenImage
     } else {
@@ -96,6 +98,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::Ernie => &["ministral"],
             Family::Ideogram4 => &["qwen3vl_8b"],
             Family::QwenImage => &["qwen_2.5_vl"],
+            Family::QwenImage21 => &["qwen3vl_8b"],
             _ => &[],
         };
         m.clip = choose(clips, &m.clip, clip_needles);
@@ -110,6 +113,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             _ => {}
         }
         let vae_needles: &[&str] = match family {
+            Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
             Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
             Family::Krea2 | Family::QwenImage => &["qwen_image_vae"],
             _ => &["ae.safetensors"],
@@ -156,6 +160,7 @@ mod tests {
                     "ideogram4_fp8_scaled.safetensors",
                     "ideogram4_unconditional_fp8_scaled.safetensors",
                     "qwen_image_2512_fp8_e4m3fn.safetensors",
+                    "qwen_image_2.1_int8_convrot.safetensors",
                     "qwen_image_edit_2511_bf16.safetensors",
                     "ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
                     "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
@@ -164,9 +169,17 @@ mod tests {
             ),
             (
                 "text_encoders".to_string(),
-                v(&["qwen_3_4b.safetensors", "qwen_3_8b_fp8mixed.safetensors", "clip_l.safetensors", "t5xxl_fp16.safetensors", "ministral-3-3b.safetensors"]),
+                v(&[
+                    "qwen3vl_8b_int8_convrot.safetensors",
+                    "qwen_2.5_vl_7b_fp8_scaled.safetensors",
+                    "qwen_3_4b.safetensors",
+                    "qwen_3_8b_fp8mixed.safetensors",
+                    "clip_l.safetensors",
+                    "t5xxl_fp16.safetensors",
+                    "ministral-3-3b.safetensors",
+                ]),
             ),
-            ("vae".to_string(), v(&["ae.safetensors", "flux2-vae.safetensors", "qwen_image_vae.safetensors"])),
+            ("vae".to_string(), v(&["ae.safetensors", "flux2-vae.safetensors", "qwen_image_vae.safetensors", "qwen_image_2.1_vae_bf16.safetensors"])),
             ("checkpoints".to_string(), v(&["hidream_o1_image_bf16.safetensors", "ltx-2.3-22b-dev-fp8.safetensors", "sdxl_base_1.0.safetensors"])),
         ])
     }
@@ -175,7 +188,7 @@ mod tests {
     fn recognises_text_to_image_models_only() {
         let found = detect(&folders());
         let names: Vec<&str> = found.iter().map(|m| m.unet.as_str()).filter(|u| !u.is_empty()).collect();
-        assert_eq!(names.len(), 11, "{names:?}");
+        assert_eq!(names.len(), 12, "{names:?}");
         for skipped in ["edit", "ltx", "hunyuan", "mystery", "unconditional"] {
             assert!(!names.iter().any(|n| n.contains(skipped)), "{skipped} in {names:?}");
         }
@@ -198,6 +211,14 @@ mod tests {
         assert_eq!(by("flux1-dev.safetensors").clip2, "t5xxl_fp16.safetensors");
         assert_eq!(by("ideogram4_fp8_scaled.safetensors").unet2, "ideogram4_unconditional_fp8_scaled.safetensors");
         assert_eq!(by("krea2_turbo_fp8_scaled.safetensors").vae, "qwen_image_vae.safetensors");
+        // Qwen Image 2.1 is not Qwen Image: its own encoder and VAE, which the older one can't use.
+        let q21 = by("qwen_image_2.1_int8_convrot.safetensors");
+        assert_eq!(
+            (q21.family, q21.clip.as_str(), q21.vae.as_str()),
+            (Family::QwenImage21, "qwen3vl_8b_int8_convrot.safetensors", "qwen_image_2.1_vae_bf16.safetensors")
+        );
+        let q = by("qwen_image_2512_fp8_e4m3fn.safetensors");
+        assert_eq!((q.family, q.clip.as_str(), q.vae.as_str()), (Family::QwenImage, "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"));
     }
 
     #[test]
