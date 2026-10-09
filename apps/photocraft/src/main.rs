@@ -333,6 +333,8 @@ fn main() -> eframe::Result {
             let mut app = PhotocraftApp::new(Session::new(), services);
             // Window › AI Gen reaches ComfyUI and the cloud image APIs through this.
             app.session.ai.transport = Some(std::sync::Arc::new(photocraft_aigen::UreqTransport::new()));
+            // Starts ComfyUI for a local model when none is running; stops it again on quit.
+            app.session.ai.server = Some(std::sync::Arc::new(photocraft_aigen::ComfyProcess::new(services::config_dir().map(|d| d.join("comfyui.log")))));
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.custom_titlebar = custom_titlebar;
             // Only the title bar's free gap drags the window, never the menus (mac_window.rs).

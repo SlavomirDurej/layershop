@@ -201,8 +201,9 @@ fn reconfigures_ai_endpoints(id: &str, params: &Value) -> bool {
     let integrations = |path: &str| path.split('.').find(|segment| !segment.is_empty()) == Some("integrations");
     match id {
         "ai.setKey" => true,
-        // Without `url` it asks the configured server; with one, any host.
-        "ai.comfyModels" => params.get("url").is_some(),
+        // Without `url` it asks the configured server; with one, any host. `settings` carries a
+        // launch command: a program to run.
+        "ai.comfyModels" | "ai.server.find" => params.get("url").is_some() || params.get("settings").is_some(),
         "prefs.set" => {
             params.get("path").and_then(Value::as_str).is_some_and(integrations)
                 || params.get("values").and_then(Value::as_object).is_some_and(|values| values.keys().any(|path| integrations(path)))
@@ -327,6 +328,9 @@ mod tests {
             ("ai.setKey", json!({})),
             ("ai.comfyModels", json!({"url": "http://attacker.example"})),
             ("ai.comfyModels", json!({"url": null})),
+            ("ai.comfyModels", json!({"settings": {"comfyAutostart": true, "comfyLaunch": {"python": "/bin/sh", "folder": "/", "args": "-c evil"}}})),
+            ("ai.server.find", json!({"url": "http://attacker.example"})),
+            ("prefs.set", json!({"path": "integrations.ai.comfyLaunch.python", "value": "/bin/sh"})),
             ("prefs.set", json!({"path": "integrations.ai.comfyUrl", "value": "http://attacker.example"})),
             ("prefs.set", json!({"path": ".integrations.ai.models", "value": []})),
             ("prefs.set", json!({"path": "integrations", "value": {}})),

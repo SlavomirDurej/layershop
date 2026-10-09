@@ -15,7 +15,8 @@ back end you set up, and places the answer on a new layer.
      Model** adds one by architecture.
    - **Cloud Models**: the same for cloud models; it says which provider still lacks a key.
    - **API Keys**: one key per provider.
-   - **Local Server**: the ComfyUI address, **Connect**, and the timeout.
+   - **Local Server**: the ComfyUI address, **Connect**, the timeout, and starting ComfyUI
+     automatically (below).
 2. **Window › AI Gen** — a tab next to Properties and Adjustments. Pick a model, write a prompt,
    press **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt box fills the height of the
    panel: drag the edge of the dock group to make it taller. The gear opens that model's settings.
@@ -33,9 +34,30 @@ render at the selection's own size. The panel shows what will be asked (`Selecti
 *Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
 Gemini models cannot). If a provider rejects the option, untick it there.
 
+## Starting ComfyUI for you
+
+On the **Local Server** page, switch on **Start ComfyUI when a local model needs it and it isn't
+running**. Then you don't open ComfyUI yourself: the first local generation starts it hidden
+(the panel shows "Starting ComfyUI…", typically half a minute), later ones reuse it, and it is
+stopped when PhotoCraft quits.
+
+- **A ComfyUI that is already running is used as it is.** PhotoCraft first asks the address; if a
+  ComfyUI answers (ComfyUI Desktop, a terminal), nothing is started, and nothing is stopped later:
+  it is yours. Only a server PhotoCraft started is ever stopped (on quit, or with **Stop Server**).
+- **Find Installation** fills in the Python, folder and arguments from the ComfyUI that is running
+  now: start it once the way you usually do, press the button, and from then on PhotoCraft can
+  start it the same way. The port comes from the address.
+- Its output goes to `comfyui.log` in the settings folder; a start that fails quotes its last lines.
+- If PhotoCraft crashes, a server it started keeps running. The next launch finds it answering
+  and uses it, but no longer stops it on quit: close it from the Task Manager, or just leave it.
+- If you open ComfyUI Desktop while PhotoCraft's server holds the port, Desktop has to pick
+  another port or wait. Stop PhotoCraft's with **Stop Server** first.
+- Agents (MCP / control channel) cannot change the launch settings: they name a program to run.
+
 ## Local models
 
-ComfyUI must be running (the portable build listens on port 8188, ComfyUI Desktop on 8000). Each
+ComfyUI must be running, or set up to be started (above). The portable build listens on port
+8188, ComfyUI Desktop on 8000. Each
 model has an **architecture**, which decides the workflow PhotoCraft queues, and the files it
 loads. The workflows follow ComfyUI's own text-to-image templates and use only built-in nodes:
 
@@ -95,6 +117,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.models` | the models and whether each can run now |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
+| `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
 
 Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's state is

@@ -18,6 +18,7 @@ pub mod cloud;
 pub mod comfy;
 pub mod detect;
 mod http;
+pub mod launch;
 pub mod model;
 pub mod pricing;
 mod run;
@@ -26,6 +27,9 @@ pub mod size;
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::UreqTransport;
 pub use http::{MAX_RESPONSE_BYTES, Method, Request, Response, Transport};
+#[cfg(not(target_arch = "wasm32"))]
+pub use launch::ComfyProcess;
+pub use launch::{Launch, LocalServer, ServerState};
 pub use model::{Family, Model, Provider, Settings};
 pub use run::{Control, Generated, Job, comfy_models, generate, random_seed};
 

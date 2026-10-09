@@ -3,6 +3,7 @@
 //! ```sh
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188            # list detected models
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a red frog" out.png 768 512
+//! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 find         # how it was started
 //! ```
 //!
 //! The second form renders the detected model with that number at the given selection size and
@@ -23,6 +24,34 @@ fn run() -> Result<(), String> {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let url = args.first().cloned().unwrap_or_else(|| "http://127.0.0.1:8188".into());
     let transport = UreqTransport::new();
+    // `<url> find`: how the server running there was started (what "Find Installation" fills in).
+    if args.get(1).map(String::as_str) == Some("find") {
+        let launch = photocraft_aigen::launch::find_running(&transport, &url).map_err(|e| e.to_string())?;
+        println!("python: {}", launch.python);
+        println!("folder: {}", launch.folder);
+        println!("args:   {}", launch.args);
+        return Ok(());
+    }
+    // `<url> start <port>`: start a second, hidden ComfyUI on <port> the way the one at <url> was
+    // started, wait for it, then stop it. A check of the launcher that leaves <url> alone.
+    if args.get(1).map(String::as_str) == Some("start") {
+        use photocraft_aigen::{ComfyProcess, LocalServer};
+        let port = args.get(2).cloned().unwrap_or_else(|| "8765".into());
+        let launch = photocraft_aigen::launch::find_running(&transport, &url).map_err(|e| e.to_string())?;
+        let settings = Settings { comfy_url: format!("http://127.0.0.1:{port}"), comfy_autostart: true, comfy_launch: launch, ..Settings::default() };
+        let log = std::env::temp_dir().join("photocraft-comfy-example.log");
+        let server = ComfyProcess::new(Some(log.clone()));
+        let control = Control { cancelled: &|| false, progress: &|_, _| {}, sleep: &|d: Duration| std::thread::sleep(d) };
+        let begun = std::time::Instant::now();
+        server.ensure(&transport, &settings, &control).map_err(|e| e.to_string())?;
+        println!("answering on port {port} after {:.1}s (state {:?}, log {})", begun.elapsed().as_secs_f32(), server.state(), log.display());
+        let files = comfy_models(&transport, &settings.comfy_url).map_err(|e| e.to_string())?;
+        println!("it lists {} diffusion models", files.get("diffusion_models").map_or(0, Vec::len));
+        println!("stopped: {}", server.stop());
+        std::thread::sleep(Duration::from_secs(2));
+        println!("still answering afterwards: {}", photocraft_aigen::launch::is_running(&transport, &settings.comfy_url));
+        return Ok(());
+    }
     let folders = comfy_models(&transport, &url).map_err(|e| e.to_string())?;
     let models = detect(&folders);
     let Some(pick) = args.get(1) else {

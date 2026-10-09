@@ -1,5 +1,5 @@
 use super::*;
-use photocraft_aigen::{Request, Response, Transport};
+use photocraft_aigen::{Request, Response, Settings, Transport};
 use photocraft_engine::Session;
 use std::sync::{Arc, Mutex};
 
@@ -292,12 +292,108 @@ fn the_gear_opens_the_models_own_page_and_each_page_selects_its_own_kind() {
     })
     .textures_delta
     .clear();
-    assert_eq!(f.get(ACTION), Some(&json!("connect")));
+    assert_eq!(f.get(ACTION), Some(&json!("peek")));
     after_body(&mut app, &mut f);
     assert!(f.get(FILES).is_some() && f.get(ACTION).is_none());
     // An unknown page falls back to the first.
     f.insert(PAGE.into(), json!("nope"));
     draw_section(&mut f);
+}
+
+/// A launcher that records what it was asked and "starts" at once.
+#[derive(Default)]
+struct FakeServer {
+    started: std::sync::atomic::AtomicBool,
+    ensured: Mutex<Vec<bool>>,
+}
+
+impl photocraft_aigen::LocalServer for FakeServer {
+    fn ensure(&self, _: &dyn Transport, settings: &Settings, _: &photocraft_aigen::Control<'_>) -> photocraft_aigen::Result<()> {
+        self.ensured.lock().unwrap().push(settings.comfy_autostart);
+        if settings.comfy_autostart {
+            self.started.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(())
+    }
+    fn stop(&self) -> bool {
+        self.started.swap(false, std::sync::atomic::Ordering::Relaxed)
+    }
+    fn state(&self) -> photocraft_aigen::ServerState {
+        if self.started.load(std::sync::atomic::Ordering::Relaxed) { photocraft_aigen::ServerState::Started } else { photocraft_aigen::ServerState::NotStarted }
+    }
+    fn find(&self, _: &dyn Transport, _: &str) -> photocraft_aigen::Result<photocraft_aigen::Launch> {
+        Ok(photocraft_aigen::Launch { python: "C:/comfy/.venv/Scripts/python.exe".into(), folder: "C:/comfy".into(), args: "main.py --enable-manager".into() })
+    }
+}
+
+#[test]
+fn the_server_page_finds_starts_and_stops_comfyui() {
+    let mut app = app();
+    let server = Arc::new(FakeServer::default());
+    app.session.ai.server = Some(server.clone());
+    let (_, mut f) = dialog_fields(&mut app);
+    // Find Installation fills the launch settings in and switches starting on.
+    f.insert(ACTION.into(), json!("find"));
+    after_body(&mut app, &mut f);
+    let ai = &f["values"]["integrations"]["ai"];
+    assert_eq!(ai["comfyLaunch"]["python"], "C:/comfy/.venv/Scripts/python.exe");
+    assert_eq!(ai["comfyLaunch"]["args"], "main.py --enable-manager");
+    assert_eq!(ai["comfyAutostart"], true);
+    assert_eq!(f[STATUS]["error"], false);
+    draw_section(&mut f);
+    // Opening the Local Models page only looks: it must not start a server.
+    f.insert(ACTION.into(), json!("peek"));
+    after_body(&mut app, &mut f);
+    assert_eq!(server.ensured.lock().unwrap().last(), Some(&false));
+    assert_eq!(f[STARTED], false);
+    // Connect starts it (the draft says so), and says who did.
+    f.insert(ACTION.into(), json!("connect"));
+    after_body(&mut app, &mut f);
+    assert_eq!(server.ensured.lock().unwrap().last(), Some(&true));
+    assert!(f[STATUS]["text"].as_str().unwrap().contains("started by PhotoCraft"), "{}", f[STATUS]);
+    after_body(&mut app, &mut f);
+    assert_eq!(f[STARTED], true);
+    draw_section(&mut f);
+    // Stop Server stops ours; a second press has nothing to stop and says so.
+    f.insert(ACTION.into(), json!("stop"));
+    after_body(&mut app, &mut f);
+    assert_eq!((f[STARTED].clone(), f[STATUS]["error"].clone()), (json!(false), json!(false)));
+    f.insert(ACTION.into(), json!("stop"));
+    after_body(&mut app, &mut f);
+    assert_eq!(f[STATUS]["error"], true);
+    // The launch settings are saved with OK and survive a round trip.
+    crate::prefs_ui::confirm(&mut app, &f).unwrap();
+    let saved = &app.session.prefs().integrations.ai;
+    assert!(saved.comfy_autostart);
+    assert_eq!(saved.comfy_launch.folder, "C:/comfy");
+    // Without a launcher (web, tests) Find says so instead of failing oddly.
+    app.session.ai.server = None;
+    f.insert(ACTION.into(), json!("find"));
+    after_body(&mut app, &mut f);
+    assert!(f[STATUS]["text"].as_str().unwrap().contains("desktop app"));
+}
+
+#[test]
+fn a_background_connect_reports_through_the_dialog() {
+    let mut app = app();
+    app.background_jobs = true;
+    let (_, mut f) = dialog_fields(&mut app);
+    f.insert(ACTION.into(), json!("detect"));
+    after_body(&mut app, &mut f);
+    assert!(f.get(JOB).is_some());
+    draw_section(&mut f);
+    // The job ends on its own thread; the dialog picks the result up when it has been applied.
+    for _ in 0..400 {
+        app.session.poll_jobs();
+        after_body(&mut app, &mut f);
+        if f.get(JOB).is_none() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    assert!(f.get(JOB).is_none(), "the connect never finished");
+    assert_eq!(f[STATUS]["error"], false, "{}", f[STATUS]);
+    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 2);
 }
 
 #[test]

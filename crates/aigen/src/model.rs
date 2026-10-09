@@ -376,6 +376,11 @@ impl Model {
 pub struct Settings {
     /// The ComfyUI server that runs local models.
     pub comfy_url: String,
+    /// Start ComfyUI when a local model is used and no server answers at `comfy_url` (and stop it
+    /// again when the app quits). A server that is already running is used as it is.
+    pub comfy_autostart: bool,
+    /// How to start it (see [`crate::launch`]).
+    pub comfy_launch: crate::launch::Launch,
     /// Give up on a generation after this long.
     pub timeout_seconds: u32,
     pub models: Vec<Model>,
@@ -383,7 +388,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { comfy_url: "http://127.0.0.1:8188".into(), timeout_seconds: 600, models: Vec::new() }
+        Self { comfy_url: "http://127.0.0.1:8188".into(), comfy_autostart: false, comfy_launch: Default::default(), timeout_seconds: 600, models: Vec::new() }
     }
 }
 

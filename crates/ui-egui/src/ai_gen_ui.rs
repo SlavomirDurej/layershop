@@ -366,6 +366,10 @@ const ACTION: &str = "__aiAction";
 /// The page of the section in view, and that the local page already tried to read the server.
 const PAGE: &str = "__aiPage";
 const AUTO: &str = "__aiAutoConnect";
+/// A Connect / Scan running in the background (`{id, action}`), and whether the app has a ComfyUI
+/// it started itself (for the Stop button).
+const JOB: &str = "__aiJob";
+const STARTED: &str = "__aiStarted";
 
 fn text_of(obj: &Map<String, Value>, key: &str) -> String {
     obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -524,14 +528,13 @@ fn status_line(ui: &mut egui::Ui, f: &Map<String, Value>, hint: &str) {
     }
 }
 
-/// Local Server: where local models run.
+/// Local Server: where local models run, and how PhotoCraft starts it.
 fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
+    let busy = f.get(JOB).is_some();
     ui.label(
-        RichText::new(tr(
-            "Local models are run by a ComfyUI server on this computer or your network. PhotoCraft sends it the workflow and collects the image.",
-        ))
-        .color(t.text_dim),
+        RichText::new(tr("Local models are run by ComfyUI. PhotoCraft sends it the workflow and collects the image; it can also start it for you, hidden."))
+            .color(t.text_dim),
     );
     ui.add_space(8.0);
     egui::Grid::new("ai-server").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
@@ -540,13 +543,14 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             let mut url = text_of(ai, "comfyUrl");
             ui.add(egui::TextEdit::singleline(&mut url).desired_width(240.0).hint_text("http://127.0.0.1:8188"));
             ai.insert("comfyUrl".into(), json!(url));
-            if widgets::secondary_button(ui, tr("Connect"), 80.0).on_hover_text(tr("Check the server and read the model files it has")).clicked() {
+            let connect = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Connect"), 80.0)).inner;
+            if connect.on_hover_text(tr("Check the server (starting it if that is switched on below) and read the model files it has")).clicked() {
                 f.insert(ACTION.into(), json!("connect"));
             }
         });
         ui.end_row();
         label(ui, "");
-        status_line(ui, f, "ComfyUI must be running. The portable build listens on port 8188, ComfyUI Desktop on port 8000.");
+        status_line(ui, f, "The portable build of ComfyUI listens on port 8188, ComfyUI Desktop on port 8000.");
         ui.end_row();
         label(ui, "Give up after");
         let mut secs = ai.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600);
@@ -555,25 +559,83 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         ai.insert("timeoutSeconds".into(), json!(secs));
         ui.end_row();
     });
+
+    // ----- starting it -----
+    ui.add_space(10.0);
+    widgets::section_label(ui, tr("Starting ComfyUI"));
+    ui.add_space(2.0);
+    let mut autostart = ai.get("comfyAutostart").and_then(Value::as_bool).unwrap_or(false);
+    widgets::checkbox(ui, &mut autostart, tr("Start ComfyUI when a local model needs it and it isn't running"));
+    ai.insert("comfyAutostart".into(), json!(autostart));
+    ui.label(
+        RichText::new(tr("A ComfyUI that is already running (ComfyUI Desktop, for example) is used as it is and left running. One that PhotoCraft starts runs hidden, on the port of the address above, and is stopped when PhotoCraft quits."))
+            .color(t.text_faint)
+            .size(11.0),
+    );
+    ui.add_space(6.0);
+    let mut launch = ai.get("comfyLaunch").and_then(Value::as_object).cloned().unwrap_or_default();
+    egui::Grid::new("ai-launch").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+        for (key, title, hint, tip) in [
+            (
+                "python",
+                "Python",
+                "…\\.venv\\Scripts\\python.exe",
+                "The Python that has ComfyUI's packages: its virtual environment's, or the portable build's python_embeded",
+            ),
+            ("folder", "Folder", "…\\ComfyUI", "The folder ComfyUI is started in"),
+        ] {
+            label(ui, title);
+            let mut v = text_of(&launch, key);
+            ui.add(egui::TextEdit::singleline(&mut v).desired_width(380.0).hint_text(hint)).on_hover_text(tr(tip));
+            launch.insert(key.into(), json!(v));
+            ui.end_row();
+        }
+        label(ui, "Arguments");
+        let mut v = text_of(&launch, "args");
+        ui.add(egui::TextEdit::multiline(&mut v).desired_rows(3).desired_width(380.0).hint_text("main.py"))
+            .on_hover_text(tr("The script and its options, as on ComfyUI's command line. Leave out --port: the address above decides it"));
+        // One line: a pasted command line with line breaks is still one command.
+        launch.insert("args".into(), json!(v.replace(['\r', '\n'], " ")));
+        ui.end_row();
+    });
+    ai.insert("comfyLaunch".into(), Value::Object(launch));
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        let find = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Find Installation"), 130.0)).inner;
+        if find.on_hover_text(tr("Fill these in from the ComfyUI that is running now. Start it once the way you usually do, then press this")).clicked() {
+            f.insert(ACTION.into(), json!("find"));
+        }
+        let started = f.get(STARTED).and_then(Value::as_bool).unwrap_or(false);
+        let stop = ui.add_enabled_ui(started && !busy, |ui| widgets::secondary_button(ui, tr("Stop Server"), 100.0)).inner;
+        if stop.on_hover_text(tr("Stop the ComfyUI that PhotoCraft started")).on_disabled_hover_text(tr("PhotoCraft has not started a ComfyUI")).clicked() {
+            f.insert(ACTION.into(), json!("stop"));
+        }
+        if started {
+            ui.label(RichText::new(tr("Running, started by PhotoCraft")).color(t.text_faint).size(11.5));
+        }
+    });
     // What the server offers, once it has been read.
     if let Some(files) = f.get(FILES).and_then(Value::as_object) {
         ui.add_space(10.0);
-        widgets::section_label(ui, tr("Model files on the server"));
-        ui.add_space(2.0);
-        egui::Grid::new("ai-server-files").num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
-            for (folder, title) in [
-                ("diffusion_models", "Diffusion models"),
-                ("checkpoints", "Checkpoints"),
-                ("text_encoders", "Text encoders"),
-                ("vae", "VAEs"),
-                ("loras", "LoRAs"),
-            ] {
-                label(ui, title);
-                let n = files.get(folder).and_then(Value::as_array).map_or(0, Vec::len);
-                ui.label(RichText::new(n.to_string()).color(t.text));
-                ui.end_row();
-            }
-        });
+        let count = |folder: &str| files.get(folder).and_then(Value::as_array).map_or(0, Vec::len);
+        ui.label(
+            RichText::new(format!(
+                "{}: {} {}, {} {}, {} {}, {} {}, {} {}",
+                tr("On the server"),
+                count("diffusion_models"),
+                tr("diffusion models"),
+                count("checkpoints"),
+                tr("checkpoints"),
+                count("text_encoders"),
+                tr("text encoders"),
+                count("vae"),
+                tr("VAEs"),
+                count("loras"),
+                tr("LoRAs"),
+            ))
+            .color(t.text_faint)
+            .size(11.0),
+        );
     }
 }
 
@@ -618,7 +680,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         f.insert(AUTO.into(), json!(true));
         let url = text_of(ai, "comfyUrl");
         if url.contains("//127.0.0.1") || url.contains("//localhost") || url.contains("//[::1]") {
-            f.insert(ACTION.into(), json!("connect"));
+            f.insert(ACTION.into(), json!("peek"));
         }
     }
     ui.horizontal(|ui| {
@@ -862,27 +924,111 @@ pub fn prefs_opened(app: &PhotocraftApp, f: &mut Map<String, Value>) {
     f.insert(KEYS.into(), Value::Object(keys));
 }
 
-/// After the dialog body: run what a button asked for (it has no access to the app).
+/// The draft `integrations.ai` of the dialog.
+fn draft(f: &Map<String, Value>) -> Value {
+    f.get("values").and_then(|v| v.pointer("/integrations/ai")).cloned().unwrap_or_else(|| json!({}))
+}
+
+/// A Connect / Scan ended with `result` (`ai.comfyModels`'s): keep the file lists, add the
+/// detected models for a scan, and say what happened.
+fn connected(f: &mut Map<String, Value>, action: &str, result: &Value) {
+    let folders = result.get("folders").cloned().unwrap_or_else(|| json!({}));
+    let count = folders.get("diffusion_models").and_then(Value::as_array).map_or(0, Vec::len)
+        + folders.get("checkpoints").and_then(Value::as_array).map_or(0, Vec::len);
+    let mut text = format!("{} · {count} {}", tr("Connected"), tr("model files"));
+    if result.get("startedHere").and_then(Value::as_bool) == Some(true) {
+        text = format!("{text} · {}", tr("started by PhotoCraft"));
+    }
+    if action == "detect" {
+        let added = add_detected(f, &folders);
+        text = format!("{text} · {added} {}", tr("models added"));
+    }
+    f.insert(FILES.into(), folders);
+    f.insert(STATUS.into(), json!({"error": false, "text": text}));
+}
+
+fn failed(f: &mut Map<String, Value>, why: &str) {
+    f.insert(STATUS.into(), json!({"error": true, "text": why}));
+}
+
+/// After the dialog body: run what a button asked for (the body has no access to the app), and
+/// follow a Connect / Scan that is running in the background.
 pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
-    let Some(action) = f.remove(ACTION).and_then(|a| a.as_str().map(str::to_string)) else { return };
-    let url = f.get("values").and_then(|v| v.pointer("/integrations/ai/comfyUrl")).and_then(Value::as_str).unwrap_or("").to_string();
-    // Synchronous: a local server answers at once, and a missing one refuses at once.
-    let status = match app.session.execute("ai.comfyModels", json!({"url": url})) {
-        Ok(r) => {
-            let folders = r.get("folders").cloned().unwrap_or_else(|| json!({}));
-            let count = folders.get("diffusion_models").and_then(Value::as_array).map_or(0, Vec::len)
-                + folders.get("checkpoints").and_then(Value::as_array).map_or(0, Vec::len);
-            let mut text = format!("{} · {count} {}", tr("Connected"), tr("model files"));
-            if action == "detect" {
-                let added = add_detected(f, &folders);
-                text = format!("{text} · {added} {}", tr("models added"));
+    f.insert(STARTED.into(), json!(app.session.ai.server.as_ref().is_some_and(|s| s.state() == photocraft_aigen::ServerState::Started)));
+    if let Some(job) = f.get(JOB).cloned() {
+        let id = job.get("id").and_then(Value::as_u64).unwrap_or(0);
+        let action = job.get("action").and_then(Value::as_str).unwrap_or("connect").to_string();
+        match app.session.jobs_with_recent().into_iter().rev().find(|j| j.id.0 == id) {
+            Some(j) if j.state == "running" => {
+                let text = if j.message.is_empty() { tr("Connecting…").to_string() } else { j.message };
+                f.insert(STATUS.into(), json!({"error": false, "text": text}));
             }
-            f.insert(FILES.into(), folders);
-            json!({"error": false, "text": text})
+            Some(j) => {
+                f.remove(JOB);
+                match (j.state, j.result) {
+                    ("done", Some(result)) => connected(f, &action, &result),
+                    (_, _) => failed(f, &j.error.unwrap_or_else(|| tr("Cancelled").to_string())),
+                }
+            }
+            None => {
+                f.remove(JOB);
+            }
         }
-        Err(e) => json!({"error": true, "text": e.to_string()}),
-    };
-    f.insert(STATUS.into(), status);
+        return;
+    }
+    let Some(action) = f.remove(ACTION).and_then(|a| a.as_str().map(str::to_string)) else { return };
+    let mut settings = draft(f);
+    match action.as_str() {
+        "find" => match app.session.execute("ai.server.find", json!({"settings": settings})) {
+            Ok(found) => {
+                let complete = ["python", "folder"].iter().all(|k| found.get(*k).and_then(Value::as_str).is_some_and(|v| !v.is_empty()));
+                if let Some(ai) = f.get_mut("values").and_then(|v| v.pointer_mut("/integrations/ai")).and_then(Value::as_object_mut) {
+                    ai.insert("comfyLaunch".into(), found);
+                    if complete {
+                        ai.insert("comfyAutostart".into(), json!(true));
+                    }
+                }
+                let text = if complete {
+                    tr("Found the running ComfyUI. PhotoCraft will start it this way when it isn't running.")
+                } else {
+                    tr("Found its arguments, but not its Python and folder: fill those in.")
+                };
+                f.insert(STATUS.into(), json!({"error": !complete, "text": text}));
+            }
+            Err(e) => failed(f, &e.to_string()),
+        },
+        "stop" => match app.session.execute("ai.server.stop", json!({})) {
+            Ok(r) if r.get("stopped").and_then(Value::as_bool) == Some(true) => {
+                f.insert(STATUS.into(), json!({"error": false, "text": tr("Stopped the ComfyUI that PhotoCraft started.")}));
+                f.insert(STARTED.into(), json!(false));
+            }
+            Ok(_) => failed(f, tr("PhotoCraft has not started a ComfyUI. One started elsewhere is left running.")),
+            Err(e) => failed(f, &e.to_string()),
+        },
+        _ => {
+            // Opening the page only looks: it never starts a server.
+            if action == "peek"
+                && let Some(ai) = settings.as_object_mut()
+            {
+                ai.insert("comfyAutostart".into(), json!(false));
+            }
+            let params = json!({"settings": settings});
+            // Starting ComfyUI takes a while: in the background where the app has jobs.
+            let started = if app.background_jobs {
+                app.session.start("ai.comfyModels", params).map_err(|e| e.to_string())
+            } else {
+                app.session.execute("ai.comfyModels", params).map(photocraft_engine::jobs::Started::Done).map_err(|e| e.to_string())
+            };
+            match started {
+                Ok(photocraft_engine::jobs::Started::Done(result)) => connected(f, &action, &result),
+                Ok(photocraft_engine::jobs::Started::Job(id)) => {
+                    f.insert(JOB.into(), json!({"id": id.0, "action": action}));
+                    f.insert(STATUS.into(), json!({"error": false, "text": tr("Connecting…")}));
+                }
+                Err(e) => failed(f, &e),
+            }
+        }
+    }
 }
 
 /// Add the models detected in `folders` that the draft doesn't have yet. Returns how many.

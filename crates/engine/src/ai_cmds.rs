@@ -16,7 +16,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use photocraft_aigen::{Control, Generated, Job, Model, Provider, Settings, Transport};
+use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, ServerState, Settings, Transport};
 use photocraft_algo::resample::{Resample, resize_surface_in_canvas, translate_surface};
 use photocraft_color::PixelFormat;
 use photocraft_doc::{Layer, LayerMask};
@@ -37,6 +37,9 @@ const MAX_PROMPT: usize = 20_000;
 pub struct AiRuntime {
     /// Sends the requests. `None` where the app has no network (web, tests, headless).
     pub transport: Option<Arc<dyn Transport>>,
+    /// Starts ComfyUI when a local model needs it and none is running (desktop; see
+    /// `photocraft_aigen::launch`). `None`: the user starts it.
+    pub server: Option<Arc<dyn LocalServer>>,
     /// API keys by provider key (`openai`, `gemini`). Never serialised with the preferences.
     keys: BTreeMap<String, String>,
 }
@@ -44,7 +47,11 @@ pub struct AiRuntime {
 impl std::fmt::Debug for AiRuntime {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Which keys exist, never their values.
-        f.debug_struct("AiRuntime").field("transport", &self.transport.is_some()).field("keys", &self.keys.keys().collect::<Vec<_>>()).finish()
+        f.debug_struct("AiRuntime")
+            .field("transport", &self.transport.is_some())
+            .field("server", &self.server.is_some())
+            .field("keys", &self.keys.keys().collect::<Vec<_>>())
+            .finish()
     }
 }
 
@@ -190,6 +197,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         }
     })?;
     let transport = transport(s)?;
+    let server = s.ai.server.clone().filter(|_| model.provider.is_local());
     let key = s.ai.key(model.provider);
     s.ai.ready(&model).map_err(EngineError::Other)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
@@ -212,6 +220,10 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         true,
         move |ctx| {
             let control = Control { cancelled: &|| ctx.cancelled(), progress: &|f, m| ctx.progress(f, m), sleep: &|d| std::thread::sleep(d) };
+            // A local model needs its server: use the one running, or start it.
+            if let Some(server) = &server {
+                server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
+            }
             let image = photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(ai_error)?;
             ctx.check()?;
             ctx.progress(0.98, "Placing the image…");
@@ -260,16 +272,59 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
     Ok(json!({"models": list, "comfyUrl": settings.comfy_url, "available": s.ai.transport.is_some()}))
 }
 
+/// The settings a server command works with: `settings` when given (the Preferences dialog's
+/// unsaved draft), else the saved ones; `url` overrides the address.
+fn server_settings(s: &Session, p: &Value, cmd: &str) -> Result<Settings> {
+    let mut settings = match p.get("settings") {
+        Some(v) => serde_json::from_value(v.clone()).map_err(|e| bad(cmd, format!("`settings`: {e}")))?,
+        None => settings(s),
+    };
+    if let Some(url) = p.get("url") {
+        settings.comfy_url = url.as_str().ok_or_else(|| bad(cmd, "`url` must be a string"))?.to_string();
+    }
+    Ok(settings)
+}
+
 fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
-    let url = p.get("url").and_then(Value::as_str).map(str::to_string).unwrap_or_else(|| settings(s).comfy_url);
+    let settings = server_settings(s, p, "ai.comfyModels")?;
     let transport = transport(s)?;
+    let server = s.ai.server.clone();
     crate::jobs::run(
         s,
-        "Read ComfyUI Models",
+        "Connect to ComfyUI",
         false,
-        move |_| photocraft_aigen::comfy_models(transport.as_ref(), &url).map_err(ai_error),
-        |_, folders| Ok(json!({"folders": folders})),
+        move |ctx| {
+            let control = Control { cancelled: &|| ctx.cancelled(), progress: &|f, m| ctx.progress(f, m), sleep: &|d| std::thread::sleep(d) };
+            if let Some(server) = &server {
+                server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
+            }
+            let started = server.as_ref().is_some_and(|s| s.state() == ServerState::Started);
+            ctx.progress(0.5, "Reading the model files…");
+            photocraft_aigen::comfy_models(transport.as_ref(), &settings.comfy_url).map(|folders| (folders, started)).map_err(ai_error)
+        },
+        |_, (folders, started)| Ok(json!({"folders": folders, "startedHere": started})),
     )
+}
+
+/// `ai.server.find`: the launch settings of the ComfyUI that is running now.
+fn server_find(s: &mut Session, p: &Value) -> Result<Value> {
+    let settings = server_settings(s, p, "ai.server.find")?;
+    let transport = transport(s)?;
+    let server = s.ai.server.clone().ok_or_else(|| EngineError::Other("starting ComfyUI is not available here: it needs the desktop app".into()))?;
+    let launch = server.find(transport.as_ref(), &settings.comfy_url).map_err(ai_error)?;
+    serde_json::to_value(&launch).map_err(|e| EngineError::Other(e.to_string()))
+}
+
+/// `ai.server.stop`: stop the ComfyUI this app started (never one started elsewhere).
+fn server_stop(s: &mut Session, _: &Value) -> Result<Value> {
+    Ok(json!({"stopped": s.ai.server.as_ref().is_some_and(|server| server.stop())}))
+}
+
+/// `ai.server.status`: what is known without asking the server.
+fn server_status(s: &mut Session, _: &Value) -> Result<Value> {
+    let settings = settings(s);
+    let started = s.ai.server.as_ref().is_some_and(|server| server.state() == ServerState::Started);
+    Ok(json!({"url": settings.comfy_url, "autostart": settings.comfy_autostart, "canStart": s.ai.server.is_some(), "startedHere": started}))
 }
 
 fn provider_param(p: &Value, cmd: &str) -> Result<Provider> {
@@ -335,9 +390,39 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras:[file,…]}}"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras:[file,…]},startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.server.find",
+            label: "Find ComfyUI Installation",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"url":str?} → {python,folder,args}: how the ComfyUI running at the address was started (it must be running)"##,
+            enabled: always,
+            run: server_find,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.server.stop",
+            label: "Stop ComfyUI",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {stopped}: stops the ComfyUI PhotoCraft started; one started elsewhere is left running"##,
+            enabled: always,
+            run: server_stop,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.server.status",
+            label: "ComfyUI Server Status",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {url,autostart,canStart,startedHere}"##,
+            enabled: always,
+            run: server_status,
             journal: false,
         },
         CommandSpec {

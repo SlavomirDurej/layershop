@@ -215,7 +215,7 @@ mod tests {
     }
 
     fn settings() -> Settings {
-        Settings { comfy_url: "http://comfy:8188/".into(), timeout_seconds: 10, models: Vec::new() }
+        Settings { comfy_url: "http://comfy:8188/".into(), timeout_seconds: 10, ..Settings::default() }
     }
 
     fn job() -> Job {
