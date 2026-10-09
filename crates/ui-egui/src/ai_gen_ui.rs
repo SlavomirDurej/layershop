@@ -625,9 +625,9 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
                 label(ui, "Provider");
                 ui.label(RichText::new(provider.label()).color(t.text));
                 ui.end_row();
-                text_row(ui, m, "apiModel", "Model ID", if provider == Provider::Openai { "gpt-image-2" } else { "gemini-3-pro-image-preview" });
+                text_row(ui, m, "apiModel", "Model ID", if provider == Provider::Openai { "gpt-image-2.5-sunburst" } else { "gemini-3-pro-image-preview" });
                 if provider == Provider::Openai {
-                    choice_row(ui, m, "quality", "Quality", &["auto", "low", "medium", "high"]);
+                    choice_row(ui, m, "quality", "Quality", &["auto", "low", "medium", "high", "xhigh", "max"]);
                     number_row(ui, m, "megapixels", "Render size (MP)", 0.0..=8.0, false, "About this many megapixels in the selection's shape (models that take any size). 0 follows the selection");
                 } else {
                     choice_row(ui, m, "imageSize", "Image size", &["1K", "2K", "4K"]);

@@ -307,9 +307,9 @@ pub struct Model {
     pub alpha: bool,
 
     // ----- cloud -----
-    /// The provider's model id (`gpt-image-2`, `gemini-3-pro-image-preview`, …).
+    /// The provider's model id (`gpt-image-2.5-sunburst`, `gemini-3-pro-image-preview`, …).
     pub api_model: String,
-    /// OpenAI: `auto`, `low`, `medium` or `high`.
+    /// OpenAI: `auto`, `low`, `medium`, `high`, and for GPT Image 2.5 `xhigh` or `max`.
     pub quality: String,
     /// Gemini: `1K`, `2K` or `4K`.
     pub image_size: String,
@@ -360,8 +360,9 @@ impl Model {
     /// The cloud models offered by "Add Cloud Model".
     pub fn cloud_presets() -> Vec<Model> {
         vec![
+            Model::cloud(Provider::Openai, "GPT Image 2.5 Sunburst", "gpt-image-2.5-sunburst", true),
+            Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true),
             Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false),
-            Model::cloud(Provider::Openai, "GPT Image 1.5 (transparency)", "gpt-image-1.5", true),
             Model::cloud(Provider::Gemini, "Nano Banana Pro", "gemini-3-pro-image-preview", false),
             Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false),
         ]

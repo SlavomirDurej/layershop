@@ -63,7 +63,7 @@ pub fn openai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
     } else {
         body["output_format"] = json!("png");
         let quality = model.quality.trim();
-        if matches!(quality, "low" | "medium" | "high") {
+        if matches!(quality, "low" | "medium" | "high" | "xhigh" | "max") {
             body["quality"] = json!(quality);
         }
         if job.alpha && model.alpha {
@@ -206,6 +206,23 @@ mod tests {
         assert_eq!(b["background"], "transparent");
         assert_eq!(b["quality"], "high");
         assert!(body(&openai_request(&m, &job(600, 900, false), "k", 60).unwrap()).get("background").is_none());
+    }
+
+    #[test]
+    fn gpt_image_2_5_takes_any_size_transparency_and_its_quality_levels() {
+        let presets = Model::cloud_presets();
+        let mut m = presets.iter().find(|m| m.api_model == "gpt-image-2.5-sunburst").unwrap().clone();
+        assert!(presets.iter().any(|m| m.api_model == "gpt-image-2.5-flare"));
+        m.quality = "xhigh".into();
+        let b = body(&openai_request(&m, &job(1600, 900, true), "k", 60).unwrap());
+        assert_eq!(b["model"], "gpt-image-2.5-sunburst");
+        assert_eq!(b["background"], "transparent");
+        assert_eq!(b["quality"], "xhigh");
+        // Not one of the three fixed sizes of the GPT Image 1 family: the selection's own shape.
+        let (w, h) = openai_size(&m, 1600, 900);
+        assert!((f64::from(w) / f64::from(h) - 16.0 / 9.0).abs() < 0.05 && w % 16 == 0 && h % 16 == 0, "{w}x{h}");
+        m.quality = "ultra".into();
+        assert!(body(&openai_request(&m, &job(64, 64, false), "k", 60).unwrap()).get("quality").is_none());
     }
 
     #[test]

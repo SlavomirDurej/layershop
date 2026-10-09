@@ -25,8 +25,8 @@ render at the selection's own size. The panel shows what will be asked (`Selecti
 → 976 × 1072 px`).
 
 **Alpha Channel** asks the model for a transparent background. It is available for models marked
-*Supports a transparent background* in their settings (GPT Image 1 / 1.5; GPT Image 2 and the
-Gemini models cannot).
+*Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
+Gemini models cannot). If a provider rejects the option, untick it there.
 
 ## Local models
 
@@ -61,7 +61,7 @@ workflow needs a Save Image or Preview Image node.
 
 | Provider | Models | Size |
 |---|---|---|
-| OpenAI | `gpt-image-2` (any size), `gpt-image-1.5` / `gpt-image-1` (three fixed sizes, transparency) | from the selection's shape and Render size (MP) |
+| OpenAI | `gpt-image-2.5-sunburst` (most capable), `gpt-image-2.5-flare` (fast), `gpt-image-2`: any size. The deprecated `gpt-image-1.5` / `gpt-image-1` still work, with three fixed sizes | from the selection's shape and Render size (MP) |
 | Google Gemini | `gemini-3-pro-image-preview` (Nano Banana Pro), `gemini-3.1-flash-image-preview` (Nano Banana 2) | the closest supported aspect ratio at 1K / 2K / 4K |
 
 The **Model ID** is editable, so a newer model of the same API works without an update.
