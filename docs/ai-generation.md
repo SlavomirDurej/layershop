@@ -9,9 +9,13 @@ back end you set up, and places the answer on a new layer.
 
 ## Using it
 
-1. **Edit › Preferences › AI Integrations…** — set the ComfyUI address, press **Connect**, then
-   **Detect Models** (adds a model for every text-to-image model file the server has), or add
-   models by hand with **Add Local Model** / **Add Cloud Model**. Paste API keys for cloud models.
+1. **Edit › Preferences › AI Integrations…** has four pages:
+   - **Local Models**: the list of local models beside the selected one's settings. **Scan
+     Server** adds a model for every text-to-image model file the ComfyUI server has; **Add
+     Model** adds one by architecture.
+   - **Cloud Models**: the same for cloud models; it says which provider still lacks a key.
+   - **API Keys**: one key per provider.
+   - **Local Server**: the ComfyUI address, **Connect**, and the timeout.
 2. **Window › AI Gen** — a tab next to Properties and Adjustments. Pick a model, write a prompt,
    press **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt box fills the height of the
    panel: drag the edge of the dock group to make it taller. The gear opens that model's settings.

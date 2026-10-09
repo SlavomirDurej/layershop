@@ -131,10 +131,13 @@ fn running(app: &PhotocraftApp) -> Option<JobInfo> {
 
 /// Open Preferences on Integrations with `model` selected for editing.
 pub fn open_settings(app: &mut PhotocraftApp, model: &str) -> u64 {
-    let index = app.session.prefs().integrations.ai.models.iter().position(|m| m.id == model).unwrap_or(0);
+    let models = &app.session.prefs().integrations.ai.models;
+    let index = models.iter().position(|m| m.id == model).unwrap_or(0);
+    let cloud = models.get(index).is_some_and(|m| !m.provider.is_local());
     let id = crate::prefs_ui::open_preferences(app, "integrations");
     if let Some(d) = app.ui.dialog_mut(id) {
         d.fields.insert(SELECTED.into(), json!(index));
+        d.fields.insert(PAGE.into(), json!(if cloud { "cloud" } else { "local" }));
     }
     id
 }
@@ -360,6 +363,9 @@ const FILES: &str = "__aiFiles";
 const KEYS: &str = "__aiKeys";
 const STATUS: &str = "__aiStatus";
 const ACTION: &str = "__aiAction";
+/// The page of the section in view, and that the local page already tried to read the server.
+const PAGE: &str = "__aiPage";
+const AUTO: &str = "__aiAutoConnect";
 
 fn text_of(obj: &Map<String, Value>, key: &str) -> String {
     obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -374,7 +380,7 @@ fn label(ui: &mut egui::Ui, text: &str) {
 fn text_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &str, hint: &str) {
     label(ui, title);
     let mut s = text_of(obj, key);
-    ui.add(egui::TextEdit::singleline(&mut s).desired_width(300.0).hint_text(hint));
+    ui.add(egui::TextEdit::singleline(&mut s).desired_width(FIELD).hint_text(hint));
     obj.insert(key.into(), json!(s));
     ui.end_row();
 }
@@ -410,10 +416,10 @@ fn file_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &
                 options.push((String::new(), none.as_str()));
             }
             options.extend(names.iter().map(|n| (n.clone(), n.as_str())));
-            widgets::dropdown(ui, &format!("ai-file-{key}"), &mut cur, &options, 300.0);
+            widgets::dropdown(ui, &format!("ai-file-{key}"), &mut cur, &options, FIELD);
         }
         None => {
-            ui.add(egui::TextEdit::singleline(&mut cur).desired_width(300.0).hint_text("model.safetensors"));
+            ui.add(egui::TextEdit::singleline(&mut cur).desired_width(FIELD).hint_text("model.safetensors"));
         }
     }
     obj.insert(key.into(), json!(cur));
@@ -429,7 +435,7 @@ fn choice_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title:
     if !choices.contains(&cur.as_str()) {
         options.insert(0, (extra.clone(), extra.as_str()));
     }
-    widgets::dropdown(ui, &format!("ai-choice-{key}"), &mut cur, &options, 180.0);
+    widgets::dropdown(ui, &format!("ai-choice-{key}"), &mut cur, &options, FIELD);
     obj.insert(key.into(), json!(cur));
     ui.end_row();
 }
@@ -464,55 +470,119 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
     }
 }
 
-/// The Integrations section's body: draws and edits `integrations.ai` in the dialog's draft
-/// (`obj` is the section's object; `f` the dialog's fields).
-pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>) {
-    let t = Tokens::get(ui.ctx());
-    let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
-    let files = f.get(FILES).and_then(Value::as_object).cloned();
-    let folder = |name: &str| files.as_ref().and_then(|m| m.get(name)).and_then(Value::as_array);
+/// The pages of the Integrations section: (key, title).
+const PAGES: [(&str, &str); 4] = [("local", "Local Models"), ("cloud", "Cloud Models"), ("keys", "API Keys"), ("server", "Local Server")];
+/// Width of the model list beside the selected model's settings, and height of both.
+const LIST_WIDTH: f32 = 180.0;
+const PANE_HEIGHT: f32 = 420.0;
+/// Width of a field in the model settings (what the pane leaves beside the labels).
+const FIELD: f32 = 200.0;
 
-    // ----- local server -----
-    widgets::section_label(ui, tr("Local models (ComfyUI)"));
-    ui.add_space(2.0);
+fn is_local_model(m: &Value) -> bool {
+    m.get("provider").and_then(Value::as_str).unwrap_or(Provider::Comfy.key()) == Provider::Comfy.key()
+}
+
+/// The Integrations section's body: draws and edits `integrations.ai` in the dialog's draft
+/// (`obj` is the section's object; `f` the dialog's fields). Four pages: local models and cloud
+/// models (each a list beside the selected model's settings), API keys, and the local server.
+pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>) {
+    let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
+    let mut page = f.get(PAGE).and_then(Value::as_str).filter(|p| PAGES.iter().any(|(k, _)| k == p)).unwrap_or("local").to_string();
     ui.horizontal(|ui| {
-        label(ui, "Server");
-        let mut url = text_of(&ai, "comfyUrl");
-        ui.add(egui::TextEdit::singleline(&mut url).desired_width(230.0).hint_text("http://127.0.0.1:8188"));
-        ai.insert("comfyUrl".into(), json!(url));
-        if widgets::secondary_button(ui, tr("Connect"), 80.0).on_hover_text(tr("Read the model files this ComfyUI server has")).clicked() {
-            f.insert(ACTION.into(), json!("connect"));
-        }
-        if widgets::secondary_button(ui, tr("Detect Models"), 110.0)
-            .on_hover_text(tr("Add a model for every text-to-image model file the server has"))
-            .clicked()
-        {
-            f.insert(ACTION.into(), json!("detect"));
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (key, title) in PAGES {
+            if widgets::pill_tab(ui, tr(title), page == key).clicked() {
+                page = key.to_string();
+            }
         }
     });
-    if let Some(status) = f.get(STATUS).and_then(Value::as_object) {
-        let error = status.get("error").and_then(Value::as_bool).unwrap_or(false);
-        let text = status.get("text").and_then(Value::as_str).unwrap_or("");
-        ui.label(RichText::new(text).color(if error { t.danger } else { t.text_faint }).size(11.5));
-    } else {
-        ui.label(
-            RichText::new(tr("ComfyUI must be running. The portable build listens on port 8188, ComfyUI Desktop on port 8000.")).color(t.text_faint).size(11.0),
-        );
+    ui.add_space(4.0);
+    widgets::hairline(ui);
+    ui.add_space(8.0);
+    match page.as_str() {
+        "keys" => keys_page(ui, f),
+        "server" => server_page(ui, &mut ai, f),
+        "cloud" => models_page(ui, &mut ai, f, false),
+        _ => models_page(ui, &mut ai, f, true),
     }
-    ui.horizontal(|ui| {
+    f.insert(PAGE.into(), json!(page));
+    obj.insert("ai".into(), Value::Object(ai));
+}
+
+/// What the last Connect / Detect said, or `hint` before there was one.
+fn status_line(ui: &mut egui::Ui, f: &Map<String, Value>, hint: &str) {
+    let t = Tokens::get(ui.ctx());
+    match f.get(STATUS).and_then(Value::as_object) {
+        Some(status) => {
+            let error = status.get("error").and_then(Value::as_bool).unwrap_or(false);
+            let text = status.get("text").and_then(Value::as_str).unwrap_or("");
+            ui.label(RichText::new(text).color(if error { t.danger } else { t.text_faint }).size(11.5));
+        }
+        None => {
+            ui.label(RichText::new(tr(hint)).color(t.text_faint).size(11.0));
+        }
+    }
+}
+
+/// Local Server: where local models run.
+fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(
+        RichText::new(tr(
+            "Local models are run by a ComfyUI server on this computer or your network. PhotoCraft sends it the workflow and collects the image.",
+        ))
+        .color(t.text_dim),
+    );
+    ui.add_space(8.0);
+    egui::Grid::new("ai-server").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
+        label(ui, "Address");
+        ui.horizontal(|ui| {
+            let mut url = text_of(ai, "comfyUrl");
+            ui.add(egui::TextEdit::singleline(&mut url).desired_width(240.0).hint_text("http://127.0.0.1:8188"));
+            ai.insert("comfyUrl".into(), json!(url));
+            if widgets::secondary_button(ui, tr("Connect"), 80.0).on_hover_text(tr("Check the server and read the model files it has")).clicked() {
+                f.insert(ACTION.into(), json!("connect"));
+            }
+        });
+        ui.end_row();
+        label(ui, "");
+        status_line(ui, f, "ComfyUI must be running. The portable build listens on port 8188, ComfyUI Desktop on port 8000.");
+        ui.end_row();
         label(ui, "Give up after");
         let mut secs = ai.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600);
-        ui.add(egui::DragValue::new(&mut secs).range(10..=3600).suffix(" s").custom_parser(widgets::parse_num));
+        ui.add(egui::DragValue::new(&mut secs).range(10..=3600).suffix(" s").custom_parser(widgets::parse_num))
+            .on_hover_text(tr("A generation that takes longer than this is stopped. Raise it for large models that load slowly"));
         ai.insert("timeoutSeconds".into(), json!(secs));
+        ui.end_row();
     });
-    ui.add_space(10.0);
+    // What the server offers, once it has been read.
+    if let Some(files) = f.get(FILES).and_then(Value::as_object) {
+        ui.add_space(10.0);
+        widgets::section_label(ui, tr("Model files on the server"));
+        ui.add_space(2.0);
+        egui::Grid::new("ai-server-files").num_columns(2).spacing([14.0, 4.0]).show(ui, |ui| {
+            for (folder, title) in [
+                ("diffusion_models", "Diffusion models"),
+                ("checkpoints", "Checkpoints"),
+                ("text_encoders", "Text encoders"),
+                ("vae", "VAEs"),
+                ("loras", "LoRAs"),
+            ] {
+                label(ui, title);
+                let n = files.get(folder).and_then(Value::as_array).map_or(0, Vec::len);
+                ui.label(RichText::new(n.to_string()).color(t.text));
+                ui.end_row();
+            }
+        });
+    }
+}
 
-    // ----- API keys -----
-    widgets::section_label(ui, tr("Cloud models (API keys)"));
-    ui.add_space(2.0);
+/// API Keys: one per cloud provider.
+fn keys_page(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+    let t = Tokens::get(ui.ctx());
     let mut keys = f.get(KEYS).and_then(Value::as_object).cloned().unwrap_or_default();
     // Two columns: a field only gets its full width in a grid's last column.
-    egui::Grid::new("ai-keys").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+    egui::Grid::new("ai-keys").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
         for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
             label(ui, p.label());
             let saved = keys.get(&format!("{}Saved", p.key())).and_then(Value::as_bool).unwrap_or(false);
@@ -520,7 +590,7 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
             let mut remove = keys.get(&format!("{}Remove", p.key())).and_then(Value::as_bool).unwrap_or(false);
             ui.horizontal(|ui| {
                 let hint = if saved { tr("Saved. Type a new key to replace it") } else { tr("Paste your API key") };
-                ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(280.0).hint_text(hint));
+                ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(300.0).hint_text(hint));
                 if saved {
                     widgets::checkbox(ui, &mut remove, tr("Remove"));
                 }
@@ -531,174 +601,256 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
         }
     });
     f.insert(KEYS.into(), Value::Object(keys));
+    ui.add_space(8.0);
     ui.label(
         RichText::new(tr("Keys are stored on this computer, apart from the preferences, and are sent only to their provider.")).color(t.text_faint).size(11.0),
     );
-    ui.add_space(10.0);
+    ui.label(RichText::new(tr("Without a saved key, the OPENAI_API_KEY and GEMINI_API_KEY environment variables are used.")).color(t.text_faint).size(11.0));
+}
 
-    // ----- models -----
+/// Local Models / Cloud Models: the models of that kind in a list, and the selected one's
+/// settings beside it, so choosing a model shows its settings without scrolling.
+fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>, local: bool) {
+    let t = Tokens::get(ui.ctx());
+    // Local pages pick files from the server's lists: read them once, when the server is on
+    // this machine (it answers or refuses at once; a remote one waits for Connect).
+    if local && f.get(FILES).is_none() && f.get(STATUS).is_none() && f.get(AUTO).is_none() {
+        f.insert(AUTO.into(), json!(true));
+        let url = text_of(ai, "comfyUrl");
+        if url.contains("//127.0.0.1") || url.contains("//localhost") || url.contains("//[::1]") {
+            f.insert(ACTION.into(), json!("connect"));
+        }
+    }
     ui.horizontal(|ui| {
-        widgets::section_label(ui, tr("Models"));
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            let cloud = widgets::secondary_button(ui, tr("Add Cloud Model"), 120.0);
-            egui::Popup::menu(&cloud).show(|ui| {
-                for m in Model::cloud_presets() {
-                    if ui.button(format!("{} ({})", m.name, m.provider.label())).clicked() {
-                        push_model(&mut ai, f, m);
+        if local {
+            let add = widgets::secondary_button(ui, tr("Add Model"), 96.0);
+            egui::Popup::menu(&add).show(|ui| {
+                for family in Family::ALL {
+                    if ui.button(family.label()).clicked() {
+                        push_model(ai, f, family.preset());
                         ui.close();
                     }
                 }
             });
-            let local = widgets::secondary_button(ui, tr("Add Local Model"), 120.0);
-            egui::Popup::menu(&local).show(|ui| {
-                for family in Family::ALL {
-                    if ui.button(family.label()).clicked() {
-                        push_model(&mut ai, f, family.preset());
+            if widgets::secondary_button(ui, tr("Scan Server"), 104.0)
+                .on_hover_text(tr("Add a model for every text-to-image model file the ComfyUI server has"))
+                .clicked()
+            {
+                f.insert(ACTION.into(), json!("detect"));
+            }
+        } else {
+            let add = widgets::secondary_button(ui, tr("Add Model"), 96.0);
+            egui::Popup::menu(&add).show(|ui| {
+                for m in Model::cloud_presets() {
+                    if ui.button(format!("{} ({})", m.name, m.provider.label())).clicked() {
+                        push_model(ai, f, m);
                         ui.close();
                     }
+                }
+            });
+        }
+    });
+    if local {
+        status_line(ui, f, "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page.");
+    } else {
+        // A cloud model without its key can't run: say so here, where the model is.
+        let keys = f.get(KEYS).and_then(Value::as_object);
+        let missing: Vec<&str> = Provider::ALL
+            .into_iter()
+            .filter(|p| !p.is_local())
+            .filter(|p| ai.get("models").and_then(Value::as_array).is_some_and(|ms| ms.iter().any(|m| text_of_value(m, "provider") == p.key())))
+            .filter(|p| {
+                let saved = keys.and_then(|k| k.get(&format!("{}Saved", p.key()))).and_then(Value::as_bool).unwrap_or(false);
+                let typed = keys.is_some_and(|k| !text_of(k, p.key()).trim().is_empty());
+                !saved && !typed
+            })
+            .map(Provider::label)
+            .collect();
+        if missing.is_empty() {
+            ui.label(RichText::new(tr("Cloud models are billed by their provider for each image.")).color(t.text_faint).size(11.0));
+        } else {
+            ui.label(RichText::new(format!("{}: {}", tr("No API key yet (add it on the API Keys page)"), missing.join(", "))).color(t.warning).size(11.5));
+        }
+    }
+    ui.add_space(6.0);
+
+    let mut models = ai.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
+    let shown: Vec<usize> = models.iter().enumerate().filter(|(_, m)| m.is_object() && is_local_model(m) == local).map(|(i, _)| i).collect();
+    // The selection is an index into all models; on a page without it, the page's first.
+    let mut selected = f.get(SELECTED).and_then(Value::as_u64).map(|i| i as usize).filter(|i| shown.contains(i)).or_else(|| shown.first().copied());
+    if shown.is_empty() {
+        let hint = if local { "No local models yet. Use Scan Server, or add one." } else { "No cloud models yet. Add one, then its API key." };
+        ui.label(RichText::new(tr(hint)).color(t.text_faint));
+        ai.insert("models".into(), Value::Array(models));
+        return;
+    }
+    let files = f.get(FILES).and_then(Value::as_object).cloned();
+    let mut remove = None;
+    ui.horizontal_top(|ui| {
+        // ----- the list -----
+        ui.vertical(|ui| {
+            ui.set_width(LIST_WIDTH);
+            egui::ScrollArea::vertical().id_salt(("ai-model-list", local)).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+                for &i in &shown {
+                    let Some(m) = models.get_mut(i).and_then(Value::as_object_mut) else { continue };
+                    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click());
+                    let on = selected == Some(i);
+                    if on {
+                        ui.painter().rect_filled(rect, t.radius_sm, t.row_selected);
+                    } else if resp.hovered() {
+                        ui.painter().rect_filled(rect, t.radius_sm, t.hover);
+                    }
+                    if resp.clicked() {
+                        selected = Some(i);
+                    }
+                    let side = |x: f32| egui::Rect::from_min_size(egui::pos2(x, rect.top()), vec2(22.0, rect.height()));
+                    let mut check =
+                        ui.new_child(egui::UiBuilder::new().max_rect(side(rect.left() + 4.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                    let mut enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                    widgets::checkbox(&mut check, &mut enabled, "").on_hover_text(tr("Show in the AI Gen panel"));
+                    m.insert("enabled".into(), json!(enabled));
+                    // The delete button shows on the row in use, so a long list stays quiet.
+                    if on || resp.hovered() {
+                        let mut bin =
+                            ui.new_child(egui::UiBuilder::new().max_rect(side(rect.right() - 24.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
+                        if crate::icons::button(&mut bin, "trash", 20.0, false, tr("Remove this model")).clicked() {
+                            remove = Some(i);
+                        }
+                    }
+                    let name = text_of(m, "name");
+                    let color = if enabled { t.text } else { t.text_faint };
+                    let mut job = egui::text::LayoutJob::simple_singleline(name.clone(), egui::FontId::proportional(12.5), color);
+                    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.width() - 56.0).max(20.0));
+                    let galley = ui.painter().layout_job(job);
+                    let elided = galley.elided;
+                    ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.center().y - galley.size().y / 2.0), galley, color);
+                    if elided {
+                        resp.on_hover_text(name);
+                    }
+                }
+            });
+        });
+        widgets::vline(ui, PANE_HEIGHT);
+        // ----- the selected model -----
+        ui.vertical(|ui| {
+            egui::ScrollArea::vertical().id_salt(("ai-model-settings", local)).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+                if let Some(m) = selected.and_then(|i| models.get_mut(i)).and_then(Value::as_object_mut) {
+                    model_settings(ui, m, files.as_ref(), selected.unwrap_or(0));
                 }
             });
         });
     });
-    ui.add_space(2.0);
-    let mut models = ai.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
-    let mut selected = f.get(SELECTED).and_then(Value::as_u64).unwrap_or(0) as usize;
-    if models.is_empty() {
-        ui.label(RichText::new(tr("No models yet. Connect to ComfyUI and use Detect Models, or add one.")).color(t.text_faint));
-    }
-    let mut remove = None;
-    for (i, m) in models.iter_mut().enumerate() {
-        let Some(m) = m.as_object_mut() else { continue };
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click());
-        if i == selected {
-            ui.painter().rect_filled(rect, t.radius_sm, t.row_selected);
-        } else if resp.hovered() {
-            ui.painter().rect_filled(rect, t.radius_sm, t.hover);
-        }
-        if resp.clicked() {
-            selected = i;
-        }
-        let mut row = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(6.0, 0.0))).layout(egui::Layout::left_to_right(egui::Align::Center)));
-        let mut enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-        widgets::checkbox(&mut row, &mut enabled, "").on_hover_text(tr("Show in the AI Gen panel"));
-        m.insert("enabled".into(), json!(enabled));
-        let local = text_of(m, "provider") == Provider::Comfy.key();
-        crate::icons::paint(
-            &row,
-            egui::Rect::from_center_size(row.cursor().left_center() + vec2(8.0, 0.0), vec2(16.0, 16.0)),
-            if local { "image" } else { "cloud" },
-            14.0,
-            t.icon,
-        );
-        row.add_space(20.0);
-        let kind = if local {
-            Family::from_key(&text_of(m, "family")).map_or("", Family::label).to_string()
-        } else {
-            Provider::ALL.into_iter().find(|p| p.key() == text_of(m, "provider")).map_or("", Provider::label).to_string()
-        };
-        row.label(RichText::new(text_of(m, "name")).color(if enabled { t.text } else { t.text_faint }));
-        row.label(RichText::new(kind).color(t.text_faint).size(11.0));
-        row.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if crate::icons::button(ui, "trash", 20.0, false, tr("Remove this model")).clicked() {
-                remove = Some(i);
-            }
-        });
-    }
     if let Some(i) = remove.filter(|i| *i < models.len()) {
         models.remove(i);
-        if selected >= i {
-            selected = selected.saturating_sub(1);
-        }
-    }
-    selected = selected.min(models.len().saturating_sub(1));
-
-    // ----- the selected model's parameters -----
-    if let Some(m) = models.get_mut(selected).and_then(Value::as_object_mut) {
-        ui.add_space(8.0);
-        widgets::hairline(ui);
-        ui.add_space(6.0);
-        let provider = Provider::ALL.into_iter().find(|p| p.key() == text_of(m, "provider")).unwrap_or_default();
-        egui::Grid::new(("ai-model", selected)).num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-            text_row(ui, m, "name", "Name", "");
-            if provider.is_local() {
-                label(ui, "Architecture");
-                let mut family = Family::from_key(&text_of(m, "family")).unwrap_or_default();
-                let options: Vec<(Family, &str)> = Family::ALL.into_iter().map(|x| (x, x.label())).collect();
-                widgets::dropdown(ui, "ai-family", &mut family, &options, 180.0);
-                m.insert("family".into(), json!(family.key()));
-                ui.end_row();
-                if family == Family::Custom {
-                    label(ui, "Workflow");
-                    let mut text = text_of(m, "workflow");
-                    ui.vertical(|ui| {
-                        ui.add(egui::TextEdit::multiline(&mut text).desired_rows(5).desired_width(300.0).font(egui::TextStyle::Monospace).hint_text("{ \"1\": { \"class_type\": … } }"));
-                        ui.label(
-                            RichText::new(tr("ComfyUI › Workflow › Export (API). Use %prompt%, %negative%, %width%, %height%, %seed%, %steps% and %cfg% where those values go."))
-                                .color(t.text_faint)
-                                .size(11.0),
-                        );
-                    });
-                    m.insert("workflow".into(), json!(text));
-                    ui.end_row();
-                } else if family.uses_checkpoint() {
-                    file_row(ui, m, "checkpoint", "Checkpoint", folder("checkpoints"), false);
-                } else {
-                    file_row(ui, m, "unet", "Diffusion model", folder("diffusion_models"), false);
-                    if family == Family::Ideogram4 {
-                        file_row(ui, m, "unet2", "Unconditional model", folder("diffusion_models"), true);
-                    }
-                    let encoders = [("clip", "Text encoder"), ("clip2", "Text encoder 2"), ("clip3", "Text encoder 3"), ("clip4", "Text encoder 4")];
-                    for (key, title) in encoders.into_iter().take(family.text_encoders()) {
-                        file_row(ui, m, key, title, folder("text_encoders"), false);
-                    }
-                    file_row(ui, m, "vae", "VAE", folder("vae"), false);
-                }
-                if family != Family::Custom {
-                    if !family.uses_checkpoint() || family == Family::Checkpoint {
-                        file_row(ui, m, "lora", "LoRA", folder("loras"), true);
-                        if !text_of(m, "lora").is_empty() {
-                            number_row(ui, m, "loraStrength", "LoRA strength", -4.0..=4.0, false, "");
-                        }
-                    }
-                    choice_row(ui, m, "sampler", "Sampler", &SAMPLERS);
-                    if family != Family::Flux2 {
-                        choice_row(ui, m, "scheduler", "Scheduler", &SCHEDULERS);
-                    }
-                }
-                number_row(ui, m, "steps", "Steps", 1.0..=200.0, true, "");
-                number_row(ui, m, "cfg", "CFG", 0.0..=30.0, false, "Classifier-free guidance. 1 turns it off (distilled and turbo models)");
-                if family.has_guidance() {
-                    number_row(ui, m, "guidance", "Guidance", 0.0..=30.0, false, "FLUX distilled guidance. 0 leaves it out");
-                }
-                if family.has_shift() {
-                    let title = if family == Family::HidreamO1 { "Noise scale" } else { "Shift" };
-                    number_row(ui, m, "shift", title, 0.0..=30.0, false, "Model sampling shift. 0 uses the model's own");
-                }
-                number_row(ui, m, "seed", "Seed", -1.0..=281_474_976_710_655.0, true, "-1 uses a new random seed each time");
-                text_row(ui, m, "negativePrompt", "Negative prompt", tr("Used when CFG is above 1"));
-                number_row(ui, m, "megapixels", "Render size (MP)", 0.0..=16.0, false, "The model renders at about this many megapixels in the selection's shape, then the result is fitted to the selection. 0 renders at the selection's own size");
-            } else {
-                label(ui, "Provider");
-                ui.label(RichText::new(provider.label()).color(t.text));
-                ui.end_row();
-                text_row(ui, m, "apiModel", "Model ID", if provider == Provider::Openai { "gpt-image-2.5-sunburst" } else { "gemini-3-pro-image-preview" });
-                if provider == Provider::Openai {
-                    choice_row(ui, m, "quality", "Quality", &["auto", "low", "medium", "high", "xhigh", "max"]);
-                    number_row(ui, m, "megapixels", "Render size (MP)", 0.0..=8.0, false, "About this many megapixels in the selection's shape (models that take any size). 0 follows the selection");
-                } else {
-                    choice_row(ui, m, "imageSize", "Image size", &["1K", "2K", "4K"]);
-                }
-            }
-            label(ui, "");
-            let mut alpha = m.get("alpha").and_then(Value::as_bool).unwrap_or(false);
-            widgets::checkbox(ui, &mut alpha, tr("Supports a transparent background")).on_hover_text(tr("Enables the Alpha Channel box in the AI Gen panel for this model"));
-            m.insert("alpha".into(), json!(alpha));
-            ui.end_row();
-        });
+        // Stay near where the removed model was: the next of this kind, else the previous.
+        let after: Vec<usize> = models.iter().enumerate().filter(|(_, m)| m.is_object() && is_local_model(m) == local).map(|(i, _)| i).collect();
+        selected = after.iter().copied().find(|x| *x >= i).or_else(|| after.last().copied());
     }
     ai.insert("models".into(), Value::Array(models));
-    f.insert(SELECTED.into(), json!(selected));
-    obj.insert("ai".into(), Value::Object(ai));
+    if let Some(i) = selected {
+        f.insert(SELECTED.into(), json!(i));
+    }
+}
+
+fn text_of_value(v: &Value, key: &str) -> String {
+    v.get(key).and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+/// The settings of one model (`m` is its object in the draft; `files` the server's lists).
+fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&Map<String, Value>>, index: usize) {
+    let t = Tokens::get(ui.ctx());
+    let folder = |name: &str| files.and_then(|f| f.get(name)).and_then(Value::as_array);
+    let provider = Provider::ALL.into_iter().find(|p| p.key() == text_of(m, "provider")).unwrap_or_default();
+    let group = |ui: &mut egui::Ui, title: &str| {
+        ui.label(RichText::new(tr(title)).font(crate::theme::medium(11.5)).color(t.text_faint));
+        ui.label("");
+        ui.end_row();
+    };
+    egui::Grid::new(("ai-model", index)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
+        text_row(ui, m, "name", "Name", "");
+        if provider.is_local() {
+            label(ui, "Architecture");
+            let mut family = Family::from_key(&text_of(m, "family")).unwrap_or_default();
+            let options: Vec<(Family, &str)> = Family::ALL.into_iter().map(|x| (x, x.label())).collect();
+            widgets::dropdown(ui, "ai-family", &mut family, &options, FIELD);
+            m.insert("family".into(), json!(family.key()));
+            ui.end_row();
+
+            group(ui, "Files");
+            if family == Family::Custom {
+                label(ui, "Workflow");
+                let mut text = text_of(m, "workflow");
+                ui.vertical(|ui| {
+                    ui.set_max_width(FIELD + 8.0);
+                    ui.add(egui::TextEdit::multiline(&mut text).desired_rows(6).desired_width(FIELD).font(egui::TextStyle::Monospace).hint_text("{ \"1\": { \"class_type\": … } }"));
+                    ui.label(
+                        RichText::new(tr("ComfyUI › Workflow › Export (API). Use %prompt%, %negative%, %width%, %height%, %seed%, %steps% and %cfg% where those values go."))
+                            .color(t.text_faint)
+                            .size(11.0),
+                    );
+                });
+                m.insert("workflow".into(), json!(text));
+                ui.end_row();
+            } else if family.uses_checkpoint() {
+                file_row(ui, m, "checkpoint", "Checkpoint", folder("checkpoints"), false);
+            } else {
+                file_row(ui, m, "unet", "Diffusion model", folder("diffusion_models"), false);
+                if family == Family::Ideogram4 {
+                    file_row(ui, m, "unet2", "Unconditional", folder("diffusion_models"), true);
+                }
+                let encoders = [("clip", "Text encoder"), ("clip2", "Text encoder 2"), ("clip3", "Text encoder 3"), ("clip4", "Text encoder 4")];
+                for (key, title) in encoders.into_iter().take(family.text_encoders()) {
+                    file_row(ui, m, key, title, folder("text_encoders"), false);
+                }
+                file_row(ui, m, "vae", "VAE", folder("vae"), false);
+            }
+            if family != Family::Custom && (!family.uses_checkpoint() || family == Family::Checkpoint) {
+                file_row(ui, m, "lora", "LoRA", folder("loras"), true);
+                if !text_of(m, "lora").is_empty() {
+                    number_row(ui, m, "loraStrength", "LoRA strength", -4.0..=4.0, false, "");
+                }
+            }
+
+            group(ui, "Sampling");
+            if family != Family::Custom {
+                choice_row(ui, m, "sampler", "Sampler", &SAMPLERS);
+                if family != Family::Flux2 {
+                    choice_row(ui, m, "scheduler", "Scheduler", &SCHEDULERS);
+                }
+            }
+            number_row(ui, m, "steps", "Steps", 1.0..=200.0, true, "");
+            number_row(ui, m, "cfg", "CFG", 0.0..=30.0, false, "Classifier-free guidance. 1 turns it off (distilled and turbo models)");
+            if family.has_guidance() {
+                number_row(ui, m, "guidance", "Guidance", 0.0..=30.0, false, "FLUX distilled guidance. 0 leaves it out");
+            }
+            if family.has_shift() {
+                let title = if family == Family::HidreamO1 { "Noise scale" } else { "Shift" };
+                number_row(ui, m, "shift", title, 0.0..=30.0, false, "Model sampling shift. 0 uses the model's own");
+            }
+            number_row(ui, m, "seed", "Seed", -1.0..=281_474_976_710_655.0, true, "-1 uses a new random seed each time");
+            text_row(ui, m, "negativePrompt", "Negative prompt", tr("Used when CFG is above 1"));
+
+            group(ui, "Output");
+            number_row(ui, m, "megapixels", "Render size (MP)", 0.0..=16.0, false, "The model renders at about this many megapixels in the selection's shape, then the result is fitted to the selection. 0 renders at the selection's own size");
+        } else {
+            label(ui, "Provider");
+            ui.label(RichText::new(provider.label()).color(t.text));
+            ui.end_row();
+            text_row(ui, m, "apiModel", "Model ID", if provider == Provider::Openai { "gpt-image-2.5-sunburst" } else { "gemini-3-pro-image-preview" });
+            group(ui, "Output");
+            if provider == Provider::Openai {
+                choice_row(ui, m, "quality", "Quality", &["auto", "low", "medium", "high", "xhigh", "max"]);
+                number_row(ui, m, "megapixels", "Render size (MP)", 0.0..=8.0, false, "About this many megapixels in the selection's shape (models that take any size). 0 follows the selection");
+            } else {
+                choice_row(ui, m, "imageSize", "Image size", &["1K", "2K", "4K"]);
+            }
+        }
+        label(ui, "Transparency");
+        let mut alpha = m.get("alpha").and_then(Value::as_bool).unwrap_or(false);
+        widgets::checkbox(ui, &mut alpha, tr("Can generate it")).on_hover_text(tr("The model can return a transparent background. Enables the Alpha Channel box in the AI Gen panel for it"));
+        m.insert("alpha".into(), json!(alpha));
+        ui.end_row();
+    });
 }
 
 /// Preferences opened: note which providers already have a key (never the keys themselves).

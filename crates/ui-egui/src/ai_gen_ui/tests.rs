@@ -56,7 +56,9 @@ fn draw_panel(app: &mut PhotocraftApp) {
 fn draw_section(f: &mut Map<String, Value>) {
     let ctx = egui::Context::default();
     PhotocraftApp::setup_context(&ctx, Default::default());
-    for _ in 0..3 {
+    let before = f.get(PAGE).cloned();
+    for page in PAGES.iter().map(|(key, _)| *key).cycle().take(PAGES.len() * 3) {
+        f.insert(PAGE.into(), json!(page));
         ctx.run_ui(Default::default(), |ui| {
             let mut values = f.get("values").cloned().unwrap();
             let obj = values.get_mut("integrations").and_then(Value::as_object_mut).unwrap();
@@ -66,6 +68,12 @@ fn draw_section(f: &mut Map<String, Value>) {
         .textures_delta
         .clear();
     }
+    // Leave the dialog on the page it was on (drawing the local page may ask to read the server).
+    match before {
+        Some(page) => f.insert(PAGE.into(), page),
+        None => f.remove(PAGE),
+    };
+    f.remove(ACTION);
 }
 
 fn dialog_fields(app: &mut PhotocraftApp) -> (u64, Map<String, Value>) {
@@ -245,6 +253,51 @@ fn the_settings_page_edits_the_draft() {
         f.insert(SELECTED.into(), json!(99));
         draw_section(&mut f);
     }
+}
+
+#[test]
+fn the_gear_opens_the_models_own_page_and_each_page_selects_its_own_kind() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true) });
+    add_model(&mut app, z_image("z2"));
+    let fields = |app: &mut PhotocraftApp, model: &str| {
+        let id = open_settings(app, model);
+        app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone()
+    };
+    let f = fields(&mut app, "gpt");
+    assert_eq!((f[PAGE].as_str(), f[SELECTED].as_u64()), (Some("cloud"), Some(1)));
+    let mut f = fields(&mut app, "z2");
+    assert_eq!((f[PAGE].as_str(), f[SELECTED].as_u64()), (Some("local"), Some(2)));
+    // The cloud page doesn't show a local model as selected: it takes its first model.
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    f.insert(PAGE.into(), json!("cloud"));
+    for _ in 0..2 {
+        ctx.run_ui(Default::default(), |ui| {
+            let mut values = f.get("values").cloned().unwrap();
+            prefs_section(ui, values.get_mut("integrations").and_then(Value::as_object_mut).unwrap(), &mut f);
+            f.insert("values".into(), values);
+        })
+        .textures_delta
+        .clear();
+    }
+    assert_eq!(f[SELECTED], 1);
+    // The local page reads a server on this machine once, without being asked.
+    let mut f = fields(&mut app, "z");
+    f.remove(ACTION);
+    ctx.run_ui(Default::default(), |ui| {
+        let mut values = f.get("values").cloned().unwrap();
+        prefs_section(ui, values.get_mut("integrations").and_then(Value::as_object_mut).unwrap(), &mut f);
+    })
+    .textures_delta
+    .clear();
+    assert_eq!(f.get(ACTION), Some(&json!("connect")));
+    after_body(&mut app, &mut f);
+    assert!(f.get(FILES).is_some() && f.get(ACTION).is_none());
+    // An unknown page falls back to the first.
+    f.insert(PAGE.into(), json!("nope"));
+    draw_section(&mut f);
 }
 
 #[test]
