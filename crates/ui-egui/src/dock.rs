@@ -27,7 +27,7 @@ use crate::widgets;
 pub enum Group {
     /// Color | Swatches | Gradients | Patterns.
     Color,
-    /// Properties | Adjustments.
+    /// Properties | Adjustments | AI Gen.
     Properties,
     /// Character | Paragraph (not in the default workspace; Window › Character opens it, #150).
     Character,
@@ -102,7 +102,7 @@ impl Group {
             // Photoshop Essentials: Color | Swatches | Gradients | Patterns.
             Group::Color if pro => &["Color", "Swatches", "Gradients", "Patterns"],
             Group::Color => &["Swatches", "Color", "Gradients", "Patterns"],
-            Group::Properties => &["Properties", "Adjustments"],
+            Group::Properties => &["Properties", "Adjustments", "AI Gen"],
             Group::Character => &["Character", "Paragraph"],
             Group::Navigator => &["Navigator", "Histogram", "Info"],
             Group::History => &["History", "Actions", "Layer Comps"],

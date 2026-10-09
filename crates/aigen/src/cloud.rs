@@ -1,0 +1,285 @@
+//! Cloud image models: requests for the OpenAI and Gemini image APIs, and their answers.
+
+use base64::Engine;
+use serde_json::{Value, json};
+
+use crate::comfy::clip;
+use crate::http::Request;
+use crate::model::{Model, Provider};
+use crate::run::Job;
+use crate::size::{nearest_ratio, render_size};
+use crate::{Error, Result};
+
+const OPENAI_URL: &str = "https://api.openai.com/v1/images/generations";
+const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+
+/// Aspect ratios the Gemini image models accept.
+const GEMINI_RATIOS: [(u32, u32); 10] = [(1, 1), (2, 3), (3, 2), (3, 4), (4, 3), (4, 5), (5, 4), (9, 16), (16, 9), (21, 9)];
+
+fn api_model(model: &Model) -> Result<&str> {
+    let id = model.api_model.trim();
+    // The id becomes part of a URL (Gemini): keep it to what model ids are made of.
+    if id.is_empty() || id.len() > 100 || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':')) {
+        return Err(Error::Config(format!("{}: `{id}` is not a model id (Preferences › Integrations)", model.name)));
+    }
+    Ok(id)
+}
+
+fn key_of<'a>(model: &Model, key: &'a str) -> Result<&'a str> {
+    let key = key.trim();
+    if key.is_empty() || key.chars().any(|c| c.is_control()) {
+        return Err(Error::Config(format!("{} needs an API key: add it in Preferences › Integrations", model.provider.label())));
+    }
+    Ok(key)
+}
+
+/// The `size` asked of an OpenAI model for a `width` × `height` selection.
+pub fn openai_size(model: &Model, width: u32, height: u32) -> (u32, u32) {
+    let id = model.api_model.trim();
+    if id.starts_with("dall-e") {
+        return nearest_ratio(width, height, &[(1024, 1024), (1792, 1024), (1024, 1792)]).unwrap_or((1024, 1024));
+    }
+    if id.starts_with("gpt-image-1") {
+        return nearest_ratio(width, height, &[(1024, 1024), (1536, 1024), (1024, 1536)]).unwrap_or((1024, 1024));
+    }
+    // GPT Image 2 and later take any size with edges in multiples of 16, an aspect ratio up to
+    // 3:1 and between about 0.66 and 8.3 megapixels.
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let aspect = (w / h).clamp(1.0 / 3.0, 3.0);
+    let (w, h) = ((1000.0 * aspect) as u32, 1000);
+    let mp = if model.megapixels.is_finite() && model.megapixels > 0.0 { model.megapixels } else { f64::from(width.max(1)) * f64::from(height.max(1)) / 1e6 };
+    let (rw, rh) = render_size(w, h, mp.clamp(0.75, 8.0), 16);
+    (rw.min(3840), rh.min(3840))
+}
+
+/// The request that renders `job` with an OpenAI image model.
+pub fn openai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64) -> Result<Request> {
+    let id = api_model(model)?;
+    let key = key_of(model, key)?;
+    let (w, h) = openai_size(model, job.width, job.height);
+    let mut body = json!({"model": id, "prompt": job.prompt, "n": 1, "size": format!("{w}x{h}")});
+    if id.starts_with("dall-e") {
+        body["response_format"] = json!("b64_json");
+    } else {
+        body["output_format"] = json!("png");
+        let quality = model.quality.trim();
+        if matches!(quality, "low" | "medium" | "high") {
+            body["quality"] = json!(quality);
+        }
+        if job.alpha && model.alpha {
+            body["background"] = json!("transparent");
+        }
+    }
+    Ok(Request::post_json(OPENAI_URL, body.to_string().into_bytes()).header("Authorization", &format!("Bearer {key}")).timeout(timeout_seconds))
+}
+
+/// The supported aspect ratio closest to a `width` × `height` selection.
+pub fn gemini_ratio(width: u32, height: u32) -> (u32, u32) {
+    nearest_ratio(width, height, &GEMINI_RATIOS).unwrap_or((1, 1))
+}
+
+/// The request that renders `job` with a Gemini image model.
+pub fn gemini_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64) -> Result<Request> {
+    let id = api_model(model)?;
+    let key = key_of(model, key)?;
+    let (rw, rh) = gemini_ratio(job.width, job.height);
+    let mut image = json!({"aspectRatio": format!("{rw}:{rh}")});
+    let size = model.image_size.trim();
+    // The 2.5 models render at one size and reject the field.
+    if matches!(size, "1K" | "2K" | "4K") && !id.starts_with("gemini-2") {
+        image["imageSize"] = json!(size);
+    }
+    let body = json!({
+        "contents": [{"parts": [{"text": job.prompt}]}],
+        "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": image},
+    });
+    Ok(Request::post_json(format!("{GEMINI_URL}/{id}:generateContent"), body.to_string().into_bytes()).header("x-goog-api-key", key).timeout(timeout_seconds))
+}
+
+fn decode(b64: &str, who: &str) -> Result<Vec<u8>> {
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(b64.trim().as_bytes())
+        .map_err(|_| Error::BadResponse(format!("{who} returned an image that could not be decoded")))?;
+    if bytes.is_empty() {
+        return Err(Error::BadResponse(format!("{who} returned an empty image")));
+    }
+    Ok(bytes)
+}
+
+/// The provider's error message, with a hint for the statuses users can fix.
+fn api_error(provider: Provider, status: u16, v: &Value) -> Error {
+    let who = provider.label();
+    let msg = v.get("error").and_then(|e| e.get("message").and_then(Value::as_str).or_else(|| e.as_str())).map(|m| clip(m, 400));
+    let hint = match status {
+        401 | 403 => " (check the API key in Preferences › Integrations)",
+        404 => " (check the model id in Preferences › Integrations)",
+        429 => " (rate limit or quota reached)",
+        _ => "",
+    };
+    Error::Server(match msg {
+        Some(m) => format!("{who}: {m}{hint}"),
+        None => format!("{who} answered HTTP {status}{hint}"),
+    })
+}
+
+fn json_of(provider: Provider, status: u16, body: &[u8]) -> Result<Value> {
+    let v: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) if (200..300).contains(&status) => return Err(Error::BadResponse(format!("{}'s answer was not JSON", provider.label()))),
+        Err(_) => Value::Null,
+    };
+    if !(200..300).contains(&status) || v.get("error").is_some() {
+        return Err(api_error(provider, status, &v));
+    }
+    Ok(v)
+}
+
+/// The image bytes in an OpenAI image answer.
+pub fn parse_openai(status: u16, body: &[u8]) -> Result<Vec<u8>> {
+    let v = json_of(Provider::Openai, status, body)?;
+    let b64 = v
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|d| d.first())
+        .and_then(|d| d.get("b64_json"))
+        .and_then(Value::as_str)
+        .ok_or_else(|| Error::BadResponse("OpenAI returned no image".into()))?;
+    decode(b64, "OpenAI")
+}
+
+/// The image bytes in a Gemini `generateContent` answer.
+pub fn parse_gemini(status: u16, body: &[u8]) -> Result<Vec<u8>> {
+    let v = json_of(Provider::Gemini, status, body)?;
+    let candidate = v.get("candidates").and_then(Value::as_array).and_then(|c| c.first());
+    let parts = candidate.and_then(|c| c.get("content")).and_then(|c| c.get("parts")).and_then(Value::as_array);
+    let data = parts.into_iter().flatten().find_map(|p| p.get("inlineData").or_else(|| p.get("inline_data"))?.get("data")?.as_str());
+    if let Some(b64) = data {
+        return decode(b64, "Gemini");
+    }
+    // No image: a safety block, or the model answered in words.
+    let reason = v
+        .get("promptFeedback")
+        .and_then(|f| f.get("blockReason"))
+        .or_else(|| candidate.and_then(|c| c.get("finishReason")))
+        .and_then(Value::as_str)
+        .map(|r| format!(" ({})", clip(r, 80)));
+    let said = parts.into_iter().flatten().find_map(|p| p.get("text")?.as_str()).map(|t| format!(": {}", clip(t, 200)));
+    Err(Error::Server(format!("Gemini returned no image{}{}", reason.unwrap_or_default(), said.unwrap_or_default())))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn job(w: u32, h: u32, alpha: bool) -> Job {
+        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha }
+    }
+
+    fn body(r: &Request) -> Value {
+        serde_json::from_slice(&r.body).unwrap()
+    }
+
+    #[test]
+    fn openai_requests() {
+        let m = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
+        let r = openai_request(&m, &job(1920, 1080, true), " sk-test ", 120).unwrap();
+        assert_eq!(r.url, OPENAI_URL);
+        assert!(r.headers.contains(&("Authorization".into(), "Bearer sk-test".into())));
+        assert_eq!(r.timeout_seconds, 120);
+        let b = body(&r);
+        assert_eq!(b["model"], "gpt-image-2");
+        assert_eq!(b["prompt"], "a \"red\" frog");
+        assert_eq!(b["output_format"], "png");
+        // Asked for alpha, but this model has none: the field would be an API error.
+        assert!(b.get("background").is_none());
+        assert!(b.get("quality").is_none());
+        let (w, h) = b["size"].as_str().unwrap().split_once('x').map(|(w, h)| (w.parse::<u32>().unwrap(), h.parse::<u32>().unwrap())).unwrap();
+        assert_eq!((w % 16, h % 16), (0, 0));
+        assert!(w > h && w * h >= 655_360, "{w}x{h}");
+        // The key never shows up in a debug print of the request.
+        assert!(!format!("{r:?}").contains("sk-test"));
+
+        let mut m = Model::cloud(Provider::Openai, "GPT Image 1.5", "gpt-image-1.5", true);
+        m.quality = "high".into();
+        let b = body(&openai_request(&m, &job(600, 900, true), "k", 60).unwrap());
+        assert_eq!(b["size"], "1024x1536");
+        assert_eq!(b["background"], "transparent");
+        assert_eq!(b["quality"], "high");
+        assert!(body(&openai_request(&m, &job(600, 900, false), "k", 60).unwrap()).get("background").is_none());
+    }
+
+    #[test]
+    fn openai_sizes_stay_within_the_api_limits() {
+        let mut m = Model::cloud(Provider::Openai, "x", "gpt-image-2", false);
+        for mp in [0.0, 0.01, 1.0, 4.0, 100.0, f64::NAN] {
+            m.megapixels = mp;
+            for (w, h) in [(1, 1), (16, 16), (5000, 100), (100, 5000), (8000, 8000), (u32::MAX, 1), (0, 0)] {
+                let (rw, rh) = openai_size(&m, w, h);
+                let ratio = f64::from(rw.max(rh)) / f64::from(rw.min(rh));
+                assert!(rw <= 3840 && rh <= 3840 && rw % 16 == 0 && rh % 16 == 0 && ratio <= 3.1, "{w}x{h}@{mp} -> {rw}x{rh}");
+                assert!(u64::from(rw) * u64::from(rh) >= 655_360, "{w}x{h}@{mp} -> {rw}x{rh}");
+            }
+        }
+    }
+
+    #[test]
+    fn gemini_requests() {
+        let m = Model::cloud(Provider::Gemini, "Nano Banana Pro", "gemini-3-pro-image-preview", false);
+        let r = gemini_request(&m, &job(1920, 1080, false), "g-key", 90).unwrap();
+        assert_eq!(r.url, "https://generativelanguage.googleapis.com/v1beta/models/gemini-3-pro-image-preview:generateContent");
+        assert!(r.headers.contains(&("x-goog-api-key".into(), "g-key".into())));
+        assert!(!r.url.contains("g-key"));
+        let b = body(&r);
+        assert_eq!(b["contents"][0]["parts"][0]["text"], "a \"red\" frog");
+        assert_eq!(b["generationConfig"]["imageConfig"], json!({"aspectRatio": "16:9", "imageSize": "1K"}));
+        let old = Model::cloud(Provider::Gemini, "Nano Banana", "gemini-2.5-flash-image", false);
+        assert_eq!(body(&gemini_request(&old, &job(500, 500, false), "k", 90).unwrap())["generationConfig"]["imageConfig"], json!({"aspectRatio": "1:1"}));
+    }
+
+    #[test]
+    fn bad_keys_and_model_ids_are_config_errors() {
+        let m = Model::cloud(Provider::Openai, "x", "gpt-image-2", false);
+        for key in ["", "   ", "a\nb"] {
+            assert!(matches!(openai_request(&m, &job(9, 9, false), key, 9), Err(Error::Config(s)) if s.contains("API key")));
+        }
+        for id in ["", "a/b", "x?key=1", "../models", "a b"] {
+            let m = Model::cloud(Provider::Gemini, "x", id, false);
+            assert!(matches!(gemini_request(&m, &job(9, 9, false), "k", 9), Err(Error::Config(_))), "{id}");
+        }
+    }
+
+    #[test]
+    fn openai_answers() {
+        assert_eq!(parse_openai(200, br#"{"data":[{"b64_json":"aGVsbG8="}]}"#).unwrap(), b"hello");
+        let e = parse_openai(401, br#"{"error":{"message":"Incorrect API key provided","type":"invalid_request_error"}}"#).unwrap_err().to_string();
+        assert!(e.contains("Incorrect API key") && e.contains("check the API key"), "{e}");
+        assert!(parse_openai(500, b"<html>oops").unwrap_err().to_string().contains("HTTP 500"));
+        assert!(parse_openai(429, b"").unwrap_err().to_string().contains("quota"));
+        for bad in [
+            &b"{}"[..],
+            br#"{"data":[]}"#,
+            br#"{"data":[{"url":"https://x"}]}"#,
+            br#"{"data":[{"b64_json":"***"}]}"#,
+            br#"{"data":[{"b64_json":""}]}"#,
+            b"nope",
+            b"[]",
+        ] {
+            assert!(matches!(parse_openai(200, bad), Err(Error::BadResponse(_))), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    #[test]
+    fn gemini_answers() {
+        let ok = br#"{"candidates":[{"content":{"parts":[{"text":"Here you go"},{"inlineData":{"mimeType":"image/png","data":"aGVsbG8="}}]}}]}"#;
+        assert_eq!(parse_gemini(200, ok).unwrap(), b"hello");
+        let blocked = br#"{"candidates":[{"finishReason":"IMAGE_SAFETY","content":{"parts":[{"text":"I can't make that"}]}}]}"#;
+        let e = parse_gemini(200, blocked).unwrap_err().to_string();
+        assert!(e.contains("IMAGE_SAFETY") && e.contains("I can't make that"), "{e}");
+        let e = parse_gemini(400, br#"{"error":{"code":400,"message":"API key not valid","status":"INVALID_ARGUMENT"}}"#).unwrap_err().to_string();
+        assert!(e.contains("API key not valid"), "{e}");
+        assert!(parse_gemini(404, b"{}").unwrap_err().to_string().contains("model id"));
+        for bad in [&b"{}"[..], br#"{"candidates":[]}"#, br#"{"candidates":[{"content":{"parts":7}}]}"#, b"[]", b"null"] {
+            assert!(parse_gemini(200, bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+}

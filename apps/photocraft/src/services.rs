@@ -127,6 +127,12 @@ pub fn prefs_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("preferences.json"))
 }
 
+/// The cloud AI API keys (Preferences › Integrations), in a file of their own so they never
+/// travel with the preferences.
+pub fn ai_keys_file() -> Option<PathBuf> {
+    config_dir().map(|d| d.join("ai-keys.json"))
+}
+
 /// The brush preset store (one file per preset group plus tip bitmaps; see
 /// `photocraft_engine::preset_store`).
 pub fn presets_dir() -> Option<PathBuf> {
@@ -298,6 +304,8 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         }),
         load_prefs: Some(Box::new(|| std::fs::read_to_string(prefs_file()?).ok())),
         save_prefs: Some(Box::new(|text: &str| write_atomic(&prefs_file().ok_or("no config directory")?, text.as_bytes()))),
+        load_ai_keys: Some(Box::new(|| std::fs::read_to_string(ai_keys_file()?).ok())),
+        save_ai_keys: Some(Box::new(|text: &str| write_atomic(&ai_keys_file().ok_or("no config directory")?, text.as_bytes()))),
         append_text: Some(Box::new(|path: &str, text: &str| {
             use std::io::Write;
             let mut f = std::fs::OpenOptions::new().create(true).append(true).open(path).map_err(|e| e.to_string())?;

@@ -108,6 +108,7 @@ pub fn load(app: &mut PhotocraftApp) {
     {
         app.ui.status = format!("Preferences were reset: {e}");
     }
+    crate::ai_gen_ui::load_keys(app);
     crate::dock::restore(app);
     app.sync_recent();
     app.prefs_rt.saved_rev = app.session.prefs.rev();
@@ -713,7 +714,13 @@ pub fn open_preferences(app: &mut PhotocraftApp, section: &str) -> u64 {
     let section = if SECTIONS.iter().any(|(id, _)| *id == section) { section } else { "general" };
     let working = preference_values(app.session.prefs());
     let order = field_order(app.session.prefs(), &working);
-    open_kind(app, "prefs", "Preferences", json!({"section": section, "values": working, "__order": order}))
+    let id = open_kind(app, "prefs", "Preferences", json!({"section": section, "values": working, "__order": order}));
+    let mut ai = Map::new();
+    crate::ai_gen_ui::prefs_opened(app, &mut ai);
+    if let Some(d) = app.ui.dialog_mut(id) {
+        d.fields.extend(ai);
+    }
+    id
 }
 
 /// Each section's keys in declaration order (JSON objects sort their keys; the serialised text
@@ -783,6 +790,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
         "prefs" => {
             f.insert("__gpuInfo".into(), json!(app.perf.gpu_info.lines()));
             prefs_body(ui, f);
+            crate::ai_gen_ui::after_body(app, f);
         }
         "shortcuts" => shortcuts_body(app, ui, f),
         "presets" => presets_body(app, ui, f),
@@ -901,7 +909,9 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
             let title = SECTIONS.iter().find(|(id, _)| *id == section).map_or("General", |(_, t)| *t);
             ui.label(RichText::new(tl!(&title)).font(crate::theme::semibold(14.0)).color(t.text));
             ui.add_space(6.0);
-            egui::ScrollArea::vertical().max_height(390.0).id_salt("prefs-scroll").show(ui, |ui| {
+            // Integrations lists models above the selected one's parameters: give it more room.
+            let max_height = if section == "integrations" { 560.0 } else { 390.0 };
+            egui::ScrollArea::vertical().max_height(max_height).id_salt(("prefs-scroll", section == "integrations")).show(ui, |ui| {
                 let order: Vec<String> =
                     f.get("__order").and_then(|o| o.get(&section)).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 if !has_visible_fields(&values, &section) {
@@ -912,9 +922,14 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
                     if section == "performance" {
                         gpu_status_rows(ui, f.get("__gpuInfo"), obj);
                     }
+                    if section == "integrations" {
+                        crate::ai_gen_ui::prefs_section(ui, obj, f);
+                    }
                     ui.add_space(8.0);
                 }
+                // Integrations holds the user's model list: no one-click reset for that.
                 if has_visible_fields(&values, &section)
+                    && section != "integrations"
                     && crate::widgets::secondary_button(ui, tl!("Reset Section"), 110.0).clicked()
                     && let Some(def) = prefs::Preferences::default().get(&section)
                 {
@@ -1403,7 +1418,9 @@ pub fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<Value,
     match f.get("__prefsui").and_then(Value::as_str).unwrap_or("") {
         "prefs" => {
             let values = f.get("values").cloned().unwrap_or(Value::Null);
-            app.run("prefs.set", json!({"path": "", "value": values}))
+            let r = app.run("prefs.set", json!({"path": "", "value": values}))?;
+            crate::ai_gen_ui::prefs_confirmed(app, f)?;
+            Ok(r)
         }
         "shortcuts" => {
             let overrides = f.get("overrides").cloned().unwrap_or(json!({}));
@@ -1550,7 +1567,9 @@ mod tests {
                     missing.push(title.to_string());
                 }
                 let Some(obj) = v.get(sec).and_then(Value::as_object) else { continue };
-                for k in obj.keys() {
+                // Nested objects (`integrations.ai`) have their own editor; the generic one, which
+                // shows these labels, skips them.
+                for k in obj.iter().filter(|(_, value)| !value.is_object()).map(|(k, _)| k) {
                     let mut labels = vec![humanize(k)];
                     labels.extend(prefs::choices(&format!("{sec}.{k}")).into_iter().flatten().map(|c| choice_label(c)));
                     missing.extend(labels.into_iter().filter(|l| !crate::i18n::has(lang, l)));
@@ -1833,7 +1852,7 @@ mod tests {
         assert!(has_visible_fields(&values, "general"));
         assert!(has_visible_fields(&values, "fileHandling"));
         // Every setting of these sections is still unimplemented.
-        for section in ["type", "integrations", "scratchDisks"] {
+        for section in ["type", "scratchDisks"] {
             assert!(!has_visible_fields(&values, section), "{section}");
         }
         // Rotate View with Trackpad is live; the other Enhanced Controls rows stay hidden.

@@ -186,7 +186,30 @@ pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), Automati
     {
         return Err(command_error(id));
     }
+    if reconfigures_ai_endpoints(id, params) {
+        return Err(AutomationError::BadRequest(format!(
+            "automation command `{id}` would change where AI generation sends requests or which API key it uses; the user sets those in Preferences"
+        )));
+    }
     Ok(())
+}
+
+/// Generating (`ai.generate`) is open to automation: it reaches only the server and providers the
+/// user set up. Choosing them is not: an agent that could set the ComfyUI address, an API key or
+/// a model's workflow could send the user's prompts, keys or requests to a host of its choosing.
+fn reconfigures_ai_endpoints(id: &str, params: &Value) -> bool {
+    let integrations = |path: &str| path.split('.').find(|segment| !segment.is_empty()) == Some("integrations");
+    match id {
+        "ai.setKey" => true,
+        // Without `url` it asks the configured server; with one, any host.
+        "ai.comfyModels" => params.get("url").is_some(),
+        "prefs.set" => {
+            params.get("path").and_then(Value::as_str).is_some_and(integrations)
+                || params.get("values").and_then(Value::as_object).is_some_and(|values| values.keys().any(|path| integrations(path)))
+        }
+        "prefs.reset" => params.get("path").or_else(|| params.get("section")).and_then(Value::as_str).is_some_and(integrations),
+        _ => false,
+    }
 }
 
 /// Desktop sessions may already contain user-configured ambient colour-profile
@@ -284,6 +307,38 @@ fn command_error(id: &str) -> AutomationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automation_may_generate_but_not_choose_ai_endpoints_or_keys() {
+        use serde_json::json;
+        for (id, params) in [
+            ("ai.generate", json!({"prompt": "a frog", "model": "z"})),
+            ("ai.models", json!({})),
+            ("ai.keys", json!({})),
+            ("ai.comfyModels", json!({})),
+            ("prefs.set", json!({"path": "cursors.painting", "value": "precise"})),
+            ("prefs.get", json!({"path": "integrations.ai"})),
+        ] {
+            assert!(authorize_engine_command(id, &params).is_ok(), "{id} {params}");
+            assert!(authorize_desktop_engine_command(id, &params).is_ok(), "{id} {params}");
+        }
+        for (id, params) in [
+            ("ai.setKey", json!({"provider": "openai", "key": "sk-x"})),
+            ("ai.setKey", json!({})),
+            ("ai.comfyModels", json!({"url": "http://attacker.example"})),
+            ("ai.comfyModels", json!({"url": null})),
+            ("prefs.set", json!({"path": "integrations.ai.comfyUrl", "value": "http://attacker.example"})),
+            ("prefs.set", json!({"path": ".integrations.ai.models", "value": []})),
+            ("prefs.set", json!({"path": "integrations", "value": {}})),
+            ("prefs.set", json!({"values": {"cursors.painting": "precise", "integrations.ai.comfyUrl": "http://x"}})),
+            ("prefs.reset", json!({"path": "integrations"})),
+            ("prefs.reset", json!({"section": "integrations.ai"})),
+        ] {
+            let e = authorize_engine_command(id, &params).unwrap_err().to_string();
+            assert!(e.contains(id), "{id} {params}: {e}");
+            assert!(authorize_engine_step(id, &params).is_err(), "{id} {params}");
+        }
+    }
 
     fn roots(name: &str) -> (PathBuf, PathBuf, AuthorizedWorkspace) {
         let base = std::env::temp_dir().join(format!("photocraft-workspace-{}-{name}", std::process::id()));

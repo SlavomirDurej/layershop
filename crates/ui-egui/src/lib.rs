@@ -19,6 +19,7 @@ pub mod adjust_dialog;
 pub mod adjust_editors;
 pub mod adjust_preview;
 pub mod adjust_ui;
+pub mod ai_gen_ui;
 pub mod analysis_ui;
 pub mod artboard_ui;
 pub(crate) mod blend_preview;
@@ -272,6 +273,10 @@ pub struct Services {
     /// the web (see `prefs_ui`).
     pub load_prefs: Option<LoadTextFn>,
     pub save_prefs: Option<SaveTextFn>,
+    /// The cloud AI API keys, kept apart from the preferences (see `ai_gen_ui`): preferences are
+    /// readable through `prefs.get`, keys must not be.
+    pub load_ai_keys: Option<LoadTextFn>,
+    pub save_ai_keys: Option<SaveTextFn>,
     /// The native window is connected directly to a Wayland compositor.
     pub is_wayland: bool,
     /// On Wayland, the shell command that starts this install under XWayland, where native file
@@ -1163,6 +1168,7 @@ impl eframe::App for PhotocraftApp {
             canvas::document_area(self, ui);
         });
         panels::properties_window(self, &ctx);
+        ai_gen_ui::window(self, &ctx);
         brush_panel::window(self, &ctx);
         preset_panels::windows(self, &ctx);
         type_panels_ui::windows(self, &ctx);

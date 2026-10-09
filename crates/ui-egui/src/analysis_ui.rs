@@ -504,7 +504,7 @@ pub fn options_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, tool: Tool) -> bo
 
 // ------------------------------------------------------------------ panels and dialogs
 
-fn float_frame(t: &Tokens) -> egui::Frame {
+pub(crate) fn float_frame(t: &Tokens) -> egui::Frame {
     egui::Frame::NONE
         .fill(t.card)
         .stroke(Stroke::new(1.0, t.card_border))

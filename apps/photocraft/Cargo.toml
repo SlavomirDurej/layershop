@@ -26,6 +26,8 @@ photocraft-codecs = { workspace = true }
 photocraft-io = { workspace = true }
 photocraft-format = { workspace = true }
 photocraft-automation = { workspace = true }
+# The HTTP transport for Window › AI Gen (ComfyUI and the cloud image APIs).
+photocraft-aigen = { workspace = true }
 photocraft-ui-egui = { workspace = true }
 # Pen tablet pressure/tilt on macOS and X11 (the workspace's one isolated unsafe helper crate).
 photocraft-tablet = { workspace = true }

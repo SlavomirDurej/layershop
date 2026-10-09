@@ -18,6 +18,8 @@ photocraft-gpu = { workspace = true }
 photocraft-engine = { workspace = true }
 photocraft-io = { workspace = true }
 photocraft-plugins = { workspace = true }
+# Model and settings types for Window › AI Gen and Preferences › Integrations.
+photocraft-aigen = { workspace = true }
 photocraft-algo = { workspace = true }
 photocraft-text = { workspace = true }
 photocraft-vector = { workspace = true }

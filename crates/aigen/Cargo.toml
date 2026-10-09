@@ -1,0 +1,21 @@
+[package]
+name = "photocraft-aigen"
+description = "Generative image back ends for PhotoCraft: ComfyUI workflows for local models, OpenAI and Gemini image APIs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = "0.22"
+
+# The blocking HTTP client behind `UreqTransport` (MIT OR Apache-2.0). Native only: the web build
+# has no transport, and generation reports that instead of failing to compile.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+ureq = { version = "3", default-features = false, features = ["rustls"] }

@@ -718,11 +718,14 @@ pub struct Integrations {
     pub allow_agent_control: bool,
     /// Default control port (0 = only when `--control` is given).
     pub control_port: u32,
+    /// Generative AI: the ComfyUI server and the local and cloud models set up for Window ›
+    /// AI Gen (see `ai_cmds`). API keys are not stored here.
+    pub ai: photocraft_aigen::Settings,
 }
 
 impl Default for Integrations {
     fn default() -> Self {
-        Self { allow_agent_control: true, control_port: 0 }
+        Self { allow_agent_control: true, control_port: 0, ai: photocraft_aigen::Settings::default() }
     }
 }
 
