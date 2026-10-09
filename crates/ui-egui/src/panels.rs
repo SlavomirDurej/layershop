@@ -1164,7 +1164,7 @@ fn dock_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, group: crate::dock::Gro
         (Group::Color, 0) => crate::swatches_ui::panel(app, ui),
         (Group::Color, _) => color_picker(app, ui),
         (Group::Properties, 0) => properties_body(app, ui),
-        (Group::Properties, crate::ai_gen_ui::TAB) => crate::ai_gen_ui::panel(app, ui),
+        (Group::Properties, crate::ai_gen_ui::TAB) => crate::ai_gen_ui::panel(app, ui, true),
         (Group::Properties, _) => adjustments_grid(app, ui),
         (Group::Character, tab) => crate::type_tool::character_panel(app, ui, tab == 1),
         (Group::Navigator, 0) => navigator(app, ui),

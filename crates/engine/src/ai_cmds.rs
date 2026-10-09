@@ -237,6 +237,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 "model": model_id,
                 "seed": image.seed,
                 "renderSize": [image.width, image.height],
+                // US dollars, when the provider reported what it billed (OpenAI).
+                "cost": image.cost,
             }))
         },
     )
@@ -313,7 +315,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds, else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,seed,renderSize}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds, else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,

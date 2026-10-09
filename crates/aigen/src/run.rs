@@ -22,7 +22,7 @@ pub struct Job {
 }
 
 /// An encoded image (PNG, JPEG or WebP, as the back end returned it).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Generated {
     pub bytes: Vec<u8>,
     /// The seed used (local models), for "render this one again".
@@ -30,6 +30,9 @@ pub struct Generated {
     /// The size the model was asked to render.
     pub width: u32,
     pub height: u32,
+    /// What the request cost in US dollars, when the provider reported the tokens it billed and
+    /// their rates are known (see [`crate::pricing`]).
+    pub cost: Option<f64>,
 }
 
 /// The caller's side of a running generation.
@@ -86,12 +89,13 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
             if (control.cancelled)() {
                 return Err(Error::Cancelled);
             }
-            let bytes = if model.provider == Provider::Openai {
-                cloud::parse_openai(response.status, &response.body)?
+            let (bytes, cost) = if model.provider == Provider::Openai {
+                let (bytes, usage) = cloud::parse_openai_with_usage(response.status, &response.body)?;
+                (bytes, usage.and_then(|u| crate::pricing::billed(&model.api_model, &u)))
             } else {
-                cloud::parse_gemini(response.status, &response.body)?
+                (cloud::parse_gemini(response.status, &response.body)?, None)
             };
-            Ok(Generated { bytes, seed: job.seed, width: size.0, height: size.1 })
+            Ok(Generated { bytes, seed: job.seed, width: size.0, height: size.1, cost })
         }
     }
 }
@@ -139,7 +143,7 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
             if !r.ok() || r.body.is_empty() {
                 return Err(Error::Server(format!("ComfyUI could not serve the generated image (HTTP {})", r.status)));
             }
-            return Ok(Generated { bytes: r.body, seed: job.seed, width, height });
+            return Ok(Generated { bytes: r.body, seed: job.seed, width, height, cost: None });
         }
     }
     let _ = transport.send(&Request::post_json(format!("{base}/interrupt"), b"{}".to_vec()).timeout(5));
@@ -294,6 +298,15 @@ mod tests {
         let m = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
         let g = generate(&fake, &settings(), &m, "sk-x", &job(), &control(&|| false)).unwrap();
         assert_eq!(g.bytes, b"hello");
+        // No usage in the answer: no cost claimed.
+        assert_eq!(g.cost, None);
+        let billed = Fake::new(|_, _| {
+            ok(
+                r#"{"data":[{"b64_json":"aGVsbG8="}],"usage":{"input_tokens":20,"output_tokens":1000,"input_tokens_details":{"text_tokens":20,"image_tokens":0}}}"#,
+            )
+        });
+        let cost = generate(&billed, &settings(), &m, "sk-x", &job(), &control(&|| false)).unwrap().cost.unwrap();
+        assert!((cost - (20.0 * 5.0 + 1000.0 * 30.0) / 1e6).abs() < 1e-12, "{cost}");
         assert_eq!(fake.urls().len(), 1);
         let e = generate(&fake, &settings(), &m, "", &job(), &control(&|| false)).unwrap_err().to_string();
         assert!(e.contains("API key"), "{e}");

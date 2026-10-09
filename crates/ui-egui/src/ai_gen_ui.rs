@@ -36,6 +36,8 @@ pub struct AiGenUi {
     pub prompt: String,
     /// Ask for a transparent background (models that support it).
     pub alpha: bool,
+    /// What the last generation cost in US dollars, when the provider reported it (OpenAI).
+    pub last_cost: Option<f64>,
     /// The floating panel is open. Only the themes that don't dock Properties (Studio, Classic)
     /// use it; in the Pro themes the panel is a tab of that dock group.
     pub floating: bool,
@@ -110,7 +112,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             ui.set_width(width);
             ui.set_max_width(width);
             close = crate::analysis_ui::title_row(ui, "AI Gen");
-            panel(app, ui);
+            panel(app, ui, false);
         });
     if close {
         app.ui.ai_gen.floating = false;
@@ -141,7 +143,17 @@ pub fn open_settings(app: &mut PhotocraftApp, model: &str) -> u64 {
 pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
     let ui = &app.ui.ai_gen;
     let params = json!({"model": ui.model, "prompt": ui.prompt, "alpha": ui.alpha});
-    crate::jobs_ui::run(app, GENERATE, params)
+    let result = crate::jobs_ui::run(app, GENERATE, params)?;
+    // Inline (no background jobs): the result is here already. A job reports through `finished`.
+    if result.get("pending").is_none() {
+        finished(app, &result);
+    }
+    Ok(result)
+}
+
+/// A generation ended with `result` (`ai.generate`'s): remember what it cost.
+pub fn finished(app: &mut PhotocraftApp, result: &Value) {
+    app.ui.ai_gen.last_cost = result.get("cost").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0);
 }
 
 /// The area a generation would fill, in pixels: the selection's bounds, else the canvas.
@@ -157,8 +169,14 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
     })
 }
 
-/// The AI Gen panel body.
-pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+/// Height of the prompt box when the panel has no height of its own to fill.
+const PROMPT_HEIGHT: f32 = 84.0;
+/// What the rows under the prompt need: spacing, the Generate row and two lines of notes.
+const BELOW_PROMPT: f32 = 6.0 + 32.0 + 3.0 + 34.0;
+
+/// The AI Gen panel body. With `fill` the prompt box takes the height the panel has left (the
+/// dock group: drag its edge and the prompt grows); without it the box has a fixed height.
+pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
     let t = Tokens::get(ui.ctx());
     let models = enabled_models(app);
     if models.is_empty() {
@@ -200,9 +218,17 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     // Prompt. ⌘/Ctrl+Return generates.
     let mut submit = false;
     ui.add_enabled_ui(!busy, |ui| {
-        let edit = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt).hint_text(tr("Describe what to generate…")).desired_rows(3).desired_width(width);
-        let resp = ui.add(edit);
-        submit = resp.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        let left = ui.available_height();
+        let height = if fill && left.is_finite() { (left - BELOW_PROMPT).clamp(40.0, 1200.0) } else { PROMPT_HEIGHT };
+        // A prompt longer than the box scrolls inside it instead of pushing Generate away.
+        egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+            let edit = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt)
+                .hint_text(tr("Describe what to generate…"))
+                .desired_width(width)
+                .min_size(vec2(width, height));
+            let resp = ui.add(edit);
+            submit = resp.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+        });
     });
     ui.add_space(6.0);
 
@@ -260,6 +286,11 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if let Some(note) = note {
         ui.label(RichText::new(note).color(t.text_faint).size(11.0));
     }
+    // OpenAI bills per image: what this one should cost, and what the last one did.
+    if current.provider == Provider::Openai {
+        let (text, tip) = price_note(app, &current);
+        ui.label(RichText::new(text).color(t.text_faint).size(11.0)).on_hover_text(tip);
+    }
     if job.is_none()
         && why.is_none()
         && (clicked || submit)
@@ -267,6 +298,31 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     {
         crate::notices::error(app, format!("{}: {e}", tr("AI Generate")));
     }
+}
+
+/// The price line for an OpenAI model, and its tooltip.
+fn price_note(app: &PhotocraftApp, model: &Model) -> (String, String) {
+    use photocraft_aigen::pricing;
+    let quality = if model.quality.trim().is_empty() { "auto" } else { model.quality.trim() };
+    let estimate = target_size(app).and_then(|(w, h, _)| pricing::estimate(model, w, h));
+    let mut text = match &estimate {
+        Some(e) => format!("{} {} ({quality})", tr("Est. cost"), e.label()),
+        None => match pricing::rates(&model.api_model) {
+            Some(r) => format!("{} ${} / 1M {} ({quality})", tr("No published price;"), r.image_output, tr("output tokens")),
+            None => tr("No published price for this model").to_string(),
+        },
+    };
+    if let Some(cost) = app.ui.ai_gen.last_cost {
+        text = format!("{text} · {} {}", tr("last"), pricing::format_usd(cost));
+    }
+    let mut tip = tr("From OpenAI's published image prices for this quality. The prompt adds a fraction of a cent.").to_string();
+    if estimate.is_some_and(|e| e.approximate) {
+        tip.push(' ');
+        tip.push_str(tr("≈: OpenAI publishes prices for three sizes of GPT Image 2 only, so other sizes and GPT Image 2.5 are estimated from those."));
+    }
+    tip.push(' ');
+    tip.push_str(tr("\"last\" is what the previous image was billed, from the tokens OpenAI reported."));
+    (text, tip)
 }
 
 /// Why Generate can't run now (shown under the disabled button), or `None`.

@@ -13,7 +13,8 @@ back end you set up, and places the answer on a new layer.
    **Detect Models** (adds a model for every text-to-image model file the server has), or add
    models by hand with **Add Local Model** / **Add Cloud Model**. Paste API keys for cloud models.
 2. **Window › AI Gen** — a tab next to Properties and Adjustments. Pick a model, write a prompt,
-   press **Generate** (or ⌘/Ctrl+Return in the prompt). The gear opens that model's settings.
+   press **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt box fills the height of the
+   panel: drag the edge of the dock group to make it taller. The gear opens that model's settings.
 3. The result is a new layer over the **selection's bounds** (the whole canvas without a
    selection). The selection becomes the layer's mask, so a lasso or feathered selection shapes
    the result and stays editable. One undo step; Esc or Cancel stops a running generation.
@@ -63,6 +64,15 @@ workflow needs a Save Image or Preview Image node.
 |---|---|---|
 | OpenAI | `gpt-image-2.5-sunburst` (most capable), `gpt-image-2.5-flare` (fast), `gpt-image-2`: any size. The deprecated `gpt-image-1.5` / `gpt-image-1` still work, with three fixed sizes | from the selection's shape and Render size (MP) |
 | Google Gemini | `gemini-3-pro-image-preview` (Nano Banana Pro), `gemini-3.1-flash-image-preview` (Nano Banana 2) | the closest supported aspect ratio at 1K / 2K / 4K |
+
+**Cost (OpenAI).** Under Generate the panel shows what the image should cost at the model's
+quality and the selection's size, and what the last one was billed (`Est. cost ≈ $0.041–$0.053
+(medium) · last $0.047`). The billed amount is exact: it comes from the tokens OpenAI reports in
+its answer. The estimate uses OpenAI's published figures, which cover the three sizes of the GPT
+Image 1 family and of GPT Image 2 at low, medium and high. OpenAI publishes no formula for other
+sizes and no figures for GPT Image 2.5 (only an interactive calculator), so those are marked
+`≈`, and `xhigh` / `max` show the token rate instead of a guess. `ai.generate` returns the billed
+`cost`. Rates live in `crates/aigen/src/pricing.rs`; update them when OpenAI's prices change.
 
 The **Model ID** is editable, so a newer model of the same API works without an update.
 

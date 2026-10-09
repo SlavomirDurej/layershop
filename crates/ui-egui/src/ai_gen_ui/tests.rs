@@ -47,7 +47,8 @@ fn draw_panel(app: &mut PhotocraftApp) {
     let ctx = egui::Context::default();
     PhotocraftApp::setup_context(&ctx, Default::default());
     for _ in 0..3 {
-        ctx.run_ui(Default::default(), |ui| panel(app, ui)).textures_delta.clear();
+        ctx.run_ui(Default::default(), |ui| panel(app, ui, true)).textures_delta.clear();
+        ctx.run_ui(Default::default(), |ui| panel(app, ui, false)).textures_delta.clear();
     }
 }
 
@@ -146,6 +147,30 @@ fn the_panel_draws_in_every_state() {
     }
     assert_eq!(target_size(&app), Some((20, 10, true)));
     assert_eq!(render_size(&z_image("z"), 500, 500), (1008, 1008));
+}
+
+#[test]
+fn openai_models_show_an_estimate_and_the_last_billed_cost() {
+    let mut app = app();
+    app.run("file.new", json!({"width": 600, "height": 600})).unwrap();
+    let flare = Model { quality: "medium".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true) };
+    let (text, tip) = price_note(&app, &flare);
+    assert_eq!(text, "Est. cost ≈ $0.041–$0.053 (medium)");
+    assert!(tip.contains("GPT Image 2.5"));
+    // A published size of a model with published prices: exact, no ≈.
+    let old = Model { quality: "high".into(), ..Model::cloud(Provider::Openai, "GPT Image 1.5", "gpt-image-1.5", true) };
+    assert_eq!(price_note(&app, &old).0, "Est. cost $0.133 (high)");
+    // A quality without published figures says so instead of guessing.
+    let max = Model { quality: "max".into(), ..flare.clone() };
+    assert!(price_note(&app, &max).0.starts_with("No published price; $30 / 1M output tokens"));
+    // The billed cost of the last generation follows it; a result without one clears it.
+    finished(&mut app, &json!({"layer": 1, "cost": 0.0534}));
+    assert!(price_note(&app, &flare).0.ends_with("· last $0.053"));
+    for junk in [json!({"cost": null}), json!({"cost": "free"}), json!({"cost": -1.0}), json!(null)] {
+        finished(&mut app, &junk);
+        assert_eq!(app.ui.ai_gen.last_cost, None, "{junk}");
+    }
+    assert!(crate::dock::Group::Properties.scrolls_itself(TAB));
 }
 
 #[test]

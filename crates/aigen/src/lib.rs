@@ -19,6 +19,7 @@ pub mod comfy;
 pub mod detect;
 mod http;
 pub mod model;
+pub mod pricing;
 mod run;
 pub mod size;
 

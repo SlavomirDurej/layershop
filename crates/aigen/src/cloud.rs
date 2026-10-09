@@ -136,6 +136,11 @@ fn json_of(provider: Provider, status: u16, body: &[u8]) -> Result<Value> {
 
 /// The image bytes in an OpenAI image answer.
 pub fn parse_openai(status: u16, body: &[u8]) -> Result<Vec<u8>> {
+    parse_openai_with_usage(status, body).map(|(bytes, _)| bytes)
+}
+
+/// [`parse_openai`], with the answer's `usage` object (the tokens billed) when it has one.
+pub fn parse_openai_with_usage(status: u16, body: &[u8]) -> Result<(Vec<u8>, Option<Value>)> {
     let v = json_of(Provider::Openai, status, body)?;
     let b64 = v
         .get("data")
@@ -144,7 +149,7 @@ pub fn parse_openai(status: u16, body: &[u8]) -> Result<Vec<u8>> {
         .and_then(|d| d.get("b64_json"))
         .and_then(Value::as_str)
         .ok_or_else(|| Error::BadResponse("OpenAI returned no image".into()))?;
-    decode(b64, "OpenAI")
+    Ok((decode(b64, "OpenAI")?, v.get("usage").filter(|u| u.is_object()).cloned()))
 }
 
 /// The image bytes in a Gemini `generateContent` answer.
