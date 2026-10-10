@@ -514,18 +514,21 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
 }
 
 /// What the last Connect / Detect said, or `hint` before there was one.
-fn status_line(ui: &mut egui::Ui, f: &Map<String, Value>, hint: &str) {
+fn status_line(ui: &mut egui::Ui, f: &Map<String, Value>, hint: &str, width: f32) {
     let t = Tokens::get(ui.ctx());
-    match f.get(STATUS).and_then(Value::as_object) {
+    let (text, color, size) = match f.get(STATUS).and_then(Value::as_object) {
         Some(status) => {
             let error = status.get("error").and_then(Value::as_bool).unwrap_or(false);
-            let text = status.get("text").and_then(Value::as_str).unwrap_or("");
-            ui.label(RichText::new(text).color(if error { t.danger } else { t.text_faint }).size(11.5));
+            (status.get("text").and_then(Value::as_str).unwrap_or("").to_string(), if error { t.danger } else { t.text_faint }, 11.5)
         }
-        None => {
-            ui.label(RichText::new(tr(hint)).color(t.text_faint).size(11.0));
-        }
-    }
+        None => (tr(hint).to_string(), t.text_faint, 11.0),
+    };
+    // Wrapped to the page (an error can be three sentences long: unwrapped it ran off the dialog
+    // and widened everything else with it) and selectable, so it can be copied.
+    ui.scope(|ui| {
+        ui.set_max_width(width);
+        ui.add(egui::Label::new(RichText::new(text).color(color).size(size)).wrap().selectable(true));
+    });
 }
 
 /// Local Server: where local models run, and how PhotoCraft starts it.
@@ -550,7 +553,7 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         });
         ui.end_row();
         label(ui, "");
-        status_line(ui, f, "The portable build of ComfyUI listens on port 8188, ComfyUI Desktop on port 8000.");
+        status_line(ui, f, "The portable build of ComfyUI listens on port 8188, ComfyUI Desktop on port 8000.", 420.0);
         ui.end_row();
         label(ui, "Give up after");
         let mut secs = ai.get("timeoutSeconds").and_then(Value::as_u64).unwrap_or(600);
@@ -713,7 +716,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         }
     });
     if local {
-        status_line(ui, f, "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page.");
+        status_line(ui, f, "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page.", 520.0);
     } else {
         // A cloud model without its key can't run: say so here, where the model is.
         let keys = f.get(KEYS).and_then(Value::as_object);
@@ -951,6 +954,21 @@ fn failed(f: &mut Map<String, Value>, why: &str) {
     f.insert(STATUS.into(), json!({"error": true, "text": why}));
 }
 
+/// A Connect / Scan / look failed. The look made when the page opens is not something the user
+/// asked for, so a server that isn't running is a note about what will happen, not an error.
+fn connect_failed(f: &mut Map<String, Value>, action: &str, why: &str) {
+    if action != "peek" {
+        return failed(f, why);
+    }
+    let autostart = draft(f).get("comfyAutostart").and_then(Value::as_bool).unwrap_or(false);
+    let text = if autostart {
+        tr("ComfyUI isn't running. PhotoCraft will start it when you generate or press Scan Server.")
+    } else {
+        tr("ComfyUI isn't running. Start it to pick files from lists, or set PhotoCraft up to start it on the Local Server page.")
+    };
+    f.insert(STATUS.into(), json!({"error": false, "text": text}));
+}
+
 /// After the dialog body: run what a button asked for (the body has no access to the app), and
 /// follow a Connect / Scan that is running in the background.
 pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
@@ -967,7 +985,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
                 f.remove(JOB);
                 match (j.state, j.result) {
                     ("done", Some(result)) => connected(f, &action, &result),
-                    (_, _) => failed(f, &j.error.unwrap_or_else(|| tr("Cancelled").to_string())),
+                    (_, _) => connect_failed(f, &action, &j.error.unwrap_or_else(|| tr("Cancelled").to_string())),
                 }
             }
             None => {
@@ -977,7 +995,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         return;
     }
     let Some(action) = f.remove(ACTION).and_then(|a| a.as_str().map(str::to_string)) else { return };
-    let mut settings = draft(f);
+    let settings = draft(f);
     match action.as_str() {
         "find" => match app.session.execute("ai.server.find", json!({"settings": settings})) {
             Ok(found) => {
@@ -1007,12 +1025,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         },
         _ => {
             // Opening the page only looks: it never starts a server.
-            if action == "peek"
-                && let Some(ai) = settings.as_object_mut()
-            {
-                ai.insert("comfyAutostart".into(), json!(false));
-            }
-            let params = json!({"settings": settings});
+            let params = json!({"settings": settings, "start": action != "peek"});
             // Starting ComfyUI takes a while: in the background where the app has jobs.
             let started = if app.background_jobs {
                 app.session.start("ai.comfyModels", params).map_err(|e| e.to_string())
@@ -1025,7 +1038,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
                     f.insert(JOB.into(), json!({"id": id.0, "action": action}));
                     f.insert(STATUS.into(), json!({"error": false, "text": tr("Connecting…")}));
                 }
-                Err(e) => failed(f, &e),
+                Err(e) => connect_failed(f, &action, &e),
             }
         }
     }

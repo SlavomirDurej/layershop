@@ -341,11 +341,27 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     assert_eq!(ai["comfyAutostart"], true);
     assert_eq!(f[STATUS]["error"], false);
     draw_section(&mut f);
-    // Opening the Local Models page only looks: it must not start a server.
+    // Opening the Local Models page only looks: it must not start a server, or even ask to.
+    let asked = server.ensured.lock().unwrap().len();
     f.insert(ACTION.into(), json!("peek"));
     after_body(&mut app, &mut f);
-    assert_eq!(server.ensured.lock().unwrap().last(), Some(&false));
+    assert_eq!(server.ensured.lock().unwrap().len(), asked);
     assert_eq!(f[STARTED], false);
+    // With no server there, that look leaves a note about what will happen, not an error.
+    let up = app.session.ai.transport.take();
+    f.insert(ACTION.into(), json!("peek"));
+    after_body(&mut app, &mut f);
+    assert_eq!(f[STATUS]["error"], false);
+    assert!(f[STATUS]["text"].as_str().unwrap().contains("PhotoCraft will start it"), "{}", f[STATUS]);
+    f["values"]["integrations"]["ai"]["comfyAutostart"] = json!(false);
+    f.insert(ACTION.into(), json!("peek"));
+    after_body(&mut app, &mut f);
+    assert!(f[STATUS]["text"].as_str().unwrap().contains("Local Server page"), "{}", f[STATUS]);
+    // A long status wraps inside the page instead of running off it.
+    f.insert(STATUS.into(), json!({"error": true, "text": "word ".repeat(120)}));
+    draw_section(&mut f);
+    f["values"]["integrations"]["ai"]["comfyAutostart"] = json!(true);
+    app.session.ai.transport = up;
     // Connect starts it (the draft says so), and says who did.
     f.insert(ACTION.into(), json!("connect"));
     after_body(&mut app, &mut f);

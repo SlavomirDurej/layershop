@@ -288,7 +288,8 @@ fn server_settings(s: &Session, p: &Value, cmd: &str) -> Result<Settings> {
 fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
     let settings = server_settings(s, p, "ai.comfyModels")?;
     let transport = transport(s)?;
-    let server = s.ai.server.clone();
+    // `"start": false` only looks: the Preferences page checks the server when it opens.
+    let server = s.ai.server.clone().filter(|_| p.get("start").and_then(Value::as_bool).unwrap_or(true));
     crate::jobs::run(
         s,
         "Connect to ComfyUI",
@@ -390,7 +391,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras:[file,…]},startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras:[file,…]},startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
             journal: false,

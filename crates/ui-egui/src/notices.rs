@@ -42,6 +42,11 @@ impl Notice {
         let args: Vec<(&str, &str)> = self.args.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
         crate::i18n::fmt(crate::i18n::t(s), &args)
     }
+
+    /// The whole notice as text (the title, then one line each), as the Copy button copies it.
+    pub fn plain_text(&self) -> String {
+        std::iter::once(self.text(&self.title)).chain(self.lines.iter().map(|l| self.text(l))).collect::<Vec<_>>().join("\n")
+    }
 }
 
 /// Show a notice (newest last); returns its id.
@@ -206,16 +211,24 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                         ui.set_width(340.0);
                         ui.horizontal(|ui| {
                             let title = egui::RichText::new(n.text(&n.title)).strong().color(if n.error { t.warning } else { t.text });
-                            ui.add(egui::Label::new(title).wrap());
+                            // The buttons first, so the title wraps in what they leave. The text is
+                            // selectable and there is a Copy button: an error is something to paste
+                            // into a search or a bug report, not to retype from a screenshot.
                             ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                                 if ui.add(egui::Button::new(egui::RichText::new("×").color(t.text_dim)).frame(false)).on_hover_text(tl!("Dismiss")).clicked() {
                                     dismiss_id = Some(n.id);
                                 }
+                                if crate::icons::button(ui, "copy", 18.0, false, tl!("Copy")).clicked() {
+                                    ui.ctx().copy_text(n.plain_text());
+                                }
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                    ui.add(egui::Label::new(title).wrap().selectable(true));
+                                });
                             });
                         });
                         for line in n.lines.iter().take(MAX_LINES) {
                             let line = n.text(line);
-                            ui.add(egui::Label::new(egui::RichText::new(format!("• {line}")).color(t.text_dim)).wrap());
+                            ui.add(egui::Label::new(egui::RichText::new(format!("• {line}")).color(t.text_dim)).wrap().selectable(true));
                         }
                         if n.lines.len() > MAX_LINES {
                             let text = crate::i18n::fmt(tl!("…and {n} more"), &[("n", &(n.lines.len() - MAX_LINES).to_string())]);
@@ -255,6 +268,28 @@ mod tests {
     use crate::{PhotocraftApp, Services};
     use photocraft_engine::Session;
     use std::sync::{Arc, Mutex};
+
+    #[test]
+    fn a_notice_copies_as_its_title_and_lines_and_draws_with_its_copy_button() {
+        let mut app = PhotocraftApp::new(Session::new(), Services::default());
+        app.ui.notices.clear();
+        error(&mut app, "AI Generate: ComfyUI is not running at http://127.0.0.1:8000.".into());
+        post(&mut app, "Opened {name} with 2 warnings", vec!["adjustment flattened".into(), "profile missing".into()], false, None);
+        app.ui.notices[1].args = vec![("name".into(), "a.psd".into())];
+        assert_eq!(app.ui.notices[0].plain_text(), "AI Generate: ComfyUI is not running at http://127.0.0.1:8000.");
+        assert_eq!(
+            app.ui.notices[1].plain_text(),
+            "Opened a.psd with 2 warnings
+adjustment flattened
+profile missing"
+        );
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, Default::default());
+        for _ in 0..3 {
+            ctx.run_ui(Default::default(), |ui| show(&mut app, ui.ctx())).textures_delta.clear();
+        }
+        assert_eq!(app.ui.notices.len(), 2);
+    }
 
     #[test]
     fn wayland_guidance_follows_language_changes_after_startup() {

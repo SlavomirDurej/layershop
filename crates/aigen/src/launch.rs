@@ -132,6 +132,34 @@ pub fn without_port(args: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Where the launch settings are, for messages.
+const WHERE: &str = "Preferences › AI Integrations › Local Server";
+
+/// Why nothing answers at `base` and what to do about it, given what the settings allow: the
+/// message for a generation that found no server and may not start one.
+pub fn not_running_message(settings: &Settings, base: &str) -> String {
+    let (_, local) = port_of(base);
+    let configured = !settings.comfy_launch.python.trim().is_empty() && !settings.comfy_launch.folder.trim().is_empty();
+    if !local {
+        return format!(
+            "ComfyUI is not answering at {base}. It is on another computer, so PhotoCraft can't start it: check that it is running there and reachable from here."
+        );
+    }
+    if settings.comfy_autostart {
+        // Asked to start it, but the app has no launcher (the web build).
+        return format!("ComfyUI is not running at {base}. Start ComfyUI, then try again.");
+    }
+    if configured {
+        format!(
+            "ComfyUI is not running at {base}, and starting it automatically is switched off. Start ComfyUI yourself, or switch on \"Start ComfyUI when a local model needs it\" in {WHERE}."
+        )
+    } else {
+        format!(
+            "ComfyUI is not running at {base}, and PhotoCraft is not set up to start it. Start ComfyUI yourself and try again. To have PhotoCraft start it from now on: with ComfyUI running, open {WHERE} and press Find Installation."
+        )
+    }
+}
+
 /// The address without a trailing slash, or the reason it can't be used to start a server.
 #[cfg(not(target_arch = "wasm32"))]
 fn local_base(settings: &Settings) -> Result<(String, u16)> {
@@ -196,12 +224,15 @@ mod native {
             let launch = &settings.comfy_launch;
             let python = launch.python.trim();
             let folder = launch.folder.trim();
-            let hint = "set it on the Local Server page of Preferences › Integrations (Find Installation fills it in while ComfyUI is running)";
+            let hint = format!("Start ComfyUI yourself, then open {WHERE} and press Find Installation to fill it in.");
+            if python.is_empty() && folder.is_empty() {
+                return Err(Error::Config(format!("Starting it is switched on, but its Python and folder are not set. {hint}")));
+            }
             if python.is_empty() || !Path::new(python).is_file() {
-                return Err(Error::Config(format!("ComfyUI's Python was not found at `{python}`: {hint}")));
+                return Err(Error::Config(format!("Its Python was not found at `{python}`. {hint}")));
             }
             if folder.is_empty() || !Path::new(folder).is_dir() {
-                return Err(Error::Config(format!("ComfyUI's folder `{folder}` does not exist: {hint}")));
+                return Err(Error::Config(format!("Its folder `{folder}` does not exist. {hint}")));
             }
             let mut args = without_port(split_args(&launch.args));
             if args.is_empty() {
@@ -253,13 +284,19 @@ mod native {
             if is_running(transport, &base) {
                 return Ok(());
             }
-            if !settings.comfy_autostart {
-                // Not ours to start: the request that follows reports that it isn't reachable.
-                return Ok(());
+            let (_, local) = port_of(&base);
+            if !settings.comfy_autostart || !local {
+                // Not ours to start: say so, and what would make it work.
+                return Err(Error::Network(not_running_message(settings, &base)));
             }
             let (base, port) = local_base(settings)?;
             if !self.alive() {
-                let child = self.spawn(settings, port)?;
+                // Lead with what happened: the reason alone ("Python was not found") reads like
+                // a broken install when ComfyUI simply wasn't open.
+                let child = self.spawn(settings, port).map_err(|e| match e {
+                    Error::Config(why) => Error::Config(format!("ComfyUI is not running at {base}, and PhotoCraft could not start it. {why}")),
+                    e => e,
+                })?;
                 *self.child() = Some(child);
             }
             let polls = STARTUP_SECONDS * 2;
@@ -502,9 +539,23 @@ mod tests {
         }
 
         #[test]
-        fn without_autostart_nothing_is_started() {
+        fn without_autostart_nothing_is_started_and_the_error_says_what_to_do() {
             let server = ComfyProcess::new(None);
-            server.ensure(&Fake(None), &settings(false), &control(&|| false)).unwrap();
+            // Not set up at all: start it yourself, and how to set it up.
+            let mut s = settings(false);
+            let e = server.ensure(&Fake(None), &s, &control(&|| false)).unwrap_err().to_string();
+            assert!(e.contains("not running at http://127.0.0.1:8000") && e.contains("not set up to start it") && e.contains("Find Installation"), "{e}");
+            // Set up but switched off: name the switch.
+            s.comfy_launch = Launch { python: "C:/comfy/python.exe".into(), folder: "C:/comfy".into(), args: "main.py".into() };
+            let e = server.ensure(&Fake(None), &s, &control(&|| false)).unwrap_err().to_string();
+            assert!(e.contains("switched off") && e.contains("Start ComfyUI when a local model needs it") && !e.contains("Find Installation"), "{e}");
+            // Another computer: nothing here can start it, whatever the switch says.
+            for autostart in [false, true] {
+                let mut remote = settings(autostart);
+                remote.comfy_url = "http://192.168.1.50:8188".into();
+                let e = server.ensure(&Fake(None), &remote, &control(&|| false)).unwrap_err().to_string();
+                assert!(e.contains("another computer"), "{e}");
+            }
             assert_eq!(server.state(), ServerState::NotStarted);
         }
 
@@ -512,13 +563,18 @@ mod tests {
         fn starting_needs_a_local_address_and_a_real_python() {
             let server = ComfyProcess::new(None);
             let mut s = settings(true);
+            // Switched on with nothing filled in: the whole story in one message.
             let e = server.ensure(&Fake(None), &s, &control(&|| false)).unwrap_err().to_string();
-            assert!(e.contains("Python was not found") && e.contains("Find Installation"), "{e}");
+            assert!(
+                e.contains("is not running at http://127.0.0.1:8000")
+                    && e.contains("could not start it")
+                    && e.contains("not set")
+                    && e.contains("Find Installation"),
+                "{e}"
+            );
             s.comfy_launch = Launch { python: "/no/such/python".into(), folder: "/no/such/folder".into(), args: "main.py".into() };
-            assert!(server.ensure(&Fake(None), &s, &control(&|| false)).unwrap_err().to_string().contains("Python was not found"));
-            s.comfy_url = "http://192.168.1.50:8188".into();
             let e = server.ensure(&Fake(None), &s, &control(&|| false)).unwrap_err().to_string();
-            assert!(e.contains("only start it on this computer"), "{e}");
+            assert!(e.contains("could not start it") && e.contains("Python was not found at `/no/such/python`"), "{e}");
             s.comfy_url = "not a url".into();
             assert!(server.ensure(&Fake(None), &s, &control(&|| false)).is_err());
             assert_eq!(server.state(), ServerState::NotStarted);
