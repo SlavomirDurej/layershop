@@ -72,7 +72,8 @@ fn latent_node(family: Family) -> &'static str {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Inpaint<'a> {
     pub image: &'a str,
-    pub mask: &'a str,
+    /// `None`: image to image. The whole picture is redrawn, as far from it as `denoise` says.
+    pub mask: Option<&'a str>,
     pub denoise: f64,
 }
 
@@ -101,7 +102,13 @@ pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Resu
 /// Can `model` run at all (and, with `inpainting`, repaint an image)? The error says what to fix.
 pub fn check(model: &Model, inpainting: bool) -> Result<()> {
     let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
-    build(model, &job, inpainting.then_some(&Inpaint { image: "image", mask: "mask", denoise: 1.0 })).map(|_| ())
+    build(model, &job, inpainting.then_some(&Inpaint { image: "image", mask: Some("mask"), denoise: 1.0 })).map(|_| ())
+}
+
+/// Can `model` redraw a picture (image to image)? The error says what to fix.
+pub fn check_img2img(model: &Model) -> Result<()> {
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
+    build(model, &job, Some(&Inpaint { image: "image", mask: None, denoise: 0.5 })).map(|_| ())
 }
 
 fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Value> {
@@ -114,7 +121,7 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         return Err(Error::Config(why));
     }
     let f = model.family;
-    if f.inpaint_only() && inpaint.is_none() {
+    if f.inpaint_only() && inpaint.is_none_or(|i| i.mask.is_none()) {
         let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
         return Err(Error::Config(format!("{name} is an inpainting model: it repaints a selection (the InPaint tab) and can't generate from a prompt alone")));
     }
@@ -180,10 +187,16 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
     }
     let denoise = inpaint.map_or(1.0, |i| finite(i.denoise, 1.0).clamp(0.0, 1.0));
     let latent = match inpaint {
-        Some(i) => {
-            let image = g.node("LoadImage", json!({"image": i.image}));
+        // Image to image: the picture itself is the latent the sampler starts from, and how
+        // much of its schedule it runs (the denoise) is how far it gets from it.
+        Some(Inpaint { image, mask: None, .. }) => {
+            let image = g.node("LoadImage", json!({"image": image}));
+            g.node("VAEEncode", json!({"pixels": image, "vae": vae}))
+        }
+        Some(Inpaint { image, mask: Some(mask), .. }) => {
+            let image = g.node("LoadImage", json!({"image": image}));
             // Load Image's second output is the mask: where the file is transparent.
-            let mask = json!([g.add("LoadImage", json!({"image": i.mask})), 1]);
+            let mask = json!([g.add("LoadImage", json!({"image": mask})), 1]);
             let encoded = g.node("VAEEncode", json!({"pixels": image, "vae": vae}));
             unet = g.node("DifferentialDiffusion", json!({"model": unet}));
             match f {
@@ -297,7 +310,7 @@ fn custom_workflow(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> R
         ("%prompt%", &job.prompt),
         ("%negative%", &model.negative_prompt),
         ("%image%", inpaint.map_or("", |i| i.image)),
-        ("%mask%", inpaint.map_or("", |i| i.mask)),
+        ("%mask%", inpaint.and_then(|i| i.mask).unwrap_or("")),
     ];
     substitute(&mut v, &numbers, &texts, 0);
     Ok(v)
@@ -658,7 +671,54 @@ mod tests {
         let _ = workflow(&m, &job());
     }
 
-    const INPAINT: Inpaint<'static> = Inpaint { image: "src.png", mask: "mask.png", denoise: 0.6 };
+    const INPAINT: Inpaint<'static> = Inpaint { image: "src.png", mask: Some("mask.png"), denoise: 0.6 };
+    const IMG2IMG: Inpaint<'static> = Inpaint { image: "src.png", mask: None, denoise: 0.6 };
+
+    #[test]
+    fn image_to_image_starts_from_the_encoded_picture_with_no_mask() {
+        for f in Family::ALL {
+            if f == Family::Custom {
+                continue;
+            }
+            let mut m = f.preset();
+            if f == Family::Checkpoint {
+                m.checkpoint = "sdxl.safetensors".into();
+            }
+            if f.inpaint_only() {
+                // A model made for inpainting needs a mask.
+                assert!(inpaint_workflow(&m, &job(), &IMG2IMG).unwrap_err().to_string().contains("inpainting model") && check_img2img(&m).is_err(), "{f:?}");
+                continue;
+            }
+            let w = inpaint_workflow(&m, &job(), &IMG2IMG).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+            assert_well_formed(&w);
+            let c = classes(&w);
+            assert_eq!(c.iter().filter(|x| *x == "LoadImage").count(), 1, "{f:?}");
+            for absent in ["SetLatentNoiseMask", "DifferentialDiffusion", "ReferenceLatent", "InpaintModelConditioning"] {
+                assert!(!c.iter().any(|x| x == absent) && !c.iter().any(|x| x.starts_with("Empty")), "{f:?}: {c:?}");
+            }
+            // The sampler's latent is the encoded picture.
+            let nodes = w.as_object().unwrap();
+            let sampler = nodes.values().find(|n| matches!(n["class_type"].as_str(), Some("KSampler" | "SamplerCustomAdvanced"))).unwrap();
+            let latent = &nodes[sampler["inputs"]["latent_image"][0].as_str().unwrap()];
+            assert_eq!(latent["class_type"], "VAEEncode", "{f:?}");
+            assert_eq!(nodes[latent["inputs"]["pixels"][0].as_str().unwrap()]["inputs"]["image"], "src.png", "{f:?}");
+            assert!(check_img2img(&m).is_ok());
+        }
+        // The strength reaches each kind of sampler.
+        assert_eq!(node(&inpaint_workflow(&Family::ZImage.preset(), &job(), &IMG2IMG).unwrap(), "KSampler")["inputs"]["denoise"], 0.6);
+        assert_eq!(node(&inpaint_workflow(&Family::Ideogram4.preset(), &job(), &IMG2IMG).unwrap(), "BasicScheduler")["inputs"]["denoise"], 0.6);
+        assert_eq!(node(&inpaint_workflow(&Family::Flux2.preset(), &job(), &IMG2IMG).unwrap(), "SplitSigmasDenoise")["inputs"]["denoise"], 0.6);
+        // A custom workflow gets the picture's name, and nothing for the mask.
+        let mut m = Model { family: Family::Custom, name: "Mine".into(), ..Model::default() };
+        m.workflow = r#"{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%"}},"2":{"class_type":"LoadImage","inputs":{"image":"%image%"}},
+            "3":{"class_type":"LoadImage","inputs":{"image":"%mask%"}},"4":{"class_type":"KSampler","inputs":{"denoise":"%denoise%"}}}"#
+            .into();
+        let w = inpaint_workflow(&m, &job(), &IMG2IMG).unwrap();
+        assert_eq!(
+            (w["2"]["inputs"]["image"].as_str(), w["3"]["inputs"]["image"].as_str(), w["4"]["inputs"]["denoise"].as_f64()),
+            (Some("src.png"), Some(""), Some(0.6))
+        );
+    }
 
     fn node<'a>(w: &'a Value, class: &str) -> &'a Value {
         w.as_object().unwrap().values().find(|n| n["class_type"] == class).unwrap_or_else(|| panic!("no {class} in {w}"))

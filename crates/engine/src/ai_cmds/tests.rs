@@ -389,9 +389,7 @@ fn inpainting_says_what_it_needs() {
     ] {
         assert!(s.execute("ai.generate", p.clone()).is_err(), "{p}");
     }
-    for mode in ["img2img", "imgEdit"] {
-        assert!(fails(&mut s, json!({"prompt": "x", "mode": mode})).contains("not available yet"));
-    }
+    assert!(fails(&mut s, json!({"prompt": "x", "mode": "imgEdit"})).contains("not available yet"));
     // A model switched off for inpainting, and one whose architecture can't.
     let models = [Model { id: "off".into(), inpaint: Some(false), ..Family::ZImage.preset() }, Model { id: "o1".into(), ..Family::HidreamO1.preset() }];
     s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": serde_json::to_value(&models).unwrap()})).unwrap();
@@ -516,4 +514,134 @@ fn a_dedicated_inpainting_model_gets_the_selection_as_its_mask_and_does_nothing_
     assert_eq!((alpha(160, 504), alpha(504, 850)), (255, 255));
     let d = s.active().unwrap();
     assert_eq!(d.doc.layer(d.active_layer.unwrap()).unwrap().name, "[flux.1_fill_dev] a pond");
+}
+
+#[test]
+fn image_to_image_redraws_a_layer_in_place() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = session(&fake);
+    let before = layer_count(&s);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    // No source named: the active layer, over its own pixels (here the whole canvas).
+    let r = s.execute("ai.generate", json!({"prompt": "as a watercolour", "mode": "img2img", "seed": 3})).unwrap();
+    assert_eq!((r["mode"].as_str(), r["bounds"].clone(), r["seed"].as_u64()), (Some("img2img"), json!([0, 0, 64, 48]), Some(3)));
+    assert_eq!(layer_count(&s), before + 1);
+    {
+        let d = s.active().unwrap();
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert_eq!(layer.name, "[z_image_turbo] as a watercolour");
+        assert!(layer.mask.is_none());
+        // Stretched back onto the area it came from, whatever shape the model answered in.
+        assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(0, 0, 64, 48));
+        assert_eq!(d.history.entries().last().map(String::as_str), Some(IMG2IMG_LABEL));
+    }
+    // The model got the picture and no mask, and is told to keep to it (strength 0.6 unasked).
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    assert_eq!((image.width(), image.height(), image.layout()), (1152, 864, ChannelLayout::Rgb));
+    assert!(image.data().iter().all(|b| *b == 255));
+    assert_eq!(fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/upload/image")).count(), 1);
+    let queued = fake.queued().to_string();
+    assert!(queued.contains("\"denoise\":0.6") && queued.contains("VAEEncode") && !queued.contains("SetLatentNoiseMask"), "{queued}");
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&s), before);
+    // With a selection: that part of the layer, and the selection masks the result.
+    s.execute("select.rect", json!({"x": 8, "y": 4, "width": 16, "height": 16})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"layer": background}, "strength": 0.3})).unwrap();
+    assert_eq!(r["bounds"], json!([8, 4, 16, 16]));
+    let d = s.active().unwrap();
+    assert!(d.doc.layer(d.active_layer.unwrap()).unwrap().mask.is_some());
+    assert!(fake.seen.lock().unwrap().iter().any(|(u, b)| u.ends_with("/prompt") && String::from_utf8_lossy(b).contains("\"denoise\":0.3")));
+}
+
+#[test]
+fn image_to_image_takes_another_open_document_fitted_to_the_area() {
+    let fake = FakeComfy::new(32, 32, [0, 0, 255, 255]);
+    let mut s = session(&fake);
+    let first = s.active().unwrap().doc.id.0;
+    // A second, taller document becomes the active one; the first (64 x 48, white) is the source.
+    s.execute("file.new", json!({"width": 30, "height": 60, "background": "transparent"})).unwrap();
+    assert_ne!(s.active().unwrap().doc.id.0, first);
+    let plan = img2img_plan(&s, Some(SourceRef::Document(first)), None).unwrap();
+    // Scaled to cover the 30 x 60 canvas and cropped to its shape: the middle 24 x 48 of the source.
+    assert_eq!((plan.area, plan.source_rect), (Rect::new(0, 0, 30, 60), Rect::new(20, 0, 44, 48)));
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"document": first}})).unwrap();
+    assert_eq!(r["bounds"], json!([0, 0, 30, 60]));
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().content_bounds(), Rect::new(0, 0, 30, 60));
+    // The source document's image (white), in the area's shape; the source itself is untouched.
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    assert!(image.height() == 2 * image.width() && image.data().iter().all(|b| *b == 255), "{}x{}", image.width(), image.height());
+    assert_eq!(s.documents().iter().find(|o| o.doc.id.0 == first).unwrap().doc.layers.len(), 1);
+    // The active document has only an empty layer: no layer to start from, the other document is
+    // what is offered, and it is the default.
+    let listed = s.execute("ai.sources", json!({})).unwrap();
+    assert_eq!(listed["sources"].as_array().unwrap().len(), 2, "{listed}");
+    assert_eq!(listed["sources"][1]["source"], json!({"document": first}));
+    assert!(listed["sources"][1]["name"].as_str().unwrap().starts_with("Document: "));
+    // (The generated layer is now the first source, and the default.)
+    assert_eq!(listed["sources"][0]["default"], true);
+}
+
+#[test]
+fn image_to_image_says_what_it_needs() {
+    let fake = FakeComfy::new(8, 8, [1, 2, 3, 255]);
+    let mut s = Session::new();
+    s.ai.transport = Some(fake.clone());
+    let models = [Model { id: "z".into(), ..Family::ZImage.preset() }, Model { id: "fill".into(), ..Family::Flux1Fill.preset() }];
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": serde_json::to_value(&models).unwrap()})).unwrap();
+    assert!(img2img_sources(&s).is_empty() && default_img2img_source(&s).is_none());
+    assert_eq!(s.execute("ai.sources", json!({})).unwrap(), json!({"sources": []}));
+    s.execute("file.new", json!({"width": 40, "height": 40, "background": "transparent"})).unwrap();
+    let fails = |s: &mut Session, p: Value| s.execute("ai.generate", p).unwrap_err().to_string();
+    // Nothing with pixels, and no other document.
+    let e = fails(&mut s, json!({"prompt": "x", "mode": "img2img"}));
+    assert!(e.contains("needs a picture to start from"), "{e}");
+    let empty = s.active().unwrap().active_layer.unwrap().0;
+    let e = fails(&mut s, json!({"prompt": "x", "mode": "img2img", "source": {"layer": empty}}));
+    assert!(e.contains("is empty"), "{e}");
+    // Sources that are not there, or not sources.
+    for (source, want) in [
+        (json!({"layer": 999_999}), "is not in this document"),
+        (json!({"document": 999_999}), "is not open"),
+        (json!({"layer": "top"}), "`source` must be"),
+        (json!({"file": "a.png"}), "`source` must be"),
+        (json!("layer"), "`source` must be"),
+        (json!(null), "`source` must be"),
+        (json!({"layer": -1}), "`source` must be"),
+    ] {
+        let e = fails(&mut s, json!({"prompt": "x", "mode": "img2img", "source": source}));
+        assert!(e.contains(want), "{source}: {e}");
+    }
+    // A layer with pixels, but the selection is off them.
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    s.execute("select.rect", json!({"x": 20, "y": 20, "width": 10, "height": 10})).unwrap();
+    let e = fails(&mut s, json!({"prompt": "x", "mode": "img2img"}));
+    assert!(e.contains("is empty inside the selection"), "{e}");
+    // Without the selection: the layer's own pixels are the area.
+    s.execute("select.deselect", json!({})).unwrap();
+    assert_eq!(img2img_plan(&s, None, None).unwrap().area, Rect::new(0, 0, 10, 10));
+    assert_eq!(s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img"})).unwrap()["bounds"], json!([0, 0, 10, 10]));
+    // A rect names the area; one off the canvas or off the pixels is refused.
+    assert!(s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"layer": empty}, "rect": [2, 2, 6, 6]})).is_ok());
+    for rect in [json!([500, 500, 10, 10]), json!([30, 30, 5, 5]), json!([0, 0, 0, 0]), json!("all")] {
+        assert!(s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"layer": empty}, "rect": rect})).is_err(), "{rect}");
+    }
+    // A model made for inpainting can't, and strength is a fraction.
+    assert!(fails(&mut s, json!({"prompt": "x", "mode": "img2img", "model": "fill"})).contains("inpainting model"));
+    assert!(s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "strength": 7})).is_err());
+}
+
+#[test]
+fn the_source_is_cropped_to_the_shape_of_the_area() {
+    let src = Rect::new(0, 0, 400, 200);
+    assert_eq!(cover_crop(src, 100, 100), Rect::new(100, 0, 300, 200));
+    assert_eq!(cover_crop(src, 400, 100), Rect::new(0, 50, 400, 150));
+    assert_eq!(cover_crop(src, 2, 1), src);
+    assert_eq!(cover_crop(Rect::new(10, 20, 110, 220), 3, 1), Rect::new(10, 103, 110, 136));
+    for (w, h) in [(0, 0), (1, u32::MAX), (u32::MAX, 1), (u32::MAX, u32::MAX)] {
+        let c = cover_crop(src, w, h);
+        assert!(!c.is_empty() && c.intersect(&src) == c, "{w}x{h}: {c:?}");
+    }
+    assert!(cover_crop(Rect::EMPTY, 4, 3).is_empty());
 }

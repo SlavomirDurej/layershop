@@ -3,7 +3,8 @@
 //!
 //! The panel picks a model, takes a prompt and runs the engine's `ai.generate` as a background
 //! job: the result lands on a new layer over the selection. Its tabs choose what the model works
-//! from ([`Mode`]): the prompt alone, or (InPaint) the selected part of the active layer. The settings page edits
+//! from ([`Mode`]): the prompt alone, (InPaint) the selected part of the active layer, or
+//! (Img2Img) a picture to redraw: a layer, or another open document. The settings page edits
 //! `integrations.ai` (the ComfyUI server, local and cloud models and their rendering parameters)
 //! in the Preferences dialog's draft, like every other section; API keys are saved apart from
 //! the preferences through [`crate::Services::save_ai_keys`].
@@ -13,6 +14,7 @@
 
 use egui::{RichText, vec2};
 use photocraft_aigen::{Family, Model, Provider, Settings};
+use photocraft_engine::ai_cmds::SourceRef;
 use photocraft_engine::jobs::JobInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -37,7 +39,7 @@ pub enum Mode {
     Txt2img,
     /// The selected part of the active layer is repainted.
     Inpaint,
-    /// Not available yet: the whole area, redrawn from what it holds.
+    /// A picture (a layer, or another open document) is redrawn, as closely as the strength says.
     Img2img,
     /// Not available yet: an edit model following an instruction.
     ImgEdit,
@@ -67,14 +69,15 @@ impl Mode {
 
     /// The engine can run it.
     pub fn available(self) -> bool {
-        matches!(self, Mode::Txt2img | Mode::Inpaint)
+        matches!(self, Mode::Txt2img | Mode::Inpaint | Mode::Img2img)
     }
 
     fn tip(self) -> &'static str {
         match self {
             Mode::Txt2img => "Generate an image from the prompt, into the selection or the whole canvas",
             Mode::Inpaint => "Repaint the selected part of the active layer: the model sees the layer around the selection and paints inside it",
-            Mode::Img2img | Mode::ImgEdit => "Not available yet",
+            Mode::Img2img => "Redraw a picture following the prompt: a layer of this document, or another open document. The result is a new layer",
+            Mode::ImgEdit => "Not available yet",
         }
     }
 }
@@ -94,6 +97,11 @@ pub struct AiGenUi {
     /// InPaint: how much of the layer around the selection the model is shown, as a fraction of
     /// the selection's longer edge.
     pub context: f64,
+    /// Img2Img: the picture to redraw (`None`: the active layer when it has pixels, else the
+    /// first that is offered).
+    pub img_source: Option<SourceRef>,
+    /// Img2Img: how far the result may depart from the picture, 0..=1.
+    pub img_strength: f64,
     pub prompt: String,
     /// Ask for a transparent background (models that support it).
     pub alpha: bool,
@@ -112,6 +120,8 @@ impl Default for AiGenUi {
             inpaint_model: String::new(),
             strength: 1.0,
             context: photocraft_engine::ai_cmds::DEFAULT_CONTEXT,
+            img_source: None,
+            img_strength: photocraft_engine::ai_cmds::DEFAULT_IMG2IMG_STRENGTH,
             prompt: String::new(),
             alpha: false,
             last_cost: None,
@@ -133,6 +143,10 @@ impl AiGenUi {
 
     fn strength(&self) -> f64 {
         if self.strength.is_finite() { self.strength.clamp(0.0, 1.0) } else { 1.0 }
+    }
+
+    fn img_strength(&self) -> f64 {
+        if self.img_strength.is_finite() { self.img_strength.clamp(0.0, 1.0) } else { photocraft_engine::ai_cmds::DEFAULT_IMG2IMG_STRENGTH }
     }
 
     fn context(&self) -> f64 {
@@ -286,6 +300,15 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
         Mode::Inpaint => {
             json!({"model": ui.chosen(), "prompt": ui.prompt, "mode": Mode::Inpaint.key(), "strength": ui.strength(), "context": ui.context()})
         }
+        Mode::Img2img => {
+            let mut params = json!({"model": ui.chosen(), "prompt": ui.prompt, "mode": Mode::Img2img.key(), "strength": ui.img_strength()});
+            // A source that is gone (its layer deleted, its document closed) is not asked for: the
+            // engine then takes the one the panel shows instead.
+            if let Some(source) = img_source(app) {
+                params["source"] = json!(source);
+            }
+            params
+        }
         _ => json!({"model": ui.chosen(), "prompt": ui.prompt, "alpha": ui.alpha}),
     };
     let result = crate::jobs_ui::run(app, GENERATE, params)?;
@@ -305,6 +328,11 @@ pub fn finished(app: &mut PhotocraftApp, result: &Value) {
 /// InPaint: the selection's bounds with the context around them, which is what the model renders.
 fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
     let d = app.session.active()?;
+    if app.ui.ai_gen.mode() == Mode::Img2img {
+        // Where the redrawn picture lands: the selection, the layer's pixels, or the canvas.
+        let plan = photocraft_engine::ai_cmds::img2img_plan(&app.session, img_source(app), None).ok()?;
+        return Some((plan.area.width(), plan.area.height(), d.doc.selection.is_some()));
+    }
     let canvas = d.doc.bounds();
     Some(match d.doc.selection.as_ref() {
         Some(sel) => {
@@ -334,7 +362,14 @@ const NOTE_SIZE: f32 = 11.0;
 /// own row as well.
 pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
-    rows + if app.ui.ai_gen.mode() == Mode::Inpaint { INPAINT_ROW } else { 0.0 }
+    rows + if app.ui.ai_gen.mode() == Mode::Txt2img { 0.0 } else { INPAINT_ROW }
+}
+
+/// The picture Img2Img would redraw: the one chosen while it is still on offer, else the
+/// engine's own default.
+fn img_source(app: &PhotocraftApp) -> Option<SourceRef> {
+    let offered = photocraft_engine::ai_cmds::img2img_sources(&app.session);
+    app.ui.ai_gen.img_source.filter(|s| offered.iter().any(|(o, _)| o == s)).or_else(|| photocraft_engine::ai_cmds::default_img2img_source(&app.session))
 }
 
 /// The AI Gen panel body. With `fill` the prompt box takes the height the panel has left (the
@@ -414,6 +449,30 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         open_settings(app, &chosen);
     }
     ui.add_space(6.0);
+    let img2img = mode == Mode::Img2img;
+    // Img2Img: the picture to redraw.
+    if img2img {
+        let offered = photocraft_engine::ai_cmds::img2img_sources(&app.session);
+        ui.add_enabled_ui(!busy && !offered.is_empty(), |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(tr("Source")).color(t.text_dim));
+                let left = (ui.available_width() - 2.0).max(80.0);
+                match img_source(app) {
+                    Some(mut source) => {
+                        let options: Vec<(SourceRef, &str)> = offered.iter().map(|(s, name)| (*s, name.as_str())).collect();
+                        widgets::dropdown(ui, "ai-gen-source", &mut source, &options, left);
+                        app.ui.ai_gen.img_source = Some(source);
+                    }
+                    None => {
+                        ui.label(RichText::new(tr("No layer with pixels, no other document")).color(t.text_faint));
+                    }
+                }
+            })
+            .response
+            .on_hover_text(tr("The picture to redraw. A layer of this document is redrawn where it is (in the selection, when there is one); another open document is fitted to the selection or the canvas"));
+        });
+        ui.add_space(6.0);
+    }
 
     // What goes under Generate, worked out first: the prompt box takes the height that is left,
     // so it has to know how tall the notes are (a reason Generate is off can be several lines).
@@ -423,12 +482,14 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         (None, Some(why)) => Some(why.clone()),
         (None, None) => target_size(app).map(|(w, h, selection)| {
             let (rw, rh) = if inpaint { photocraft_aigen::source_size(&current, w, h) } else { render_size(&current, w, h) };
-            let area = match (inpaint, selection) {
-                (true, _) => tr("Selection and context"),
-                (false, true) => tr("Selection"),
-                (false, false) => tr("Canvas"),
+            let (rw, rh) = if img2img { photocraft_aigen::source_size(&current, w, h) } else { (rw, rh) };
+            let area = match (inpaint, img2img, selection) {
+                (true, _, _) => tr("Selection and context"),
+                (_, _, true) => tr("Selection"),
+                (_, true, false) => tr("Area"),
+                (false, false, false) => tr("Canvas"),
             };
-            if current.provider == Provider::Gemini && !inpaint {
+            if current.provider == Provider::Gemini && !inpaint && !img2img {
                 format!("{area} {w} × {h} px → {rw}:{rh}, {}", current.image_size)
             } else {
                 format!("{area} {w} × {h} px → {rw} × {rh} px")
@@ -454,7 +515,11 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         // A prompt longer than the box scrolls inside it instead of pushing Generate away.
         egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             let edit = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt)
-                .hint_text(tr(if inpaint { "Describe what to paint in the selection…" } else { "Describe what to generate…" }))
+                .hint_text(tr(match mode {
+                    Mode::Inpaint => "Describe what to paint in the selection…",
+                    Mode::Img2img => "Describe what the picture should become…",
+                    _ => "Describe what to generate…",
+                }))
                 .desired_width(width)
                 .min_size(vec2(width, height));
             let resp = ui.add(edit);
@@ -503,6 +568,24 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 if widgets::secondary_button(ui, tr("Cancel"), 70.0).clicked() {
                     cancel = Some(job.id);
                 }
+            });
+        }
+        // Img2Img: how closely the picture is followed, in place of the alpha option.
+        None if img2img => {
+            // Cloud models are given the picture and the prompt, and no such control.
+            let local = current.provider.is_local();
+            ui.add_enabled_ui(local, |ui| {
+                ui.label(RichText::new(tr("Strength")).color(t.text_dim));
+                let mut v = (app.ui.ai_gen.img_strength() * 100.0) as f32;
+                widgets::value_field(ui, &mut v, 5.0..=100.0, "%", 64.0)
+                    .on_hover_text(tr("How far the result may depart from the picture. Low keeps its shapes and colours and changes the surface; high keeps little more than the composition; 100% ignores it"))
+                    .on_disabled_hover_text(tr("Cloud models are given the picture and the prompt, without a strength"));
+                if local {
+                    app.ui.ai_gen.img_strength = f64::from(v.round()) / 100.0;
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                clicked = ui.add_enabled_ui(why.is_none(), |ui| widgets::primary_button(ui, tr("Generate"), 96.0).clicked()).inner;
             });
         }
         // An inpainting fills what it repaints: there is no background to leave out.
@@ -599,6 +682,17 @@ fn generate_blocked(app: &PhotocraftApp, model: &Model) -> Option<String> {
         }
         if model.provider.is_local()
             && let Err(why) = photocraft_aigen::comfy::check(model, true)
+        {
+            return Some(why.to_string());
+        }
+    }
+    if app.ui.ai_gen.mode() == Mode::Img2img {
+        // What the engine would refuse: no picture to start from, or none in the selection.
+        if let Err(why) = photocraft_engine::ai_cmds::img2img_plan(&app.session, img_source(app), None) {
+            return Some(why);
+        }
+        if model.provider.is_local()
+            && let Err(why) = photocraft_aigen::comfy::check_img2img(model)
         {
             return Some(why.to_string());
         }

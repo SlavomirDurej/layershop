@@ -33,8 +33,8 @@ render at the selection's own size. The panel shows what will be asked (`Selecti
 → 976 × 1072 px`).
 
 The tabs across the top of the panel choose what the model works from: **Txt2Img** (the prompt
-alone, as above) and **InPaint** (below). **Img2Img** and **ImgEdit** are shown but not
-available yet.
+alone, as above), **InPaint** and **Img2Img** (below). **ImgEdit** is shown but not available
+yet.
 
 **Alpha Channel** asks the model for a transparent background. It is available for models marked
 *Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
@@ -105,6 +105,32 @@ Cloud models are off for inpainting unless ticked. OpenAI's GPT Image models are
 picture and the mask (their image edit endpoint); Gemini has no mask input and is given the
 picture and the mask as a second image. Both tend to repaint more than was asked; the new
 layer's mask hides what falls outside the selection.
+
+## Image to image (the Img2Img tab)
+
+Redraws a picture following the prompt: the model starts from the picture instead of from noise,
+so its composition carries over. The result is a new layer; the source is not changed.
+
+- **Source** is the picture to redraw:
+  - a **layer** of this document that has pixels (an empty layer is not offered). It is redrawn
+    where it is: inside the selection when there is one, else over the layer's own pixels.
+    Unasked it is the active layer.
+  - another **open document**, as it shows (all its layers together; an empty document is not
+    offered). It is fitted to the selection's bounds, or the whole canvas: scaled to cover the
+    area and cropped to its shape.
+- **Strength** is how far the result may depart from the picture (60% unasked). Low keeps its
+  shapes and colours and changes the surface; high keeps little more than the composition; 100%
+  ignores it. Local models only: it is how much of the sampler's schedule is run on the encoded
+  picture (the *denoise*). Turbo models with a handful of steps move in coarse jumps: 60% of
+  four steps is two.
+- With a selection, the selection becomes the new layer's mask, as for a generated image.
+- Every model that generates is offered (not the inpainting models). Cloud models are sent the
+  picture and the prompt (OpenAI's image edit endpoint without a mask, Gemini with the picture
+  attached) and have no strength.
+
+Tried against ComfyUI 0.39 on one picture ("a watercolour painting of …"): Z-Image Turbo at 35%
+keeps the picture and changes its surface, at 60% redraws it in the same layout; Krea 2 Turbo at
+60% gives a watercolour of the same scene; FLUX.2 Klein (four steps) changes little at 60%.
 
 ## Starting ComfyUI for you
 
@@ -201,7 +227,9 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | Command | |
 |---|---|
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
-| `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it against a real server without the app |
+| `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it (and, with `img2img` in place of the rectangle, image to image) against a real server without the app |
+| `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
+| `ai.sources` | what img2img can start from now: the active document's layers with pixels, the other open documents, and which is the default |
 | `ai.models` | the models, whether each can run now, generates from a prompt (`generate`) and is offered for inpainting (`inpaint`) |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
@@ -209,7 +237,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 
 Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's state is
 `ai_gen` in the UI state that `ui.inspect` returns (`mode`, `model`, `inpaintModel`, `strength`,
-`context`, `prompt`, `alpha`).
+`context`, `imgSource`, `imgStrength`, `prompt`, `alpha`).
 
 ## Code map
 

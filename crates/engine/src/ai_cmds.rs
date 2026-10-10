@@ -7,6 +7,8 @@
 //!   With `"mode": "inpaint"` it repaints the selected part of the active pixel layer instead:
 //!   the model is shown the layer around the selection and paints only inside it; the result is
 //!   again a new layer, masked by the selection, so the layer underneath is untouched.
+//!   With `"mode": "img2img"` it redraws a picture, following it as closely as `strength` says:
+//!   a layer of the document (in place), or another open document (fitted to the area).
 //! - `ai.models` lists the models and whether each can run now.
 //! - `ai.comfyModels` asks the ComfyUI server which model files it has (the settings' pickers).
 //! - `ai.setKey` / `ai.keys` hold the cloud API keys for this session.
@@ -23,7 +25,7 @@ use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, Se
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
-use photocraft_doc::{Layer, LayerContent, LayerMask};
+use photocraft_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
@@ -35,6 +37,11 @@ use crate::{EngineError, Result, Session};
 pub const LABEL: &str = "AI Generate";
 /// History label of an inpainting.
 pub const INPAINT_LABEL: &str = "AI Inpaint";
+/// History label of an image-to-image generation.
+pub const IMG2IMG_LABEL: &str = "AI Image to Image";
+/// How far an image-to-image may depart from its picture when `strength` is not given: enough to
+/// redraw it in the prompt's terms, little enough to keep its composition.
+pub const DEFAULT_IMG2IMG_STRENGTH: f64 = 0.6;
 /// How much of the layer around the selection the model is shown when `context` is not given:
 /// this fraction of the selection's longer edge, on every side. A model frames its subject in
 /// the picture it renders, so the nearer that picture is to the selection, the surer what it
@@ -262,20 +269,175 @@ fn fade_inwards(mask: &mut [f32], width: usize, height: usize, band: usize) {
     }
 }
 
+/// How many pixels a picture of `size` has, when that is something to send a model.
+fn pixel_count(size: (u32, u32)) -> Result<usize> {
+    let pixels = (size.0 as usize).checked_mul(size.1 as usize).filter(|n| *n > 0 && *n <= 64 << 20);
+    pixels.ok_or_else(|| EngineError::Other("the area is too large to send to the model".into()))
+}
+
+/// The pixels of `picture` inside `crop` at `size`, as an opaque PNG: over white where the
+/// picture is transparent.
+fn picture_png(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec<u8>> {
+    let (width, height) = size;
+    let pixels = pixel_count(size)?;
+    let fmt = picture.format();
+    let mut rgb = Vec::with_capacity(pixels * 3);
+    for px in resampled(picture, crop, width, height).chunks_exact(fmt.channels()) {
+        let [r, g, b, a] = photocraft_raster::to_rgba(&fmt, px);
+        let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
+        rgb.extend([r, g, b].map(|c| byte(c * a + (1.0 - a))));
+    }
+    if rgb.len() != pixels * 3 {
+        return Err(EngineError::Other("could not read the picture to send to the model".into()));
+    }
+    png(width, height, ChannelLayout::Rgb, rgb)
+}
+
+/// The picture an image-to-image starts from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum SourceRef {
+    /// A layer of the active document that has pixels, by id.
+    Layer(u64),
+    /// An open document, by id: its image as it shows, all layers together.
+    Document(u64),
+}
+
+/// The pixels behind a [`SourceRef`].
+#[derive(Clone)]
+enum Picture {
+    Layer(Surface),
+    Document(Arc<Document>),
+}
+
+/// What an image-to-image will do, worked out before it runs.
+#[derive(Clone)]
+pub struct Img2ImgPlan {
+    /// Where the result lands in the active document.
+    pub area: Rect,
+    /// The part of the source that is redrawn, in the source's own coordinates.
+    pub source_rect: Rect,
+    picture: Picture,
+}
+
+/// The largest rectangle of the shape `width` : `height` centred in `within`.
+fn cover_crop(within: Rect, width: u32, height: u32) -> Rect {
+    let (sw, sh) = (f64::from(within.width().max(1)), f64::from(within.height().max(1)));
+    let aspect = f64::from(width.max(1)) / f64::from(height.max(1));
+    let (cw, ch) = if sw / sh > aspect { ((sh * aspect).round().clamp(1.0, sw), sh) } else { (sw, (sw / aspect).round().clamp(1.0, sh)) };
+    let x0 = within.x0.saturating_add(((sw - cw) / 2.0).floor() as i32);
+    let y0 = within.y0.saturating_add(((sh - ch) / 2.0).floor() as i32);
+    Rect::new(x0, y0, x0.saturating_add(cw as i32), y0.saturating_add(ch as i32)).intersect(&within)
+}
+
+/// Does `doc` show anything: a layer with pixels on the canvas, or a fill layer? An empty
+/// document is no picture to start from.
+fn has_image(doc: &Document) -> bool {
+    let canvas = doc.bounds();
+    let shows = |l: &Layer| matches!(l.content, LayerContent::Fill(_)) || l.surface().is_some_and(|px| !px.content_bounds().intersect(&canvas).is_empty());
+    !canvas.is_empty() && doc.walk().into_iter().any(|(_, _, l)| shows(l))
+}
+
+/// The pictures an image-to-image can start from now, with a name for each: the layers of the
+/// active document that have pixels on the canvas (top first), then the other open documents.
+pub fn img2img_sources(s: &Session) -> Vec<(SourceRef, String)> {
+    let Some(d) = s.active() else { return Vec::new() };
+    let canvas = d.doc.bounds();
+    let mut out: Vec<(SourceRef, String)> = d
+        .doc
+        .walk()
+        .into_iter()
+        .rev()
+        .filter(|(_, _, l)| l.surface().is_some_and(|px| !px.content_bounds().intersect(&canvas).is_empty()))
+        .map(|(_, _, l)| (SourceRef::Layer(l.id.0), format!("Layer: {}", l.name)))
+        .collect();
+    let others = s.documents().iter().filter(|o| o.doc.id != d.doc.id && has_image(&o.doc));
+    out.extend(others.map(|o| (SourceRef::Document(o.doc.id.0), format!("Document: {}", o.doc.name))));
+    out
+}
+
+/// The source an image-to-image uses when none is named: the active layer when it has pixels,
+/// else the first of [`img2img_sources`].
+pub fn default_img2img_source(s: &Session) -> Option<SourceRef> {
+    let sources = img2img_sources(s);
+    let active = s.active().and_then(|d| d.active_layer).map(|id| SourceRef::Layer(id.0));
+    active.filter(|a| sources.iter().any(|(r, _)| r == a)).or_else(|| sources.first().map(|(r, _)| *r))
+}
+
+/// Plan an image-to-image from `source` (`None`: [`default_img2img_source`]) into `rect`, or
+/// say why it can't run.
+///
+/// A layer is redrawn in place: over the selection's bounds, else over the layer's own pixels.
+/// Another document is fitted to the selection's bounds, else the canvas: scaled to cover the
+/// area and cropped to its shape, like a generated image.
+pub fn img2img_plan(s: &Session, source: Option<SourceRef>, rect: Option<Rect>) -> std::result::Result<Img2ImgPlan, String> {
+    let d = s.active().ok_or("no document open")?;
+    let canvas = d.doc.bounds();
+    let nothing = "Image to image needs a picture to start from: a layer with pixels, or another open document";
+    let source = source.or_else(|| default_img2img_source(s)).ok_or(nothing)?;
+    let selected = d.doc.selection.as_ref().map(|sel| sel.content_bounds().intersect(&canvas)).filter(|b| !b.is_empty());
+    let inside = |area: Rect| Some(area.intersect(&canvas)).filter(|a| !a.is_empty()).ok_or("the area to generate into is empty or outside the canvas");
+    match source {
+        SourceRef::Layer(id) => {
+            let layer = d.doc.layer(LayerId(id)).ok_or_else(|| format!("the source layer {id} is not in this document"))?;
+            let pixels = layer
+                .surface()
+                .ok_or_else(|| format!("\u{201c}{}\u{201d} has no pixels to start from: choose a layer that has, or rasterize it", layer.name))?;
+            let content = pixels.content_bounds().intersect(&canvas);
+            if content.is_empty() {
+                return Err(format!("\u{201c}{}\u{201d} is empty: choose a layer that has pixels", layer.name));
+            }
+            let area = inside(rect.or(selected).unwrap_or(content))?;
+            if content.intersect(&area).is_empty() {
+                return Err(format!(
+                    "\u{201c}{}\u{201d} is empty inside the selection: move the selection onto the layer's pixels, or choose another source",
+                    layer.name
+                ));
+            }
+            Ok(Img2ImgPlan { area, source_rect: area, picture: Picture::Layer(pixels.clone()) })
+        }
+        SourceRef::Document(id) => {
+            let other = s.documents().iter().find(|o| o.doc.id.0 == id).ok_or_else(|| format!("the source document {id} is not open"))?;
+            let whole = other.doc.bounds();
+            if !has_image(&other.doc) {
+                return Err(format!("\u{201c}{}\u{201d} is empty: there is no image in it to start from", other.doc.name));
+            }
+            let area = inside(rect.or(selected).unwrap_or(canvas))?;
+            Ok(Img2ImgPlan { area, source_rect: cover_crop(whole, area.width(), area.height()), picture: Picture::Document(other.doc.clone()) })
+        }
+    }
+}
+
+impl Img2ImgPlan {
+    /// What the model is sent: the source's pixels at `size`, with no mask (all of it is redrawn).
+    fn source(&self, size: (u32, u32), strength: f64) -> Result<Source> {
+        let image = match &self.picture {
+            Picture::Layer(pixels) => picture_png(pixels, self.source_rect, size)?,
+            Picture::Document(doc) => {
+                let fmt = doc.pixel_format();
+                let flat = crate::file_cmds::flattened(doc, PixelFormat::new(fmt.mode, fmt.sample, true));
+                picture_png(&flat, self.source_rect, size)?
+            }
+        };
+        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength })
+    }
+}
+
+/// The `source` param of `ai.generate`: `{"layer": id}` or `{"document": id}`.
+fn source_param(p: &Value) -> Result<Option<SourceRef>> {
+    match p.get("source") {
+        None => Ok(None),
+        Some(v) => serde_json::from_value(v.clone()).map(Some).map_err(|_| bad("ai.generate", "`source` must be {\"layer\": id} or {\"document\": id}")),
+    }
+}
+
 /// What an inpainting sends the model: the layer's pixels inside `crop` (over white where the
 /// layer is transparent) and the selection there as the mask, both at `size`. With `fade` the
 /// mask fades in from the selection's edge ([`MASK_FADE`]).
 fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Rect, size: (u32, u32), strength: f64, fade: bool) -> Result<Source> {
     let (width, height) = size;
-    let pixels = (width as usize).checked_mul(height as usize).filter(|n| *n > 0 && *n <= 64 << 20);
-    let pixels = pixels.ok_or_else(|| EngineError::Other("the area to inpaint is too large to send to the model".into()))?;
-    let fmt = layer.format();
-    let mut rgb = Vec::with_capacity(pixels * 3);
-    for px in resampled(layer, crop, width, height).chunks_exact(fmt.channels()) {
-        let [r, g, b, a] = photocraft_raster::to_rgba(&fmt, px);
-        let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
-        rgb.extend([r, g, b].map(|c| byte(c * a + (1.0 - a))));
-    }
+    let pixels = pixel_count(size)?;
+    let image = picture_png(layer, crop, size)?;
     // Transparent where the model paints: the selection's coverage, inverted, as alpha.
     let mut coverage: Vec<f32> = resampled(selection, crop, width, height)
         .chunks_exact(selection.format().channels().max(1))
@@ -291,10 +453,10 @@ fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Re
     for v in coverage {
         mask.extend([0, 0, 0, 255 - byte(v)]);
     }
-    if rgb.len() != pixels * 3 || mask.len() != pixels * 4 {
+    if mask.len() != pixels * 4 {
         return Err(EngineError::Other("could not read the area to inpaint".into()));
     }
-    Ok(Source { image: png(width, height, ChannelLayout::Rgb, rgb)?, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength })
+    Ok(Source { image, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength })
 }
 
 /// Decode a generated image and fit it to `area`, in the document's format with alpha: scaled
@@ -385,17 +547,19 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let server = s.ai.server.clone().filter(|_| model.provider.is_local());
     let key = s.ai.key(model.provider);
     s.ai.ready(&model).map_err(EngineError::Other)?;
-    let inpaint = match p.get("mode").map(|m| m.as_str().unwrap_or("?")) {
-        None | Some("txt2img") => false,
-        Some("inpaint") => true,
-        Some(m @ ("img2img" | "imgEdit")) => return Err(EngineError::Other(format!("`{m}` is not available yet; use txt2img or inpaint"))),
-        Some(_) => return Err(bad(cmd, "`mode` must be txt2img|inpaint")),
+    let (inpaint, img2img) = match p.get("mode").map(|m| m.as_str().unwrap_or("?")) {
+        None | Some("txt2img") => (false, false),
+        Some("inpaint") => (true, false),
+        Some("img2img") => (false, true),
+        Some("imgEdit") => return Err(EngineError::Other("`imgEdit` is not available yet; use txt2img, inpaint or img2img".into())),
+        Some(_) => return Err(bad(cmd, "`mode` must be txt2img|inpaint|img2img")),
     };
     let number = |key: &str, default: f64, max: f64| match p.get(key) {
         None => Ok(default),
         Some(v) => v.as_f64().filter(|x| x.is_finite() && (0.0..=max).contains(x)).ok_or_else(|| bad(cmd, format!("`{key}` must be a number from 0 to {max}"))),
     };
-    let (strength, context) = (number("strength", 1.0, 1.0)?, number("context", DEFAULT_CONTEXT, 4.0)?);
+    let strength = number("strength", if img2img { DEFAULT_IMG2IMG_STRENGTH } else { 1.0 }, 1.0)?;
+    let context = number("context", DEFAULT_CONTEXT, 4.0)?;
     if !inpaint && !model.can_generate() {
         return Err(EngineError::Other(format!(
             "{} is an inpainting model: it repaints a selection (`\"mode\": \"inpaint\"`, the panel's InPaint tab) and can't generate from a prompt alone",
@@ -416,17 +580,25 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         }),
         None => None,
     };
-    let area = match selected {
+    // What an image-to-image reads: a layer of this document, or another open document.
+    let plan = if img2img {
+        let rect = if p.get("rect").is_some() { Some(target_area(p, None, d.doc.bounds())?) } else { None };
+        Some(img2img_plan(s, source_param(p)?, rect).map_err(EngineError::Other)?)
+    } else {
+        None
+    };
+    let area = match (selected, &plan) {
+        (_, Some(plan)) => plan.area,
         // The model is shown the layer around the selection, and its answer covers that area.
-        Some(selected) if p.get("rect").is_none() => inpaint_area(selected, d.doc.bounds(), context),
-        Some(selected) => {
+        (Some(selected), _) if p.get("rect").is_none() => inpaint_area(selected, d.doc.bounds(), context),
+        (Some(selected), _) => {
             let area = target_area(p, selection.as_ref(), d.doc.bounds())?;
             if area.intersect(&selected).is_empty() {
                 return Err(bad(cmd, "`rect` does not reach the selection"));
             }
             area
         }
-        None => target_area(p, selection.as_ref(), d.doc.bounds())?,
+        (None, None) => target_area(p, selection.as_ref(), d.doc.bounds())?,
     };
     let fmt = d.doc.pixel_format();
     let seed = match p.get("seed") {
@@ -439,7 +611,16 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let mut job = Job { prompt: prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
     let name = layer_name(&model, &prompt);
     let model_id = model.id.clone();
-    let label = if inpaint { INPAINT_LABEL } else { LABEL };
+    let label = match (inpaint, img2img) {
+        (true, _) => INPAINT_LABEL,
+        (_, true) => IMG2IMG_LABEL,
+        _ => LABEL,
+    };
+    let mode = match (inpaint, img2img) {
+        (true, _) => "inpaint",
+        (_, true) => "img2img",
+        _ => "txt2img",
+    };
     let job_selection = selection.clone().filter(|_| inpaint);
     crate::jobs::run(
         s,
@@ -458,6 +639,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 job.source = Some(inpaint_source(layer, selection, selected, area, size, strength, fade)?);
                 ctx.check()?;
             }
+            if let Some(plan) = &plan {
+                ctx.progress(0.0, "Reading the picture\u{2026}");
+                job.source = Some(plan.source(photocraft_aigen::source_size(&model, area.width(), area.height()), strength)?);
+                ctx.check()?;
+            }
             // A local model needs its server: use the one running, or start it.
             if let Some(server) = &server {
                 server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
@@ -465,7 +651,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             let image = photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(ai_error)?;
             ctx.check()?;
             ctx.progress(0.98, "Placing the image…");
-            let surface = fit(&image.bytes, fmt, area, inpaint)?;
+            // What was given a picture answers in its shape: it goes back where that came from.
+            let surface = fit(&image.bytes, fmt, area, inpaint || img2img)?;
             Ok((surface, image))
         },
         move |s, (surface, image): (Surface, Generated)| {
@@ -485,7 +672,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 "layer": layer.0,
                 "bounds": [area.x0, area.y0, area.width(), area.height()],
                 "model": model_id,
-                "mode": if inpaint { "inpaint" } else { "txt2img" },
+                "mode": mode,
                 "seed": image.seed,
                 "renderSize": [image.width, image.height],
                 // US dollars, when the provider reported what it billed (OpenAI).
@@ -493,6 +680,14 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             }))
         },
     )
+}
+
+/// `ai.sources`: what an image-to-image can start from now.
+fn sources(s: &mut Session, _: &Value) -> Result<Value> {
+    let default = default_img2img_source(s);
+    let list: Vec<Value> =
+        img2img_sources(s).into_iter().map(|(source, name)| json!({"source": source, "name": name, "default": Some(source) == default})).collect();
+    Ok(json!({"sources": list}))
 }
 
 fn models(s: &mut Session, _: &Value) -> Result<Value> {
@@ -610,10 +805,20 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there),"strength":0..1=1 (inpaint, local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img: a layer is redrawn in place, over the selection's bounds or else its own pixels; another open document is fitted to the selection's bounds or else the canvas),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
+        },
+        CommandSpec {
+            id: "ai.sources",
+            label: "AI Image Sources",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {sources:[{source:{"layer":id}|{"document":id},name,default}]}: what ai.generate {"mode":"img2img"} can start from: the active document's layers that have pixels, and the other open documents"##,
+            enabled: always,
+            run: sources,
+            journal: false,
         },
         CommandSpec {
             id: "ai.models",

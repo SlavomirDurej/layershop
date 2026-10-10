@@ -680,12 +680,10 @@ fn the_inpaint_tab_lists_the_models_that_can_inpaint_and_keeps_its_own_choice() 
     assert!(ids(&app).is_empty());
     draw_panel(&mut app);
     // A tab the engine can't run yet (set from outside: the panel doesn't offer it) is Txt2Img.
-    for mode in [Mode::Img2img, Mode::ImgEdit] {
-        app.ui.ai_gen.mode = mode;
-        assert!(!mode.available() && app.ui.ai_gen.mode() == Mode::Txt2img);
-        draw_panel(&mut app);
-        assert_eq!(app.ui.ai_gen.mode, Mode::Txt2img);
-    }
+    app.ui.ai_gen.mode = Mode::ImgEdit;
+    assert!(!Mode::ImgEdit.available() && app.ui.ai_gen.mode() == Mode::Txt2img);
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.mode, Mode::Txt2img);
     // The state reads and writes like the engine names the modes.
     assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["txt2img", "inpaint", "img2img", "imgEdit"]));
     assert_eq!(Mode::ALL.map(Mode::key), ["txt2img", "inpaint", "img2img", "imgEdit"]);
@@ -831,4 +829,70 @@ fn inpainting_models_have_their_own_settings_page() {
     app.ui.ai_gen.mode = Mode::Inpaint;
     assert!(enabled_models(&app).is_empty());
     draw_panel(&mut app);
+}
+
+#[test]
+fn image_to_image_from_the_panel_picks_a_layer_or_another_document() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
+    app.ui.ai_gen.mode = Mode::Img2img;
+    app.ui.ai_gen.prompt = "as a watercolour".into();
+    // The models that generate are offered; one made for inpainting is not.
+    assert_eq!(enabled_models(&app).into_iter().map(|m| m.id).collect::<Vec<_>>(), ["z"]);
+    let z = z_image("z");
+    // No document, then one with nothing in it: Generate is off and says what is missing.
+    draw_panel(&mut app);
+    app.run("file.new", json!({"width": 40, "height": 30, "background": "transparent"})).unwrap();
+    assert!(generate_blocked(&app, &z).unwrap().contains("needs a picture to start from"));
+    assert_eq!((img_source(&app), target_size(&app)), (None, None));
+    draw_panel(&mut app);
+    // A second document with an image: the first now has a source, the other document.
+    let empty_doc = app.session.active().unwrap().doc.id.0;
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let pictured = app.session.active().unwrap().doc.id.0;
+    let background = app.session.active().unwrap().active_layer.unwrap().0;
+    // Here the active layer has pixels: it is the source, redrawn over its own extent.
+    assert_eq!(img_source(&app), Some(SourceRef::Layer(background)));
+    assert_eq!((generate_blocked(&app, &z), target_size(&app)), (None, Some((64, 48, false))));
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.img_source, Some(SourceRef::Layer(background)));
+    // The other document is empty: it is no picture, and is not offered.
+    let offered = photocraft_engine::ai_cmds::img2img_sources(&app.session);
+    assert_eq!(offered.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [SourceRef::Layer(background)]);
+    assert!(offered[0].1.starts_with("Layer: "));
+    assert!(photocraft_engine::ai_cmds::img2img_plan(&app.session, Some(SourceRef::Document(empty_doc)), None).err().unwrap().contains("is empty"));
+    // A selection narrows the area, and masks the result.
+    app.run("select.rect", json!({"x": 8, "y": 4, "width": 20, "height": 10})).unwrap();
+    assert_eq!(target_size(&app), Some((20, 10, true)));
+    app.ui.ai_gen.img_strength = 0.4;
+    let before = app.session.active().unwrap().doc.layers.len();
+    draw_panel(&mut app);
+    let r = generate(&mut app).unwrap();
+    assert_eq!((r["mode"].as_str(), r["bounds"].clone()), (Some("img2img"), json!([8, 4, 20, 10])));
+    assert_eq!(app.session.active().unwrap().doc.layers.len(), before + 1);
+    // Back in the first document the chosen layer is not there: the panel falls back to what
+    // that document offers, the other document, and generating uses it.
+    let first = app.session.documents().iter().position(|d| d.doc.id.0 == empty_doc).unwrap();
+    app.run("document.activate", json!({"document": first})).unwrap();
+    assert_eq!(app.session.active().unwrap().doc.id.0, empty_doc);
+    assert_eq!(img_source(&app), Some(SourceRef::Document(pictured)));
+    assert_eq!(target_size(&app), Some((40, 30, false)));
+    draw_panel(&mut app);
+    let r = generate(&mut app).unwrap();
+    assert_eq!((r["mode"].as_str(), r["bounds"].clone()), (Some("img2img"), json!([0, 0, 40, 30])));
+    // The state reads and writes like the engine names a source; hostile values are tamed.
+    let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
+    assert_eq!(state["imgSource"], json!({"document": pictured}));
+    let old: AiGenUi = serde_json::from_value(json!({"prompt": "x"})).unwrap();
+    assert_eq!((old.img_source, old.img_strength), (None, 0.6));
+    assert_eq!(AiGenUi { img_strength: f64::NAN, ..Default::default() }.img_strength(), 0.6);
+    // The dock gives the tab the row its Source picker needs.
+    assert_eq!(
+        wanted_height(&app),
+        {
+            app.ui.ai_gen.mode = Mode::Txt2img;
+            wanted_height(&app)
+        } + INPAINT_ROW
+    );
 }

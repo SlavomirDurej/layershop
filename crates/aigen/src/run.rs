@@ -32,6 +32,7 @@ pub struct Source {
     pub image: Vec<u8>,
     /// What to repaint: a PNG of the same size, transparent where the model paints and opaque
     /// where the image stays (the convention of OpenAI's masks and of ComfyUI's Load Image).
+    /// Empty: image to image, the whole picture is redrawn.
     pub mask: Vec<u8>,
     pub width: u32,
     pub height: u32,
@@ -161,17 +162,26 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
     let workflow = match &job.source {
         Some(source) => {
             // The set-up is checked before anything is uploaded.
-            comfy::check(model, true)?;
+            let masked = !source.mask.is_empty();
+            if masked {
+                comfy::check(model, true)?
+            } else {
+                comfy::check_img2img(model)?
+            }
             (control.progress)(0.01, "Sending the image to ComfyUI…");
             let mut names = Vec::with_capacity(2);
             for (name, bytes) in [(comfy::UPLOAD_IMAGE, &source.image), (comfy::UPLOAD_MASK, &source.mask)] {
+                if bytes.is_empty() {
+                    continue;
+                }
                 let r = transport.send(&comfy::upload_request(&base, name, bytes)).map_err(unreachable)?;
                 names.push(comfy::parse_uploaded(r.status, &r.body)?);
                 if (control.cancelled)() {
                     return Err(Error::Cancelled);
                 }
             }
-            let [image, mask] = names.as_slice() else { return Err(Error::BadResponse("ComfyUI did not take the image".into())) };
+            let Some(image) = names.first() else { return Err(Error::BadResponse("ComfyUI did not take the image".into())) };
+            let mask = names.get(1).map(String::as_str).filter(|_| masked);
             comfy::inpaint_workflow(model, &render, &comfy::Inpaint { image, mask, denoise: source.denoise() })?
         }
         None => comfy::workflow(model, &render)?,
@@ -375,6 +385,28 @@ mod tests {
         let e = generate(&uploads, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| n.fetch_add(1, Ordering::Relaxed) >= 1)).unwrap_err();
         assert_eq!(e, Error::Cancelled);
         assert!(!uploads.urls().iter().any(|u| u.ends_with("/prompt")));
+    }
+
+    #[test]
+    fn image_to_image_uploads_the_picture_alone() {
+        let fake = Fake::new(|r, _| match r.url.as_str() {
+            u if u.ends_with("/upload/image") => ok(r#"{"name":"picture.png","subfolder":""}"#),
+            u if u.ends_with("/prompt") => {
+                let text = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].to_string();
+                assert!(text.contains("picture.png") && text.contains("\"denoise\":0.7") && !text.contains("SetLatentNoiseMask"), "{text}");
+                ok(r#"{"prompt_id":"abc"}"#)
+            }
+            u if u.ends_with("/history/abc") => ok(DONE),
+            u if u.contains("/view?") => ok("PNGDATA"),
+            u => panic!("unexpected request {u}"),
+        });
+        let job = Job { source: Some(Source { mask: Vec::new(), ..source() }), ..job() };
+        let g = generate(&fake, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap();
+        assert_eq!((g.width, g.height), (768, 512));
+        assert_eq!(fake.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 1);
+        // A model made for inpainting can't: refused before anything is sent.
+        let idle = Fake::new(|_, _| panic!("no request expected"));
+        assert!(matches!(generate(&idle, &settings(), &Family::Flux1Fill.preset(), "", &job, &control(&|| false)), Err(Error::Config(_))));
     }
 
     #[test]

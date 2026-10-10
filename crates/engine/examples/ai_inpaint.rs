@@ -8,6 +8,8 @@
 //! ```
 //!
 //! The rectangle is the selection (`x,y,width,height`); `out.png` is the flattened result.
+//! With `img2img` in place of the rectangle the whole picture is redrawn instead (image to image;
+//! the strength then defaults to 0.6).
 
 use std::sync::Arc;
 
@@ -41,8 +43,8 @@ fn run() -> Result<(), String> {
     model.inpaint = Some(true);
     let arg = |i: usize, what: &str| args.get(i).cloned().ok_or_else(|| format!("missing {what}"));
     let (image, rect, prompt, out) = (arg(2, "the image")?, arg(3, "the selection x,y,width,height")?, arg(4, "the prompt")?, arg(5, "the output file")?);
+    let img2img = rect == "img2img";
     let rect: Vec<i64> = rect.split(',').filter_map(|v| v.trim().parse().ok()).collect();
-    let [x, y, width, height] = rect[..] else { return Err("the selection must be x,y,width,height".into()) };
     let number = |i: usize, default: f64| args.get(i).and_then(|v| v.parse::<f64>().ok()).unwrap_or(default);
 
     let mut s = Session::new();
@@ -51,8 +53,13 @@ fn run() -> Result<(), String> {
     run(&mut s, "prefs.set", json!({"path": "integrations.ai.comfyUrl", "value": url}))?;
     run(&mut s, "prefs.set", json!({"path": "integrations.ai.models", "value": [serde_json::to_value(&model).map_err(|e| e.to_string())?]}))?;
     run(&mut s, "file.openAs", json!({"path": image}))?;
-    run(&mut s, "select.rect", json!({"x": x, "y": y, "width": width, "height": height}))?;
-    let mut params = json!({"prompt": prompt, "mode": "inpaint", "strength": number(7, 1.0)});
+    let mut params = if img2img {
+        json!({"prompt": prompt, "mode": "img2img", "strength": number(7, 0.6)})
+    } else {
+        let [x, y, width, height] = rect[..] else { return Err("the selection must be x,y,width,height (or img2img)".into()) };
+        run(&mut s, "select.rect", json!({"x": x, "y": y, "width": width, "height": height}))?;
+        json!({"prompt": prompt, "mode": "inpaint", "strength": number(7, 1.0)})
+    };
     if let Some(context) = args.get(6).and_then(|v| v.parse::<f64>().ok()) {
         params["context"] = json!(context);
     }

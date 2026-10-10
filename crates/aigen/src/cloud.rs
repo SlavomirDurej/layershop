@@ -90,8 +90,11 @@ pub fn openai_edit_request(model: &Model, job: &Job, source: &Source, key: &str,
         Part::text("size", &size),
         Part::text("output_format", "png"),
         Part::png("image", "image.png", &source.image),
-        Part::png("mask", "mask.png", &source.mask),
     ];
+    // Without a mask the whole picture is the model's to redraw (image to image).
+    if !source.mask.is_empty() {
+        parts.push(Part::png("mask", "mask.png", &source.mask));
+    }
     let quality = model.quality.trim();
     if matches!(quality, "low" | "medium" | "high" | "xhigh" | "max") {
         parts.push(Part::text("quality", quality));
@@ -121,6 +124,11 @@ pub fn gemini_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
         // Gemini has no mask input. It is shown the image and where to paint (the mask, as a
         // second picture) and told to leave the rest; the layer's mask then hides what it
         // changed outside anyway.
+        // Image to image: the picture, and what to make of it.
+        Some(source) if source.mask.is_empty() => {
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&source.image);
+            json!([{"text": job.prompt}, {"inlineData": {"mimeType": "image/png", "data": b64}}])
+        }
         Some(source) => {
             let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
             json!([
@@ -348,6 +356,20 @@ mod tests {
         assert_eq!(parts[2]["inlineData"]["data"], b64(b"MASKPNG"));
         // No fixed aspect ratio: the answer follows the image it was given.
         assert_eq!(b["generationConfig"]["imageConfig"], json!({"imageSize": "1K"}));
+    }
+
+    #[test]
+    fn image_to_image_sends_the_picture_without_a_mask() {
+        let unmasked = Source { mask: Vec::new(), ..source() };
+        let m = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
+        let r = openai_edit_request(&m, &job(600, 900, false), &unmasked, "k", 60).unwrap();
+        let form = String::from_utf8_lossy(&r.body).into_owned();
+        assert!(form.contains("name=\"image\"; filename=\"image.png\"") && !form.contains("name=\"mask\""), "{form}");
+        let m = Model::cloud(Provider::Gemini, "Nano Banana Pro", "gemini-3-pro-image-preview", false);
+        let b = body(&gemini_request(&m, &Job { source: Some(unmasked), ..job(1920, 1080, false) }, "k", 90).unwrap());
+        let parts = b["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!((parts.len(), parts[0]["text"].as_str()), (2, Some("a \"red\" frog")));
+        assert!(parts[1]["inlineData"]["data"].is_string());
     }
 
     #[test]
