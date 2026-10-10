@@ -10,7 +10,7 @@ use crate::size::render_size;
 use crate::{Error, Result, cloud};
 
 /// What to generate.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Job {
     pub prompt: String,
     /// The size of the area to fill, in pixels. Each back end derives its own render size.
@@ -19,6 +19,54 @@ pub struct Job {
     pub seed: u64,
     /// Ask for a transparent background (models with [`Model::alpha`]).
     pub alpha: bool,
+    /// Inpainting: the image the area holds now and the part of it to repaint. `None` generates
+    /// from the prompt alone.
+    pub source: Option<Source>,
+}
+
+/// The image an inpainting starts from, already at the size the model is asked to render
+/// ([`source_size`]), so the answer lines up with it pixel for pixel.
+#[derive(Clone, PartialEq)]
+pub struct Source {
+    /// The area as it is now: an opaque PNG, `width` × `height`.
+    pub image: Vec<u8>,
+    /// What to repaint: a PNG of the same size, transparent where the model paints and opaque
+    /// where the image stays (the convention of OpenAI's masks and of ComfyUI's Load Image).
+    pub mask: Vec<u8>,
+    pub width: u32,
+    pub height: u32,
+    /// How far the repainted part may depart from what is there, 0..=1: 1 paints it afresh,
+    /// less keeps more of its shapes and colours. Local models; cloud models have no such control.
+    pub strength: f64,
+}
+
+impl std::fmt::Debug for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Source")
+            .field("image_len", &self.image.len())
+            .field("mask_len", &self.mask.len())
+            .field("width", &self.width)
+            .field("height", &self.height)
+            .field("strength", &self.strength)
+            .finish()
+    }
+}
+
+impl Source {
+    /// The strength as a denoise fraction a sampler accepts.
+    pub(crate) fn denoise(&self) -> f64 {
+        if self.strength.is_finite() { self.strength.clamp(0.05, 1.0) } else { 1.0 }
+    }
+}
+
+/// The size `model` renders a `width` × `height` area at: what a [`Source`] for it must measure.
+pub fn source_size(model: &Model, width: u32, height: u32) -> (u32, u32) {
+    match model.provider {
+        Provider::Comfy => render_size(width, height, model.megapixels, model.family.size_multiple()),
+        Provider::Openai => cloud::openai_size(model, width, height),
+        // Gemini answers in the shape of the image it is given: send about what it renders.
+        Provider::Gemini => render_size(width, height, if model.image_size.trim() == "1K" { 1.0 } else { 4.0 }, 8),
+    }
 }
 
 /// An encoded image (PNG, JPEG or WebP, as the back end returned it).
@@ -79,10 +127,11 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
         Provider::Comfy => generate_comfy(transport, settings, model, job, control, timeout),
         Provider::Openai | Provider::Gemini => {
             let who = model.provider.label();
-            let (request, size) = if model.provider == Provider::Openai {
-                (cloud::openai_request(model, job, key, timeout)?, cloud::openai_size(model, job.width, job.height))
-            } else {
-                (cloud::gemini_request(model, job, key, timeout)?, (job.width, job.height))
+            let (request, size) = match (&job.source, model.provider) {
+                (Some(source), Provider::Openai) => (cloud::openai_edit_request(model, job, source, key, timeout)?, (source.width, source.height)),
+                (None, Provider::Openai) => (cloud::openai_request(model, job, key, timeout)?, cloud::openai_size(model, job.width, job.height)),
+                (Some(source), _) => (cloud::gemini_request(model, job, key, timeout)?, (source.width, source.height)),
+                (None, _) => (cloud::gemini_request(model, job, key, timeout)?, (job.width, job.height)),
             };
             (control.progress)(0.1, &format!("Waiting for {who}…"));
             let response = transport.send(&request).map_err(|e| Error::Network(format!("Could not reach {who}: {e}")))?;
@@ -102,13 +151,33 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
 
 fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model, job: &Job, control: &Control<'_>, timeout: u64) -> Result<Generated> {
     let base = comfy::base_url(&settings.comfy_url)?;
-    let (width, height) = render_size(job.width, job.height, model.megapixels, model.family.size_multiple());
-    let render = Job { width, height, ..job.clone() };
-    let workflow = comfy::workflow(model, &render)?;
+    let unreachable = |e: Error| Error::Network(format!("Could not reach ComfyUI at {base}. Is it running? ({e})"));
+    // An inpainting renders at the size of the image it was given.
+    let (width, height) = match &job.source {
+        Some(source) => (source.width, source.height),
+        None => render_size(job.width, job.height, model.megapixels, model.family.size_multiple()),
+    };
+    let render = Job { width, height, source: None, ..job.clone() };
+    let workflow = match &job.source {
+        Some(source) => {
+            // The set-up is checked before anything is uploaded.
+            comfy::check(model, true)?;
+            (control.progress)(0.01, "Sending the image to ComfyUI…");
+            let mut names = Vec::with_capacity(2);
+            for (name, bytes) in [(comfy::UPLOAD_IMAGE, &source.image), (comfy::UPLOAD_MASK, &source.mask)] {
+                let r = transport.send(&comfy::upload_request(&base, name, bytes)).map_err(unreachable)?;
+                names.push(comfy::parse_uploaded(r.status, &r.body)?);
+                if (control.cancelled)() {
+                    return Err(Error::Cancelled);
+                }
+            }
+            let [image, mask] = names.as_slice() else { return Err(Error::BadResponse("ComfyUI did not take the image".into())) };
+            comfy::inpaint_workflow(model, &render, &comfy::Inpaint { image, mask, denoise: source.denoise() })?
+        }
+        None => comfy::workflow(model, &render)?,
+    };
     (control.progress)(0.02, "Sending to ComfyUI…");
-    let queued = transport
-        .send(&Request::post_json(format!("{base}/prompt"), comfy::queue_body(&workflow, "photocraft")))
-        .map_err(|e| Error::Network(format!("Could not reach ComfyUI at {base}. Is it running? ({e})")))?;
+    let queued = transport.send(&Request::post_json(format!("{base}/prompt"), comfy::queue_body(&workflow, "photocraft"))).map_err(unreachable)?;
     let id = comfy::parse_queued(queued.status, &queued.body)?;
     let label = if model.name.is_empty() { model.family.label() } else { model.name.as_str() };
     let message = format!("Generating with {label}…");
@@ -219,7 +288,7 @@ mod tests {
     }
 
     fn job() -> Job {
-        Job { prompt: "a frog".into(), width: 500, height: 500, seed: 7, alpha: false }
+        Job { prompt: "a frog".into(), width: 500, height: 500, seed: 7, alpha: false, source: None }
     }
 
     const DONE: &str =
@@ -251,6 +320,102 @@ mod tests {
         assert_eq!((g.width, g.height, g.seed), (1008, 1008, 7));
         assert_eq!(fake.urls().first().map(String::as_str), Some("http://comfy:8188/prompt"));
         assert!(progress.load(Ordering::Relaxed) >= 3);
+    }
+
+    fn source() -> Source {
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7 }
+    }
+
+    #[test]
+    fn inpainting_uploads_the_image_and_mask_then_queues_a_workflow_that_loads_them() {
+        let fake = Fake::new(|r, _| match r.url.as_str() {
+            u if u.ends_with("/upload/image") => {
+                let body = String::from_utf8_lossy(&r.body).into_owned();
+                // The server may store the file under another name: that is the one to load.
+                ok(if body.contains("IMAGEPNG") {
+                    r#"{"name":"stored image.png","subfolder":"","type":"input"}"#
+                } else {
+                    r#"{"name":"m.png","subfolder":"pc"}"#
+                })
+            }
+            u if u.ends_with("/prompt") => {
+                let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                let text = body["prompt"].to_string();
+                for want in ["stored image.png", "pc/m.png", "SetLatentNoiseMask", "\"denoise\":0.7", "a frog"] {
+                    assert!(text.contains(want), "{want} missing in {text}");
+                }
+                ok(r#"{"prompt_id":"abc"}"#)
+            }
+            u if u.ends_with("/history/abc") => ok(DONE),
+            u if u.contains("/view?filename=f.png") => ok("PNGDATA"),
+            u => panic!("unexpected request {u}"),
+        });
+        let job = Job { source: Some(source()), ..job() };
+        let g = generate(&fake, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap();
+        // Rendered at the size of the image it was given, not one derived from the area.
+        assert_eq!((g.bytes.as_slice(), g.width, g.height), (&b"PNGDATA"[..], 768, 512));
+        let urls = fake.urls();
+        assert_eq!(urls.iter().filter(|u| u.ends_with("/upload/image")).count(), 2);
+        assert!(urls.iter().position(|u| u.ends_with("/prompt")) > urls.iter().rposition(|u| u.ends_with("/upload/image")), "{urls:?}");
+
+        // A set-up that can't run is refused before anything is uploaded.
+        let idle = Fake::new(|_, _| panic!("no request expected"));
+        let mut broken = Family::ZImage.preset();
+        broken.vae.clear();
+        assert!(matches!(generate(&idle, &settings(), &broken, "", &job, &control(&|| false)), Err(Error::Config(_))));
+        // A server that refuses the upload, or is not there, says so.
+        let full = Fake::new(|_, _| Ok(Response { status: 507, body: b"disk full".to_vec() }));
+        let e = generate(&full, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
+        assert!(e.contains("HTTP 507") && e.contains("disk full"), "{e}");
+        let down = Fake::new(|_, _| Err(Error::Network("refused".into())));
+        assert!(generate(&down, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap_err().to_string().contains("Is it running?"));
+        // Cancelled between the uploads: nothing is queued.
+        let n = AtomicU32::new(0);
+        let uploads = Fake::new(|_, _| ok(r#"{"name":"a.png"}"#));
+        let e = generate(&uploads, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| n.fetch_add(1, Ordering::Relaxed) >= 1)).unwrap_err();
+        assert_eq!(e, Error::Cancelled);
+        assert!(!uploads.urls().iter().any(|u| u.ends_with("/prompt")));
+    }
+
+    #[test]
+    fn cloud_inpainting_sends_the_image_and_reports_its_size() {
+        let fake = Fake::new(|r, _| {
+            assert_eq!(r.url, "https://api.openai.com/v1/images/edits");
+            ok(r#"{"data":[{"b64_json":"aGVsbG8="}]}"#)
+        });
+        let m = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
+        let job = Job { source: Some(source()), ..job() };
+        let g = generate(&fake, &settings(), &m, "sk-x", &job, &control(&|| false)).unwrap();
+        assert_eq!((g.bytes.as_slice(), g.width, g.height), (&b"hello"[..], 768, 512));
+        let gem = Fake::new(|r, _| {
+            assert!(String::from_utf8_lossy(&r.body).contains("inlineData"));
+            ok(r#"{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aGVsbG8="}}]}}]}"#)
+        });
+        let m = Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false);
+        assert_eq!(generate(&gem, &settings(), &m, "k", &job, &control(&|| false)).unwrap().bytes, b"hello");
+    }
+
+    #[test]
+    fn the_source_of_an_inpainting_is_sized_as_each_back_end_renders() {
+        let z = Family::ZImage.preset();
+        assert_eq!(source_size(&z, 500, 500), render_size(500, 500, z.megapixels, 16));
+        assert_eq!(source_size(&Family::QwenImage21.preset(), 500, 500).0 % 32, 0);
+        let gpt = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
+        assert_eq!(source_size(&gpt, 1600, 900), cloud::openai_size(&gpt, 1600, 900));
+        let nb = Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false);
+        let (w, h) = source_size(&nb, 1600, 900);
+        assert!((f64::from(w) / f64::from(h) - 16.0 / 9.0).abs() < 0.03 && w * h <= 1_100_000, "{w}x{h}");
+        for (w, h) in [(0, 0), (1, u32::MAX), (u32::MAX, u32::MAX)] {
+            for m in [&z, &gpt, &nb] {
+                let (sw, sh) = source_size(m, w, h);
+                assert!((256..=4096).contains(&sw) && (256..=4096).contains(&sh), "{w}x{h} -> {sw}x{sh}");
+            }
+        }
+        // The strength is a denoise fraction whatever it was given.
+        for (given, want) in [(0.7, 0.7), (0.0, 0.05), (9.0, 1.0), (f64::NAN, 1.0), (-1.0, 0.05)] {
+            assert_eq!(Source { strength: given, ..source() }.denoise(), want);
+        }
+        assert!(!format!("{:?}", source()).contains("IMAGEPNG"));
     }
 
     #[test]

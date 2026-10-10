@@ -147,12 +147,22 @@ impl Family {
 
     /// The multiple each edge of the rendered image must be.
     pub fn size_multiple(self) -> u32 {
-        if self == Family::QwenImage21 { 32 } else { 16 }
+        // HiDream O1 works on pixels in patches of 32.
+        if matches!(self, Family::QwenImage21 | Family::HidreamO1) { 32 } else { 16 }
     }
 
     /// Has a distilled-guidance control (FLUX), separate from CFG.
     pub fn has_guidance(self) -> bool {
         matches!(self, Family::Flux1 | Family::Flux2)
+    }
+
+    /// Offered for inpainting unless the user says otherwise ([`Model::can_inpaint`]). The built-in
+    /// workflow (encode the image, denoise only the masked part) runs with every architecture, but
+    /// only these blend what they paint into the picture around it; tried against ComfyUI 0.39,
+    /// Ernie, HiDream and Ideogram 4 leave seams or paint a different scene. A custom workflow
+    /// inpaints when it takes an `%image%`.
+    pub fn inpaints(self) -> bool {
+        matches!(self, Family::ZImage | Family::Krea2 | Family::Flux2 | Family::Flux1 | Family::QwenImage | Family::QwenImage21 | Family::Checkpoint)
     }
 
     /// A model of this family with the settings its reference workflow uses. File names are the
@@ -315,7 +325,8 @@ pub struct Model {
     pub negative_prompt: String,
     /// Custom family: the workflow in ComfyUI's API format (Workflow › Export (API)), with
     /// `%prompt%`, `%negative%`, `%width%`, `%height%`, `%seed%`, `%steps%` and `%cfg%` where
-    /// those values go.
+    /// those values go; for inpainting also `%image%` and `%mask%` (the names of the uploaded
+    /// image and mask, for Load Image nodes) and `%denoise%`.
     pub workflow: String,
 
     // ----- both -----
@@ -324,6 +335,9 @@ pub struct Model {
     pub megapixels: f64,
     /// The model can return a transparent background (the panel's Alpha Channel box).
     pub alpha: bool,
+    /// Offered for inpainting (the panel's InPaint tab). `None`: what its architecture or
+    /// provider can do ([`Model::can_inpaint`]); the settings' checkbox overrides that.
+    pub inpaint: Option<bool>,
 
     // ----- cloud -----
     /// The provider's model id (`gpt-image-2.5-sunburst`, `gemini-3-pro-image-preview`, …).
@@ -363,6 +377,7 @@ impl Default for Model {
             workflow: String::new(),
             megapixels: 1.0,
             alpha: false,
+            inpaint: None,
             api_model: String::new(),
             quality: "auto".into(),
             image_size: "1K".into(),
@@ -374,6 +389,19 @@ impl Model {
     /// A cloud model with the provider's defaults.
     pub fn cloud(provider: Provider, name: &str, api_model: &str, alpha: bool) -> Model {
         Model { provider, name: name.into(), api_model: api_model.into(), alpha, ..Model::default() }
+    }
+
+    /// Offered for inpainting: the user's choice when they made one, else what the model can do.
+    /// Local: the architectures the built-in inpainting workflow runs, and a custom workflow
+    /// that takes an `%image%`. Cloud: OpenAI's GPT Image models (they have a masked edit
+    /// endpoint) and Gemini's image models (they edit an image they are given).
+    pub fn can_inpaint(&self) -> bool {
+        self.inpaint.unwrap_or(match self.provider {
+            Provider::Comfy if self.family == Family::Custom => self.workflow.contains("%image%"),
+            Provider::Comfy => self.family.inpaints(),
+            Provider::Openai => self.api_model.trim().starts_with("gpt-image"),
+            Provider::Gemini => true,
+        })
     }
 
     /// The cloud models offered by "Add Cloud Model".
@@ -470,6 +498,21 @@ mod tests {
         assert_eq!(s.model("").map(|m| m.id.as_str()), Some("b"));
         assert_eq!(s.model("a").map(|m| m.id.as_str()), Some("a"));
         assert!(s.model("zz").is_none());
+    }
+
+    #[test]
+    fn inpainting_follows_the_architecture_unless_the_user_says_otherwise() {
+        assert!(Family::Flux2.preset().can_inpaint() && Family::ZImage.preset().can_inpaint());
+        assert!(!Family::HidreamO1.preset().can_inpaint());
+        assert!(Model { inpaint: Some(true), ..Family::HidreamO1.preset() }.can_inpaint());
+        assert!(!Model { inpaint: Some(false), ..Family::Flux2.preset() }.can_inpaint());
+        let custom = Model { family: Family::Custom, workflow: r#"{"1":{"inputs":{"image":"%image%"}}}"#.into(), ..Model::default() };
+        assert!(custom.can_inpaint() && !Family::Custom.preset().can_inpaint());
+        assert!(Model::cloud_presets().iter().all(Model::can_inpaint));
+        assert!(!Model::cloud(Provider::Openai, "DALL-E 3", "dall-e-3", false).can_inpaint());
+        // Models saved before the setting existed have none: they get their architecture's.
+        let old: Model = serde_json::from_str(r#"{"id":"a","family":"flux2"}"#).unwrap();
+        assert_eq!((old.inpaint, old.can_inpaint()), (None, true));
     }
 
     #[test]

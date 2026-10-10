@@ -16,6 +16,17 @@ impl FakeComfy {
         Arc::new(Self { image: photocraft_codecs::encode(&img, Format::Png, &EncodeOptions::default()).unwrap(), seen: Mutex::new(Vec::new()) })
     }
 
+    /// The PNG uploaded as `name`, decoded.
+    fn uploaded(&self, name: &str) -> Image {
+        let seen = self.seen.lock().unwrap();
+        let body = seen.iter().filter(|(u, _)| u.ends_with("/upload/image")).map(|(_, b)| b).find(|b| String::from_utf8_lossy(b).contains(name));
+        let body = body.unwrap_or_else(|| panic!("{name} was not uploaded"));
+        let start = body.windows(8).position(|w| w == b"\x89PNG\r\n\x1a\n").expect("no PNG in the upload");
+        // The file ends where its part does: at the PNG's IEND chunk (4 bytes of type, 4 of CRC).
+        let end = body.windows(4).rposition(|w| w == b"IEND").expect("a truncated PNG") + 8;
+        photocraft_codecs::decode(&body[start..end]).unwrap()
+    }
+
     fn queued(&self) -> Value {
         let seen = self.seen.lock().unwrap();
         let (_, body) = seen.iter().find(|(u, _)| u.ends_with("/prompt")).expect("nothing was queued");
@@ -35,6 +46,11 @@ impl Transport for FakeComfy {
             self.image.clone()
         } else if r.url.contains("/models/") {
             br#"["a.safetensors","b.safetensors"]"#.to_vec()
+        } else if r.url.ends_with("/upload/image") {
+            // Like ComfyUI: the file is kept under the name it was sent with.
+            let text = String::from_utf8_lossy(&r.body);
+            let name = text.split("filename=\"").nth(1).and_then(|t| t.split('"').next()).unwrap_or("");
+            json!({"name": name, "subfolder": "", "type": "input"}).to_string().into_bytes()
         } else {
             return Ok(Response { status: 404, body: Vec::new() });
         };
@@ -265,4 +281,137 @@ fn settings_survive_a_preferences_round_trip() {
     again.load_prefs_json(r#"{"integrations":{"allowAgentControl":false}}"#).unwrap();
     assert!(again.prefs().integrations.ai.models.is_empty());
     assert_eq!(layer_name(&"word ".repeat(40)).chars().count(), 41);
+}
+
+#[test]
+fn inpainting_repaints_the_selected_part_of_the_layer_on_a_new_masked_layer() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = session(&fake);
+    let before = layer_count(&s);
+    s.execute("select.rect", json!({"x": 24, "y": 16, "width": 16, "height": 16})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "a green pond", "mode": "inpaint", "strength": 0.75, "seed": 9})).unwrap();
+    // The model is shown half the selection's edge more on every side: 8 pixels.
+    assert_eq!(r["bounds"], json!([16, 8, 32, 32]));
+    assert_eq!((r["mode"].as_str(), r["seed"].as_u64()), (Some("inpaint"), Some(9)));
+    assert_eq!(r["renderSize"], json!([1008, 1008]));
+    assert_eq!(layer_count(&s), before + 1);
+    {
+        let d = s.active().unwrap();
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(16, 8, 48, 40));
+        // The selection is the mask: the new layer shows inside it only.
+        assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), Rect::new(24, 16, 40, 32));
+        assert_eq!(d.history.entries().last().map(String::as_str), Some(INPAINT_LABEL));
+    }
+    let inside = px(&mut s, 30, 20);
+    assert!(inside[0] < 0.05 && inside[1] > 0.95, "{inside:?}");
+    let context = px(&mut s, 18, 10);
+    assert!(context[0] > 0.95 && context[2] > 0.95, "outside the selection the layer below shows: {context:?}");
+    // The model got the layer (white here) and the mask, at the size it renders.
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    assert_eq!((image.width(), image.height(), image.layout()), (1008, 1008, ChannelLayout::Rgb));
+    assert!(image.data().iter().all(|b| *b == 255));
+    let mask = fake.uploaded("photocraft_inpaint_mask.png");
+    assert_eq!((mask.width(), mask.height(), mask.layout()), (1008, 1008, ChannelLayout::Rgba));
+    let alpha = |x: usize, y: usize| mask.data()[(y * 1008 + x) * 4 + 3];
+    // Transparent where the model paints (the selection, the middle half), opaque around it.
+    assert_eq!((alpha(504, 504), alpha(300, 300), alpha(700, 700)), (0, 0, 0));
+    assert_eq!((alpha(10, 10), alpha(200, 504), alpha(1000, 504), alpha(504, 800)), (255, 255, 255, 255));
+    let queued = fake.queued().to_string();
+    for want in ["SetLatentNoiseMask", "VAEEncode", "photocraft_inpaint_image.png", "photocraft_inpaint_mask.png", "\"denoise\":0.75", "a green pond"] {
+        assert!(queued.contains(want), "{want} missing in {queued}");
+    }
+    assert!(!queued.contains("EmptySD3LatentImage"));
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&s), before);
+    // `context` 0 shows the model the selection alone; a rect names the area outright.
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "inpaint", "context": 0})).unwrap();
+    assert_eq!(r["bounds"], json!([24, 16, 16, 16]));
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "inpaint", "rect": [0, 0, 64, 48]})).unwrap();
+    assert_eq!(r["bounds"], json!([0, 0, 64, 48]));
+}
+
+#[test]
+fn inpainting_reads_the_layers_pixels_at_every_depth() {
+    for (mode, depth) in [("rgb", 8), ("rgb", 16), ("rgb", 32), ("gray", 8), ("cmyk", 8)] {
+        let fake = FakeComfy::new(16, 16, [255, 0, 0, 255]);
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 40, "height": 40, "mode": mode, "depth": depth, "background": "white"})).unwrap();
+        let model = serde_json::to_value(Model { id: "z".into(), megapixels: 0.0, ..Family::ZImage.preset() }).unwrap();
+        s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
+        s.ai.transport = Some(fake.clone());
+        s.execute("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap();
+        s.execute("ai.generate", json!({"prompt": "x", "mode": "inpaint"})).unwrap_or_else(|e| panic!("{mode}/{depth}: {e}"));
+        let image = fake.uploaded("photocraft_inpaint_image.png");
+        // White paper in every colour model arrives as white.
+        assert!(image.data().iter().all(|b| *b >= 250), "{mode}/{depth}: {:?}", &image.data()[..6]);
+        let d = s.active().unwrap();
+        assert_eq!(d.doc.layer(d.active_layer.unwrap()).unwrap().surface().unwrap().format().sample, d.doc.pixel_format().sample, "{mode}/{depth}");
+    }
+}
+
+#[test]
+fn inpainting_says_what_it_needs() {
+    let fake = FakeComfy::new(8, 8, [1, 2, 3, 255]);
+    let mut s = session(&fake);
+    let fails = |s: &mut Session, p: Value| s.execute("ai.generate", p).unwrap_err().to_string();
+    // No selection.
+    let e = fails(&mut s, json!({"prompt": "x", "mode": "inpaint"}));
+    assert!(e.contains("needs a selection"), "{e}");
+    assert_eq!(inpaint_blocked(&s).unwrap_err(), e);
+    s.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
+    assert_eq!(inpaint_blocked(&s), Ok(Rect::new(8, 8, 24, 24)));
+    // Params that are not what they say.
+    for p in [
+        json!({"prompt": "x", "mode": "outpaint"}),
+        json!({"prompt": "x", "mode": 7}),
+        json!({"prompt": "x", "mode": "inpaint", "strength": 2}),
+        json!({"prompt": "x", "mode": "inpaint", "strength": "high"}),
+        json!({"prompt": "x", "mode": "inpaint", "strength": -0.1}),
+        json!({"prompt": "x", "mode": "inpaint", "context": 99}),
+        json!({"prompt": "x", "mode": "inpaint", "context": null}),
+        json!({"prompt": "x", "mode": "inpaint", "rect": [40, 40, 10, 8]}),
+    ] {
+        assert!(s.execute("ai.generate", p.clone()).is_err(), "{p}");
+    }
+    for mode in ["img2img", "imgEdit"] {
+        assert!(fails(&mut s, json!({"prompt": "x", "mode": mode})).contains("not available yet"));
+    }
+    // A model switched off for inpainting, and one whose architecture can't.
+    let models = [Model { id: "off".into(), inpaint: Some(false), ..Family::ZImage.preset() }, Model { id: "o1".into(), ..Family::HidreamO1.preset() }];
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": serde_json::to_value(&models).unwrap()})).unwrap();
+    for id in ["off", "o1"] {
+        let e = fails(&mut s, json!({"prompt": "x", "mode": "inpaint", "model": id}));
+        assert!(e.contains("not set up for inpainting"), "{e}");
+    }
+    let listed = s.execute("ai.models", json!({})).unwrap();
+    assert_eq!((listed["models"][0]["inpaint"].as_bool(), listed["models"][1]["inpaint"].as_bool()), (Some(false), Some(false)));
+    // An empty layer has nothing to repaint; neither has a layer that is not pixels.
+    let mut blank = session(&fake);
+    blank.execute("layer.new.layer", json!({})).unwrap();
+    blank.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
+    let e = fails(&mut blank, json!({"prompt": "x", "mode": "inpaint"}));
+    assert!(e.contains("is empty inside the selection"), "{e}");
+    blank.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
+    let e = fails(&mut blank, json!({"prompt": "x", "mode": "inpaint"}));
+    assert!(e.contains("pixel layer") && e.contains("Adjustment"), "{e}");
+    assert_eq!(layer_count(&s), 1, "a refused inpainting leaves the document alone");
+    // Text to image is as it was: no selection needed, nothing uploaded.
+    let plain = FakeComfy::new(8, 8, [1, 2, 3, 255]);
+    let mut t = session(&plain);
+    assert_eq!(t.execute("ai.generate", json!({"prompt": "x", "mode": "txt2img"})).unwrap()["mode"], "txt2img");
+    assert!(!plain.seen.lock().unwrap().iter().any(|(u, _)| u.ends_with("/upload/image")));
+}
+
+#[test]
+fn the_inpaint_area_grows_the_selection_within_the_canvas() {
+    let canvas = Rect::new(0, 0, 1000, 800);
+    assert_eq!(inpaint_area(Rect::new(400, 300, 600, 400), canvas, 0.5), Rect::new(300, 200, 700, 500));
+    assert_eq!(inpaint_area(Rect::new(0, 0, 100, 100), canvas, 0.5), Rect::new(0, 0, 150, 150));
+    assert_eq!(inpaint_area(Rect::new(400, 300, 600, 400), canvas, 0.0), Rect::new(400, 300, 600, 400));
+    for hostile in [f64::NAN, f64::INFINITY, -3.0, 1e300] {
+        let r = inpaint_area(Rect::new(400, 300, 600, 400), canvas, hostile);
+        assert!(!r.is_empty() && r.intersect(&canvas) == r, "{hostile}: {r:?}");
+    }
+    assert_eq!(inpaint_area(Rect::new(i32::MAX - 5, 0, i32::MAX, 5), canvas, 4.0), Rect::EMPTY.intersect(&canvas));
 }

@@ -30,9 +30,58 @@ aspect ratio, and the result is scaled to cover the selection and cropped to it.
 render at the selection's own size. The panel shows what will be asked (`Selection 520 × 571 px
 → 976 × 1072 px`).
 
+The tabs across the top of the panel choose what the model works from: **Txt2Img** (the prompt
+alone, as above) and **InPaint** (below). **Img2Img** and **ImgEdit** are shown but not
+available yet.
+
 **Alpha Channel** asks the model for a transparent background. It is available for models marked
 *Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
 Gemini models cannot). If a provider rejects the option, untick it there.
+
+## Inpainting (the InPaint tab)
+
+Repaints part of a picture: select what to replace on a pixel layer, describe what belongs
+there, press **Generate**.
+
+1. Choose the **pixel layer** that holds the image, and make a **selection** on it (Marquee,
+   Lasso, a feathered selection). Both are needed: without a selection, or on a layer that is
+   empty there or is not pixels (type, shape, adjustment, group), Generate is off and the panel
+   says which.
+2. The model is sent that layer around the selection and a mask of the selection. It paints
+   inside the mask and sees the rest, so the light, perspective and colours carry over.
+3. The result is a **new layer** above, masked by the selection. The layer you selected on is
+   not changed; hide or delete the new one to compare, or paint on its mask to blend the edge.
+
+- **Context** is how much of the layer around the selection the model is shown, as a share of
+  the selection's longer edge on every side (50% by default). More helps it match the
+  surroundings; less leaves more of the rendered pixels for the selection itself. The panel
+  shows the sizes (`Selection and context 720 × 760 px → 992 × 1040 px`).
+- **Strength** is how far the result may depart from what is there. 100% paints the selection
+  afresh; around 50–70% keeps its shapes and colours and changes the detail. Local models only.
+- The InPaint tab lists the models marked **Supports inpainting** in their settings, and
+  remembers its own choice of model.
+
+**Which models.** Local models inpaint by encoding the picture and denoising only the masked
+part (ComfyUI's *Set Latent Noise Mask*), which every architecture runs but not every one does
+well. Tried against ComfyUI 0.39 with the same picture, mask and prompt:
+
+| Architecture | Inpainting | On by default |
+|---|---|---|
+| FLUX.2 (Klein, Dev) | blends cleanly; the best of the set | yes |
+| FLUX.1, Krea 2, Z-Image | blend well | yes |
+| Qwen Image | usable; edges can shift a little | yes |
+| Qwen Image 2.1, Checkpoint (SD / SDXL) | same method, not tried here | yes |
+| Ernie Image, HiDream I1, HiDream O1 | visible seams, or a different scene in the box | no |
+| Ideogram 4 | does not blend (its two-model guidance ignores the surroundings) | no |
+| Custom workflow | when it has an `%image%` placeholder | then yes |
+
+Tick or untick **Supports inpainting** on a model to overrule the table. Dedicated inpainting
+checkpoints (FLUX.1 Fill) and instruction edit models (Qwen Image Edit, Z-Image Edit) need
+their own workflows and are not built in: use a custom workflow for them.
+
+Cloud models: OpenAI's GPT Image models take the picture and the mask (their image edit
+endpoint). Gemini has no mask input: it is given the picture and the mask as a second image and
+told to change only that part, and the new layer's mask hides whatever else it touched.
 
 ## Starting ComfyUI for you
 
@@ -90,6 +139,12 @@ enhancers, custom nodes): in ComfyUI use **Workflow › Export (API)** and paste
 values go; a field that is exactly a numeric placeholder (`"%width%"`) becomes a number. The
 workflow needs a Save Image or Preview Image node.
 
+To inpaint with a custom workflow, give it two **Load Image** nodes whose `image` is `%image%`
+and `%mask%`: PhotoCraft uploads the picture and the mask to ComfyUI's input folder (as
+`photocraft_inpaint_image.png` and `photocraft_inpaint_mask.png`, replaced each time) and fills
+in their names. The mask file is transparent where to paint, so the second node's **MASK**
+output is the mask. `%denoise%` is the panel's Strength (1 for text to image).
+
 ## Cloud models
 
 | Provider | Models | Size |
@@ -121,13 +176,15 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | Command | |
 |---|---|
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
-| `ai.models` | the models and whether each can run now |
+| `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it |
+| `ai.models` | the models, whether each can run now, and whether it is offered for inpainting (`inpaint`) |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
 
 Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's state is
-`ai_gen` in the UI state that `ui.inspect` returns (`model`, `prompt`, `alpha`).
+`ai_gen` in the UI state that `ui.inspect` returns (`mode`, `model`, `inpaintModel`, `strength`,
+`context`, `prompt`, `alpha`).
 
 ## Code map
 
@@ -135,6 +192,7 @@ Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's stat
   (`cloud.rs`), size rules (`size.rs`), model detection (`detect.rs`), and the one network seam,
   `Transport` (`http.rs`; `UreqTransport` on native, none on wasm). Everything but the transport
   is pure and tested without a network. Try a workflow against a real server with
-  `cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188`.
+  `cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188`; add
+  `inpaint image.png mask.png [strength]` after the output file to try an inpainting.
 - `crates/engine/src/ai_cmds.rs`: the commands. The app shell sets `Session::ai.transport`.
 - `crates/ui-egui/src/ai_gen_ui.rs`: the panel and the Preferences › Integrations page.

@@ -321,6 +321,29 @@ impl DockLayout {
         }
         shown.iter().copied().zip(hs).collect()
     }
+
+    /// `heights` (from [`Self::heights_for`]) with group `g` raised towards `want` points, for a
+    /// tab whose content needs more than the group's compact height (AI Gen: its Generate button
+    /// sits under the prompt). The room comes from the filling group, which keeps its own
+    /// compact height. A height the user dragged is left as they set it.
+    pub fn with_room(&self, mut heights: Vec<(Group, f32)>, g: Group, want: f32) -> Vec<(Group, f32)> {
+        let filler = heights.iter().rposition(|(x, _)| !self.is_collapsed(*x));
+        let at = heights.iter().position(|(x, _)| *x == g);
+        let (Some(f), Some(i)) = (filler, at) else { return heights };
+        if f == i || self.is_collapsed(g) || self.heights.contains_key(&g) || !want.is_finite() {
+            return heights;
+        }
+        let need = heights.get(i).map_or(0.0, |(_, h)| (want - h).max(0.0));
+        let spare = heights.get(f).map_or(0.0, |(x, h)| (h - x.compact_height()).max(0.0));
+        let give = need.min(spare);
+        if let Some((_, h)) = heights.get_mut(i) {
+            *h += give;
+        }
+        if let Some((_, h)) = heights.get_mut(f) {
+            *h -= give;
+        }
+        heights
+    }
 }
 
 /// Show `g` and expand it (Window › <panel>, the icon rail): a panel asked for is always
@@ -393,7 +416,10 @@ pub fn show(app: &mut PhotocraftApp, ui: &mut egui::Ui, shown: &[Group], mut bod
     let strip = if t.pro { 28.0 } else { 40.0 };
     let order: Vec<Group> = app.ui.dock.order().into_iter().filter(|g| shown.contains(g)).collect();
     let area = ui.available_rect_before_wrap();
-    let heights = app.ui.dock.heights_for(&order, area.height(), strip);
+    let mut heights = app.ui.dock.heights_for(&order, area.height(), strip);
+    if app.ui.dock_tabs.properties == crate::ai_gen_ui::TAB && t.pro {
+        heights = app.ui.dock.with_room(heights, Group::Properties, strip + crate::ai_gen_ui::wanted_height(app));
+    }
     let locked = app.session.prefs().workspace_locked;
     let rects = rects_after_layout(&heights, area);
     let mut actions: Vec<Action> = Vec::new();

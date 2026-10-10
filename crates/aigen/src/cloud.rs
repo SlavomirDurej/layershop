@@ -4,13 +4,14 @@ use base64::Engine;
 use serde_json::{Value, json};
 
 use crate::comfy::clip;
-use crate::http::Request;
+use crate::http::{Part, Request};
 use crate::model::{Model, Provider};
-use crate::run::Job;
+use crate::run::{Job, Source};
 use crate::size::{nearest_ratio, render_size};
 use crate::{Error, Result};
 
 const OPENAI_URL: &str = "https://api.openai.com/v1/images/generations";
+const OPENAI_EDIT_URL: &str = "https://api.openai.com/v1/images/edits";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
 
 /// Aspect ratios the Gemini image models accept.
@@ -73,6 +74,31 @@ pub fn openai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
     Ok(Request::post_json(OPENAI_URL, body.to_string().into_bytes()).header("Authorization", &format!("Bearer {key}")).timeout(timeout_seconds))
 }
 
+/// The request that repaints the masked part of `source` with an OpenAI image model: the image
+/// edit endpoint, which takes the image and a mask that is transparent where to paint.
+pub fn openai_edit_request(model: &Model, job: &Job, source: &Source, key: &str, timeout_seconds: u64) -> Result<Request> {
+    let id = api_model(model)?;
+    let key = key_of(model, key)?;
+    if !id.starts_with("gpt-image") {
+        return Err(Error::Config(format!("{}: `{id}` can't inpaint; OpenAI's GPT Image models can", model.name)));
+    }
+    let size = format!("{}x{}", source.width, source.height);
+    let mut parts = vec![
+        Part::text("model", id),
+        Part::text("prompt", &job.prompt),
+        Part::text("n", "1"),
+        Part::text("size", &size),
+        Part::text("output_format", "png"),
+        Part::png("image", "image.png", &source.image),
+        Part::png("mask", "mask.png", &source.mask),
+    ];
+    let quality = model.quality.trim();
+    if matches!(quality, "low" | "medium" | "high" | "xhigh" | "max") {
+        parts.push(Part::text("quality", quality));
+    }
+    Ok(Request::post_multipart(OPENAI_EDIT_URL, &parts).header("Authorization", &format!("Bearer {key}")).timeout(timeout_seconds))
+}
+
 /// The supported aspect ratio closest to a `width` × `height` selection.
 pub fn gemini_ratio(width: u32, height: u32) -> (u32, u32) {
     nearest_ratio(width, height, &GEMINI_RATIOS).unwrap_or((1, 1))
@@ -83,14 +109,33 @@ pub fn gemini_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
     let id = api_model(model)?;
     let key = key_of(model, key)?;
     let (rw, rh) = gemini_ratio(job.width, job.height);
-    let mut image = json!({"aspectRatio": format!("{rw}:{rh}")});
+    // Given an image to edit, the answer takes that image's shape: asking for one of the fixed
+    // ratios would move everything in it.
+    let mut image = if job.source.is_some() { json!({}) } else { json!({"aspectRatio": format!("{rw}:{rh}")}) };
     let size = model.image_size.trim();
     // The 2.5 models render at one size and reject the field.
     if matches!(size, "1K" | "2K" | "4K") && !id.starts_with("gemini-2") {
         image["imageSize"] = json!(size);
     }
+    let parts = match &job.source {
+        // Gemini has no mask input. It is shown the image and where to paint (the mask, as a
+        // second picture) and told to leave the rest; the layer's mask then hides what it
+        // changed outside anyway.
+        Some(source) => {
+            let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+            json!([
+                {"text": format!(
+                    "Edit the first image. Change only the region that is transparent in the second image (a mask of the same size), and keep everything else exactly as it is, at the same position and scale. In that region: {}",
+                    job.prompt
+                )},
+                {"inlineData": {"mimeType": "image/png", "data": b64(&source.image)}},
+                {"inlineData": {"mimeType": "image/png", "data": b64(&source.mask)}},
+            ])
+        }
+        None => json!([{"text": job.prompt}]),
+    };
     let body = json!({
-        "contents": [{"parts": [{"text": job.prompt}]}],
+        "contents": [{"parts": parts}],
         "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": image},
     });
     Ok(Request::post_json(format!("{GEMINI_URL}/{id}:generateContent"), body.to_string().into_bytes()).header("x-goog-api-key", key).timeout(timeout_seconds))
@@ -177,7 +222,7 @@ mod tests {
     use super::*;
 
     fn job(w: u32, h: u32, alpha: bool) -> Job {
-        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha }
+        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha, source: None }
     }
 
     fn body(r: &Request) -> Value {
@@ -256,6 +301,53 @@ mod tests {
         assert_eq!(b["generationConfig"]["imageConfig"], json!({"aspectRatio": "16:9", "imageSize": "1K"}));
         let old = Model::cloud(Provider::Gemini, "Nano Banana", "gemini-2.5-flash-image", false);
         assert_eq!(body(&gemini_request(&old, &job(500, 500, false), "k", 90).unwrap())["generationConfig"]["imageConfig"], json!({"aspectRatio": "1:1"}));
+    }
+
+    fn source() -> Source {
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 1024, height: 1536, strength: 0.5 }
+    }
+
+    #[test]
+    fn openai_inpaints_through_the_edit_endpoint_with_the_image_and_its_mask() {
+        let mut m = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
+        m.quality = "high".into();
+        let r = openai_edit_request(&m, &job(600, 900, false), &source(), " sk-test ", 120).unwrap();
+        assert_eq!(r.url, "https://api.openai.com/v1/images/edits");
+        assert!(r.headers.contains(&("Authorization".into(), "Bearer sk-test".into())));
+        assert!(r.headers.iter().any(|(k, v)| k == "Content-Type" && v.starts_with("multipart/form-data; boundary=")));
+        assert_eq!(r.timeout_seconds, 120);
+        let body = String::from_utf8_lossy(&r.body).into_owned();
+        for want in [
+            "name=\"model\"\r\n\r\ngpt-image-2\r\n",
+            "name=\"prompt\"\r\n\r\na \"red\" frog\r\n",
+            "name=\"size\"\r\n\r\n1024x1536\r\n",
+            "name=\"quality\"\r\n\r\nhigh\r\n",
+            "name=\"image\"; filename=\"image.png\"\r\nContent-Type: image/png\r\n\r\nIMAGEPNG\r\n",
+            "name=\"mask\"; filename=\"mask.png\"\r\nContent-Type: image/png\r\n\r\nMASKPNG\r\n",
+        ] {
+            assert!(body.contains(want), "{want:?} missing in {body}");
+        }
+        assert!(!format!("{r:?}").contains("sk-test"));
+        // A model without the endpoint, a missing key and a bad id are config errors.
+        let dalle = Model::cloud(Provider::Openai, "DALL-E 3", "dall-e-3", false);
+        assert!(matches!(openai_edit_request(&dalle, &job(9, 9, false), &source(), "k", 9), Err(Error::Config(s)) if s.contains("can't inpaint")));
+        assert!(matches!(openai_edit_request(&m, &job(9, 9, false), &source(), "", 9), Err(Error::Config(s)) if s.contains("API key")));
+    }
+
+    #[test]
+    fn gemini_inpaints_from_the_image_and_the_mask_in_the_images_own_shape() {
+        let m = Model::cloud(Provider::Gemini, "Nano Banana Pro", "gemini-3-pro-image-preview", false);
+        let j = Job { source: Some(source()), ..job(1920, 1080, false) };
+        let b = body(&gemini_request(&m, &j, "g-key", 90).unwrap());
+        let parts = b["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts.len(), 3);
+        let text = parts[0]["text"].as_str().unwrap();
+        assert!(text.contains("a \"red\" frog") && text.contains("transparent in the second image"), "{text}");
+        let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
+        assert_eq!(parts[1]["inlineData"], json!({"mimeType": "image/png", "data": b64(b"IMAGEPNG")}));
+        assert_eq!(parts[2]["inlineData"]["data"], b64(b"MASKPNG"));
+        // No fixed aspect ratio: the answer follows the image it was given.
+        assert_eq!(b["generationConfig"]["imageConfig"], json!({"imageSize": "1K"}));
     }
 
     #[test]

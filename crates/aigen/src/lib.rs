@@ -26,12 +26,12 @@ pub mod size;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::UreqTransport;
-pub use http::{MAX_RESPONSE_BYTES, Method, Request, Response, Transport};
+pub use http::{MAX_RESPONSE_BYTES, Method, Part, Request, Response, Transport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::ComfyProcess;
 pub use launch::{Launch, LocalServer, ServerState};
 pub use model::{Family, Model, Provider, Settings};
-pub use run::{Control, Generated, Job, comfy_models, generate, random_seed};
+pub use run::{Control, Generated, Job, Source, comfy_models, generate, random_seed, source_size};
 
 /// Why a generation failed.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

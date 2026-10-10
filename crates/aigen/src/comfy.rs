@@ -7,6 +7,7 @@
 
 use serde_json::{Map, Value, json};
 
+use crate::http::{Part, Request};
 use crate::model::{Family, Model};
 use crate::run::Job;
 use crate::{Error, Result};
@@ -66,11 +67,45 @@ fn latent_node(family: Family) -> &'static str {
     }
 }
 
+/// What an inpainting workflow works on: the image and mask as ComfyUI's input folder names them
+/// once uploaded ([`upload_request`]), and how much of the masked part to denoise (0..=1).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Inpaint<'a> {
+    pub image: &'a str,
+    pub mask: &'a str,
+    pub denoise: f64,
+}
+
+/// The names the image and mask of an inpainting are uploaded under. They are overwritten by
+/// the next one, so ComfyUI's input folder holds two files of ours, not one pair per generation.
+pub const UPLOAD_IMAGE: &str = "photocraft_inpaint_image.png";
+pub const UPLOAD_MASK: &str = "photocraft_inpaint_mask.png";
+/// How far past the mask the model repaints, in rendered pixels: the latent is coarser than the
+/// mask (8 or 16 pixels a cell), and a seam belongs under the layer's mask, not on its edge.
+const MASK_GROW: u32 = 8;
+
 /// The workflow that renders `job` with `model`, ending in a preview image (kept in ComfyUI's
 /// temp folder, not its output folder).
 pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
+    build(model, job, None)
+}
+
+/// The workflow that repaints the masked part of an uploaded image with `model`: the image is
+/// encoded to a latent and only the masked part of it is denoised (Set Latent Noise Mask), so
+/// what surrounds it steers the result and comes back as it was. `job` holds the image's size.
+pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Result<Value> {
+    build(model, job, Some(inpaint))
+}
+
+/// Can `model` run at all (and, with `inpainting`, repaint an image)? The error says what to fix.
+pub fn check(model: &Model, inpainting: bool) -> Result<()> {
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
+    build(model, &job, inpainting.then_some(&Inpaint { image: "image", mask: "mask", denoise: 1.0 })).map(|_| ())
+}
+
+fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Value> {
     if model.family == Family::Custom {
-        return custom_workflow(model, job);
+        return custom_workflow(model, job, inpaint);
     }
     // A set-up that can't run: say so in words here, not as a tensor shape from the sampler
     // after the models have loaded.
@@ -138,7 +173,18 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
     if f.has_guidance() && guidance > 0.0 {
         positive = g.node("FluxGuidance", json!({"conditioning": positive, "guidance": guidance}));
     }
-    let latent = g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1}));
+    let denoise = inpaint.map_or(1.0, |i| finite(i.denoise, 1.0).clamp(0.0, 1.0));
+    let latent = match inpaint {
+        Some(i) => {
+            let image = g.node("LoadImage", json!({"image": i.image}));
+            // Load Image's second output is the mask: where the file is transparent.
+            let mask = json!([g.add("LoadImage", json!({"image": i.mask})), 1]);
+            let mask = g.node("GrowMask", json!({"mask": mask, "expand": MASK_GROW, "tapered_corners": true}));
+            let encoded = g.node("VAEEncode", json!({"pixels": image, "vae": vae}));
+            g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
+        }
+        None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
+    };
     let steps = model.steps.clamp(1, 1000);
     let sampler = if model.sampler.trim().is_empty() { "euler" } else { model.sampler.trim() };
     let scheduler = if model.scheduler.trim().is_empty() { "simple" } else { model.scheduler.trim() };
@@ -147,12 +193,14 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
             let noise = g.node("RandomNoise", json!({"noise_seed": job.seed}));
             let select = g.node("KSamplerSelect", json!({"sampler_name": sampler}));
             let (sigmas, guider) = if f == Family::Flux2 {
-                (
-                    g.node("Flux2Scheduler", json!({"steps": steps, "width": job.width, "height": job.height})),
-                    g.node("CFGGuider", json!({"model": unet, "positive": positive, "negative": negative, "cfg": cfg})),
-                )
+                let mut sigmas = g.node("Flux2Scheduler", json!({"steps": steps, "width": job.width, "height": job.height}));
+                // Its scheduler has no denoise: keep the tail of the schedule instead.
+                if denoise < 1.0 {
+                    sigmas = json!([g.add("SplitSigmasDenoise", json!({"sigmas": sigmas, "denoise": denoise})), 1]);
+                }
+                (sigmas, g.node("CFGGuider", json!({"model": unet, "positive": positive, "negative": negative, "cfg": cfg})))
             } else {
-                let sigmas = g.node("BasicScheduler", json!({"model": unet, "scheduler": scheduler, "steps": steps, "denoise": 1.0}));
+                let sigmas = g.node("BasicScheduler", json!({"model": unet, "scheduler": scheduler, "steps": steps, "denoise": denoise}));
                 let mut inputs = json!({"model": unet, "positive": positive, "cfg": cfg, "negative": negative});
                 if !model.unet2.trim().is_empty() {
                     inputs["model_negative"] = g.node("UNETLoader", json!({"unet_name": model.unet2.trim(), "weight_dtype": "default"}));
@@ -165,7 +213,7 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
             "KSampler",
             json!({
                 "model": unet, "seed": job.seed, "steps": steps, "cfg": cfg, "sampler_name": sampler, "scheduler": scheduler,
-                "positive": positive, "negative": negative, "latent_image": latent, "denoise": 1.0,
+                "positive": positive, "negative": negative, "latent_image": latent, "denoise": denoise,
             }),
         ),
     };
@@ -180,7 +228,7 @@ fn finite(v: f64, fallback: f64) -> f64 {
 
 /// The user's workflow with its placeholders filled in. A string that is exactly a numeric
 /// placeholder (`"%width%"`) becomes a number; placeholders inside longer text are substituted.
-fn custom_workflow(model: &Model, job: &Job) -> Result<Value> {
+fn custom_workflow(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Value> {
     let text = model.workflow.trim();
     if text.is_empty() {
         return Err(Error::Config(format!("{}: paste a workflow (ComfyUI › Workflow › Export (API)) in Preferences › Integrations", model.name)));
@@ -196,14 +244,26 @@ fn custom_workflow(model: &Model, job: &Job) -> Result<Value> {
     if !text.contains("%prompt%") {
         return Err(Error::Config(format!("{}: the workflow has no %prompt% placeholder, so the prompt would be ignored", model.name)));
     }
-    let numbers: [(&str, Value); 5] = [
+    if inpaint.is_some() && !text.contains("%image%") {
+        return Err(Error::Config(format!(
+            "{}: the workflow has no %image% placeholder, so it can't inpaint. Put %image% and %mask% in two Load Image nodes (the mask is the second one's MASK output)",
+            model.name
+        )));
+    }
+    let numbers: [(&str, Value); 6] = [
         ("%width%", json!(job.width)),
         ("%height%", json!(job.height)),
         ("%seed%", json!(job.seed)),
         ("%steps%", json!(model.steps.clamp(1, 1000))),
         ("%cfg%", json!(finite(model.cfg, 1.0))),
+        ("%denoise%", json!(inpaint.map_or(1.0, |i| finite(i.denoise, 1.0).clamp(0.0, 1.0)))),
     ];
-    let texts: [(&str, &str); 2] = [("%prompt%", &job.prompt), ("%negative%", &model.negative_prompt)];
+    let texts: [(&str, &str); 4] = [
+        ("%prompt%", &job.prompt),
+        ("%negative%", &model.negative_prompt),
+        ("%image%", inpaint.map_or("", |i| i.image)),
+        ("%mask%", inpaint.map_or("", |i| i.mask)),
+    ];
     substitute(&mut v, &numbers, &texts, 0);
     Ok(v)
 }
@@ -278,6 +338,27 @@ fn queue_error(v: &Value) -> Option<String> {
 pub(crate) fn clip(s: &str, max: usize) -> String {
     let flat = s.split_whitespace().collect::<Vec<_>>().join(" ");
     if flat.chars().count() <= max { flat } else { flat.chars().take(max).chain(['…']).collect() }
+}
+
+/// The request that puts `bytes` (a PNG) in ComfyUI's input folder as `name`, replacing a file of
+/// that name, so a Load Image node can read it.
+pub fn upload_request(base: &str, name: &str, bytes: &[u8]) -> Request {
+    let parts = [Part::png("image", name, bytes), Part::text("type", "input"), Part::text("overwrite", "true")];
+    Request::post_multipart(format!("{base}/upload/image"), &parts).timeout(120)
+}
+
+/// The name a Load Image node finds an uploaded file under, from the answer to the upload.
+pub fn parse_uploaded(status: u16, body: &[u8]) -> Result<String> {
+    if !(200..300).contains(&status) {
+        return Err(Error::Server(format!("ComfyUI did not take the image to inpaint (HTTP {status}): {}", clip(&String::from_utf8_lossy(body), 200))));
+    }
+    let v = json_of(body, "upload")?;
+    let text = |key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").trim();
+    let (name, folder) = (text("name"), text("subfolder"));
+    if name.is_empty() || name.len() > 256 || folder.len() > 256 {
+        return Err(Error::BadResponse("ComfyUI took the image to inpaint but did not say under which name".into()));
+    }
+    Ok(if folder.is_empty() { name.to_string() } else { format!("{folder}/{name}") })
 }
 
 /// The prompt id from the answer to `POST /prompt`.
@@ -377,7 +458,7 @@ mod tests {
     use super::*;
 
     fn job() -> Job {
-        Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false }
+        Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false, source: None }
     }
 
     fn classes(w: &Value) -> Vec<String> {
@@ -534,6 +615,86 @@ mod tests {
         m.workflow = format!(r#"{{"1":{{"class_type":"X","inputs":{{"a":{}"%prompt%"{}}}}}}}"#, "[".repeat(200), "]".repeat(200));
         // serde_json's own recursion limit rejects it; either way it is an error, not a crash.
         let _ = workflow(&m, &job());
+    }
+
+    const INPAINT: Inpaint<'static> = Inpaint { image: "src.png", mask: "mask.png", denoise: 0.6 };
+
+    fn node<'a>(w: &'a Value, class: &str) -> &'a Value {
+        w.as_object().unwrap().values().find(|n| n["class_type"] == class).unwrap_or_else(|| panic!("no {class} in {w}"))
+    }
+
+    #[test]
+    fn inpainting_encodes_the_image_and_denoises_only_the_mask() {
+        for f in Family::ALL {
+            if f == Family::Custom {
+                continue;
+            }
+            let mut m = f.preset();
+            if f == Family::Checkpoint {
+                m.checkpoint = "sdxl.safetensors".into();
+            }
+            let w = inpaint_workflow(&m, &job(), &INPAINT).unwrap_or_else(|e| panic!("{f:?}: {e}"));
+            assert_well_formed(&w);
+            let c = classes(&w);
+            // No empty latent: the sampler starts from the encoded image with a noise mask.
+            assert!(!c.iter().any(|x| x.starts_with("Empty")), "{f:?}: {c:?}");
+            assert_eq!(c.iter().filter(|x| *x == "LoadImage").count(), 2, "{f:?}");
+            let masked = node(&w, "SetLatentNoiseMask");
+            let nodes = w.as_object().unwrap();
+            let linked = |v: &Value| &nodes[v[0].as_str().unwrap()];
+            assert_eq!(linked(&masked["inputs"]["samples"])["class_type"], "VAEEncode", "{f:?}");
+            let grow = linked(&masked["inputs"]["mask"]);
+            assert_eq!((grow["class_type"].as_str(), grow["inputs"]["mask"][1].as_u64()), (Some("GrowMask"), Some(1)), "{f:?}");
+            assert_eq!(linked(&grow["inputs"]["mask"])["inputs"]["image"], "mask.png");
+            assert_eq!(linked(&node(&w, "VAEEncode")["inputs"]["pixels"])["inputs"]["image"], "src.png");
+            assert!(check(&m, true).is_ok() && check(&m, false).is_ok());
+        }
+        // The strength reaches each kind of sampler: KSampler, a scheduler, and FLUX.2's by
+        // cutting its schedule.
+        assert_eq!(node(&inpaint_workflow(&Family::ZImage.preset(), &job(), &INPAINT).unwrap(), "KSampler")["inputs"]["denoise"], 0.6);
+        assert_eq!(node(&inpaint_workflow(&Family::Ideogram4.preset(), &job(), &INPAINT).unwrap(), "BasicScheduler")["inputs"]["denoise"], 0.6);
+        let flux = inpaint_workflow(&Family::Flux2.preset(), &job(), &INPAINT).unwrap();
+        assert_eq!(node(&flux, "SplitSigmasDenoise")["inputs"]["denoise"], 0.6);
+        assert_eq!(node(&flux, "SamplerCustomAdvanced")["inputs"]["sigmas"][1], 1);
+        let full = inpaint_workflow(&Family::Flux2.preset(), &job(), &Inpaint { denoise: f64::NAN, ..INPAINT }).unwrap();
+        assert!(!classes(&full).iter().any(|x| x == "SplitSigmasDenoise") && !full.to_string().contains("null"));
+        // Text to image is what it was: an empty latent, fully denoised.
+        let plain = workflow(&Family::ZImage.preset(), &job()).unwrap();
+        assert!(!classes(&plain).iter().any(|x| x == "LoadImage"));
+        assert_eq!(node(&plain, "KSampler")["inputs"]["denoise"], 1.0);
+    }
+
+    #[test]
+    fn custom_workflows_inpaint_when_they_take_an_image() {
+        let mut m = Model { family: Family::Custom, name: "Mine".into(), ..Model::default() };
+        m.workflow =
+            r#"{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%"}},"2":{"class_type":"KSampler","inputs":{"denoise":"%denoise%"}}}"#.into();
+        let e = inpaint_workflow(&m, &job(), &INPAINT).unwrap_err().to_string();
+        assert!(e.contains("%image%") && check(&m, true).is_err() && check(&m, false).is_ok(), "{e}");
+        assert_eq!(workflow(&m, &job()).unwrap()["2"]["inputs"]["denoise"], 1.0);
+        m.workflow = r#"{"1":{"class_type":"CLIPTextEncode","inputs":{"text":"%prompt%"}},"2":{"class_type":"KSampler","inputs":{"denoise":"%denoise%"}},
+            "3":{"class_type":"LoadImage","inputs":{"image":"%image%"}},"4":{"class_type":"LoadImage","inputs":{"image":"%mask%"}}}"#
+            .into();
+        let w = inpaint_workflow(&m, &job(), &INPAINT).unwrap();
+        assert_eq!(
+            (w["3"]["inputs"]["image"].as_str(), w["4"]["inputs"]["image"].as_str(), w["2"]["inputs"]["denoise"].as_f64()),
+            (Some("src.png"), Some("mask.png"), Some(0.6))
+        );
+    }
+
+    #[test]
+    fn uploads_are_multipart_and_their_answers_name_the_file() {
+        let r = upload_request("http://h:1", UPLOAD_IMAGE, b"PNGDATA");
+        assert_eq!(r.url, "http://h:1/upload/image");
+        let body = String::from_utf8_lossy(&r.body).into_owned();
+        assert!(body.contains("name=\"image\"; filename=\"photocraft_inpaint_image.png\"") && body.contains("PNGDATA"), "{body}");
+        assert!(body.contains("name=\"overwrite\"\r\n\r\ntrue") && body.contains("name=\"type\"\r\n\r\ninput"), "{body}");
+        assert_eq!(parse_uploaded(200, br#"{"name":"a.png","subfolder":"","type":"input"}"#).unwrap(), "a.png");
+        assert_eq!(parse_uploaded(200, br#"{"name":"a.png","subfolder":"pc","type":"input"}"#).unwrap(), "pc/a.png");
+        assert!(parse_uploaded(400, b"no image").unwrap_err().to_string().contains("HTTP 400"));
+        for bad in [&b"{}"[..], br#"{"name":7}"#, br#"{"name":""}"#, b"[]", b"<html>"] {
+            assert!(parse_uploaded(200, bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
     }
 
     #[test]

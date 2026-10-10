@@ -3,6 +3,7 @@
 //! ```sh
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188            # list detected models
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a red frog" out.png 768 512
+//! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a teapot" out.png inpaint image.png mask.png 0.8
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 find         # how it was started
 //! ```
 //!
@@ -11,7 +12,7 @@
 
 use std::time::Duration;
 
-use photocraft_aigen::{Control, Job, Settings, UreqTransport, comfy_models, detect::detect, generate, random_seed};
+use photocraft_aigen::{Control, Job, Settings, Source, UreqTransport, comfy_models, detect::detect, generate, random_seed};
 
 fn main() {
     if let Err(e) = run() {
@@ -89,7 +90,22 @@ fn run() -> Result<(), String> {
     let prompt = args.get(2).cloned().unwrap_or_else(|| "a red frog on a mossy stone, macro photo".into());
     let out = args.get(3).cloned().unwrap_or_else(|| "generated.png".into());
     let size = |i: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(1024u32);
-    let job = Job { prompt, width: size(4), height: size(5), seed: random_seed(), alpha: false };
+    // `<url> <n> <prompt> <out.png> inpaint <image.png> <mask.png> [strength]`: repaint the part
+    // of the image that is transparent in the mask (both PNGs of one size, edges in multiples of 16).
+    let job = if args.get(4).map(String::as_str) == Some("inpaint") {
+        let read = |i: usize| {
+            let path = args.get(i).ok_or("inpaint needs <image.png> <mask.png>")?;
+            std::fs::read(path).map_err(|e| format!("{path}: {e}"))
+        };
+        let (image, mask) = (read(5)?, read(6)?);
+        // A PNG's size is in its header: bytes 16..24.
+        let edge = |at: usize| image.get(at..at + 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes).ok_or("the image is not a PNG");
+        let (width, height) = (edge(16)?, edge(20)?);
+        let strength = args.get(7).and_then(|v| v.parse().ok()).unwrap_or(1.0);
+        Job { prompt, width, height, seed: random_seed(), alpha: false, source: Some(Source { image, mask, width, height, strength }) }
+    } else {
+        Job { prompt, width: size(4), height: size(5), seed: random_seed(), alpha: false, source: None }
+    };
     let settings = Settings { comfy_url: url, ..Settings::default() };
     let control = Control { cancelled: &|| false, progress: &|f, m| eprintln!("{:>3.0}%  {m}", f * 100.0), sleep: &|d: Duration| std::thread::sleep(d) };
     let image = generate(&transport, &settings, model, "", &job, &control).map_err(|e| e.to_string())?;

@@ -4,6 +4,9 @@
 //!   (`integrations.ai`) and places the result on a new layer over the selection's bounds (the
 //!   whole canvas without a selection), masked by the selection. The selection's size decides
 //!   the size the model is asked for. It is a background job: cancellable, one undo step.
+//!   With `"mode": "inpaint"` it repaints the selected part of the active pixel layer instead:
+//!   the model is shown the layer around the selection and paints only inside it; the result is
+//!   again a new layer, masked by the selection, so the layer underneath is untouched.
 //! - `ai.models` lists the models and whether each can run now.
 //! - `ai.comfyModels` asks the ComfyUI server which model files it has (the settings' pickers).
 //! - `ai.setKey` / `ai.keys` hold the cloud API keys for this session.
@@ -16,10 +19,11 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, ServerState, Settings, Transport};
-use photocraft_algo::resample::{Resample, resize_surface_in_canvas, translate_surface};
+use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, ServerState, Settings, Source, Transport};
+use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
+use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
-use photocraft_doc::{Layer, LayerMask};
+use photocraft_doc::{Layer, LayerContent, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
@@ -29,6 +33,12 @@ use crate::{EngineError, Result, Session};
 
 /// History label of a generation.
 pub const LABEL: &str = "AI Generate";
+/// History label of an inpainting.
+pub const INPAINT_LABEL: &str = "AI Inpaint";
+/// How much of the layer around the selection the model is shown when `context` is not given:
+/// this fraction of the selection's longer edge, on every side. Enough to match the light and
+/// the perspective; more leaves fewer rendered pixels for the selection itself.
+pub const DEFAULT_CONTEXT: f64 = 0.5;
 /// Longest prompt accepted (characters).
 const MAX_PROMPT: usize = 20_000;
 
@@ -148,9 +158,86 @@ fn target_area(p: &Value, selection: Option<&Surface>, canvas: Rect) -> Result<R
     Ok(area)
 }
 
-/// Decode a generated image and fit it to `area`: scaled to cover it (keeping the image's own
-/// aspect ratio), centred, and cropped to it, in the document's format with alpha.
-fn fit(bytes: &[u8], fmt: PixelFormat, area: Rect) -> Result<Surface> {
+/// The area an inpainting works on: the selection's bounds grown by `context` (a fraction of
+/// their longer edge) on every side, within the canvas.
+pub fn inpaint_area(selection: Rect, canvas: Rect, context: f64) -> Rect {
+    let context = if context.is_finite() { context.clamp(0.0, 4.0) } else { DEFAULT_CONTEXT };
+    let pad = (f64::from(selection.width().max(selection.height())) * context).round().min(1_000_000.0) as i32;
+    Rect::new(selection.x0.saturating_sub(pad), selection.y0.saturating_sub(pad), selection.x1.saturating_add(pad), selection.y1.saturating_add(pad))
+        .intersect(&canvas)
+}
+
+/// Why `ai.generate {"mode": "inpaint"}` can't run on the active document, or the selection's
+/// bounds within the canvas. The panel shows the reason under its button.
+pub fn inpaint_blocked(s: &Session) -> std::result::Result<Rect, String> {
+    let d = s.active().ok_or("no document open")?;
+    let selected = d.doc.selection.as_ref().map(|sel| sel.content_bounds().intersect(&d.doc.bounds())).filter(|b| !b.is_empty());
+    let selected = selected.ok_or("Inpainting needs a selection: select the part of the layer to repaint (the Marquee or Lasso tool)")?;
+    let layer = d.active_layer.and_then(|id| d.doc.layer(id)).ok_or("Inpainting needs a layer: choose the pixel layer to repaint")?;
+    let LayerContent::Raster(pixels) = &layer.content else {
+        return Err(format!(
+            "Inpainting repaints a pixel layer, and \u{201c}{}\u{201d} is a {} layer: choose a pixel layer, or rasterize this one",
+            layer.name,
+            layer.content.kind_name()
+        ));
+    };
+    if pixels.content_bounds().intersect(&selected).is_empty() {
+        return Err(format!("\u{201c}{}\u{201d} is empty inside the selection: choose the layer that holds the image to repaint", layer.name));
+    }
+    Ok(selected)
+}
+
+/// The part of `s` inside `crop`, resampled to `width` × `height`: interleaved samples in the
+/// surface's own format.
+fn resampled(s: &Surface, crop: Rect, width: u32, height: u32) -> Vec<f32> {
+    let local = translate_surface(&crop_surface(s, crop), crop.x0.saturating_neg(), crop.y0.saturating_neg());
+    let (sx, sy) = (f64::from(width) / f64::from(crop.width().max(1)), f64::from(height) / f64::from(crop.height().max(1)));
+    let scaled = if (sx - 1.0).abs() > 1e-9 || (sy - 1.0).abs() > 1e-9 {
+        resize_surface_in_canvas(&local, sx, sy, Resample::Bicubic, Rect::new(0, 0, crop.width() as i32, crop.height() as i32))
+    } else {
+        local
+    };
+    scaled.read_region(Rect::new(0, 0, width as i32, height as i32))
+}
+
+fn png(width: u32, height: u32, layout: ChannelLayout, data: Vec<u8>) -> Result<Vec<u8>> {
+    let image = Image::from_u8(width, height, layout, data).map_err(|e| EngineError::Other(format!("could not prepare the image to inpaint ({e})")))?;
+    photocraft_codecs::encode(&image, Format::Png, &EncodeOptions::default())
+        .map_err(|e| EngineError::Other(format!("could not prepare the image to inpaint ({e})")))
+}
+
+fn byte(v: f32) -> u8 {
+    if v.is_finite() { (v.clamp(0.0, 1.0) * 255.0).round() as u8 } else { 0 }
+}
+
+/// What an inpainting sends the model: the layer's pixels inside `crop` (over white where the
+/// layer is transparent) and the selection there as the mask, both at `size`.
+fn inpaint_source(layer: &Surface, selection: &Surface, crop: Rect, size: (u32, u32), strength: f64) -> Result<Source> {
+    let (width, height) = size;
+    let pixels = (width as usize).checked_mul(height as usize).filter(|n| *n > 0 && *n <= 64 << 20);
+    let pixels = pixels.ok_or_else(|| EngineError::Other("the area to inpaint is too large to send to the model".into()))?;
+    let fmt = layer.format();
+    let mut rgb = Vec::with_capacity(pixels * 3);
+    for px in resampled(layer, crop, width, height).chunks_exact(fmt.channels()) {
+        let [r, g, b, a] = photocraft_raster::to_rgba(&fmt, px);
+        let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
+        rgb.extend([r, g, b].map(|c| byte(c * a + (1.0 - a))));
+    }
+    // Transparent where the model paints: the selection's coverage, inverted, as alpha.
+    let mut mask = Vec::with_capacity(pixels * 4);
+    for px in resampled(selection, crop, width, height).chunks_exact(selection.format().channels().max(1)) {
+        mask.extend([0, 0, 0, 255 - byte(px.first().copied().unwrap_or(0.0))]);
+    }
+    if rgb.len() != pixels * 3 || mask.len() != pixels * 4 {
+        return Err(EngineError::Other("could not read the area to inpaint".into()));
+    }
+    Ok(Source { image: png(width, height, ChannelLayout::Rgb, rgb)?, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength })
+}
+
+/// Decode a generated image and fit it to `area`, in the document's format with alpha: scaled
+/// to cover it (keeping the image's own aspect ratio), centred, and cropped to it; or, with
+/// `exact`, stretched onto it, so an inpainting lands where the image it was given came from.
+fn fit(bytes: &[u8], fmt: PixelFormat, area: Rect, exact: bool) -> Result<Surface> {
     let src = crate::file_cmds::import("generated image", bytes)
         .map_err(|e| EngineError::Other(format!("the model's answer is not an image PhotoCraft can read ({e})")))?;
     let (w, h) = (f64::from(src.size.width), f64::from(src.size.height));
@@ -160,10 +247,11 @@ fn fit(bytes: &[u8], fmt: PixelFormat, area: Rect) -> Result<Surface> {
     let target = PixelFormat::new(fmt.mode, fmt.sample, true);
     let mut px = crate::file_cmds::flattened(&src, target);
     let (aw, ah) = (f64::from(area.width()), f64::from(area.height()));
-    let scale = (aw / w).max(ah / h);
-    if (scale - 1.0).abs() > 1e-6 {
+    let cover = (aw / w).max(ah / h);
+    let (sx, sy) = if exact { (aw / w, ah / h) } else { (cover, cover) };
+    if (sx - 1.0).abs() > 1e-6 || (sy - 1.0).abs() > 1e-6 {
         // Edge pixels repeat outwards, so an opaque image stays opaque up to its border.
-        px = resize_surface_in_canvas(&px, scale, scale, Resample::Bicubic, Rect::from_size(src.size));
+        px = resize_surface_in_canvas(&px, sx, sy, Resample::Bicubic, Rect::from_size(src.size));
     }
     let b = px.content_bounds();
     let dx = area.x0 + ((aw - f64::from(b.width())) / 2.0).round() as i32 - b.x0;
@@ -200,9 +288,43 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let server = s.ai.server.clone().filter(|_| model.provider.is_local());
     let key = s.ai.key(model.provider);
     s.ai.ready(&model).map_err(EngineError::Other)?;
+    let inpaint = match p.get("mode").map(|m| m.as_str().unwrap_or("?")) {
+        None | Some("txt2img") => false,
+        Some("inpaint") => true,
+        Some(m @ ("img2img" | "imgEdit")) => return Err(EngineError::Other(format!("`{m}` is not available yet; use txt2img or inpaint"))),
+        Some(_) => return Err(bad(cmd, "`mode` must be txt2img|inpaint")),
+    };
+    let number = |key: &str, default: f64, max: f64| match p.get(key) {
+        None => Ok(default),
+        Some(v) => v.as_f64().filter(|x| x.is_finite() && (0.0..=max).contains(x)).ok_or_else(|| bad(cmd, format!("`{key}` must be a number from 0 to {max}"))),
+    };
+    let (strength, context) = (number("strength", 1.0, 1.0)?, number("context", DEFAULT_CONTEXT, 4.0)?);
+    if inpaint && !model.can_inpaint() {
+        return Err(EngineError::Other(format!("{} is not set up for inpainting (Preferences \u{203a} AI Integrations, its Inpainting box)", model.name)));
+    }
+    // What an inpainting reads: the active pixel layer, and the selection's bounds on it.
+    let selected = if inpaint { Some(inpaint_blocked(s).map_err(EngineError::Other)?) } else { None };
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let selection = d.doc.selection.clone();
-    let area = target_area(p, selection.as_ref(), d.doc.bounds())?;
+    let source_layer = match selected {
+        Some(_) => d.active_layer.and_then(|id| d.doc.layer(id)).and_then(|l| match &l.content {
+            LayerContent::Raster(pixels) => Some(pixels.clone()),
+            _ => None,
+        }),
+        None => None,
+    };
+    let area = match selected {
+        // The model is shown the layer around the selection, and its answer covers that area.
+        Some(selected) if p.get("rect").is_none() => inpaint_area(selected, d.doc.bounds(), context),
+        Some(selected) => {
+            let area = target_area(p, selection.as_ref(), d.doc.bounds())?;
+            if area.intersect(&selected).is_empty() {
+                return Err(bad(cmd, "`rect` does not reach the selection"));
+            }
+            area
+        }
+        None => target_area(p, selection.as_ref(), d.doc.bounds())?,
+    };
     let fmt = d.doc.pixel_format();
     let seed = match p.get("seed") {
         Some(v) => v.as_u64().ok_or_else(|| bad(cmd, "`seed` must be a non-negative integer"))? & 0xFFFF_FFFF_FFFF,
@@ -211,15 +333,23 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
-    let job = Job { prompt: prompt.clone(), width: area.width(), height: area.height(), seed, alpha };
+    let mut job = Job { prompt: prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
     let name = layer_name(&prompt);
     let model_id = model.id.clone();
+    let label = if inpaint { INPAINT_LABEL } else { LABEL };
+    let job_selection = selection.clone().filter(|_| inpaint);
     crate::jobs::run(
         s,
-        LABEL,
+        label,
         true,
         move |ctx| {
             let control = Control { cancelled: &|| ctx.cancelled(), progress: &|f, m| ctx.progress(f, m), sleep: &|d| std::thread::sleep(d) };
+            if let (Some(layer), Some(selection)) = (&source_layer, &job_selection) {
+                ctx.progress(0.0, "Reading the layer\u{2026}");
+                let size = photocraft_aigen::source_size(&model, area.width(), area.height());
+                job.source = Some(inpaint_source(layer, selection, area, size, strength)?);
+                ctx.check()?;
+            }
             // A local model needs its server: use the one running, or start it.
             if let Some(server) = &server {
                 server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
@@ -227,11 +357,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             let image = photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(ai_error)?;
             ctx.check()?;
             ctx.progress(0.98, "Placing the image…");
-            let surface = fit(&image.bytes, fmt, area)?;
+            let surface = fit(&image.bytes, fmt, area, inpaint)?;
             Ok((surface, image))
         },
         move |s, (surface, image): (Surface, Generated)| {
-            let layer = s.edit(LABEL, |doc, active| {
+            let layer = s.edit(label, |doc, active| {
                 let mut l = Layer::raster(name, surface.format());
                 *crate::pixels_mut(&mut l)? = surface;
                 // Like Generative Fill: the selection becomes the new layer's mask, so a lasso or
@@ -247,6 +377,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 "layer": layer.0,
                 "bounds": [area.x0, area.y0, area.width(), area.height()],
                 "model": model_id,
+                "mode": if inpaint { "inpaint" } else { "txt2img" },
                 "seed": image.seed,
                 "renderSize": [image.width, image.height],
                 // US dollars, when the provider reported what it billed (OpenAI).
@@ -265,7 +396,7 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
             let ready = s.ai.ready(m);
             json!({
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
-                "alpha": m.alpha, "ready": ready.is_ok(), "why": ready.err(),
+                "alpha": m.alpha, "inpaint": m.can_inpaint(), "ready": ready.is_ok(), "why": ready.err(),
             })
         })
         .collect();
@@ -371,7 +502,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds, else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there),"strength":0..1=1 (inpaint, local models: how far the result may depart from what is there),"context":0..4=0.5 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -381,7 +512,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Models",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,ready,why}],comfyUrl,available}"##,
+            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,inpaint,ready,why}],comfyUrl,available}"##,
             enabled: always,
             run: models,
             journal: false,

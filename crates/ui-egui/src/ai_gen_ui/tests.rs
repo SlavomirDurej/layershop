@@ -15,6 +15,8 @@ impl Transport for Fake {
         } else if r.url.contains("/view?") {
             let img = photocraft_codecs::Image::from_u8(8, 8, photocraft_codecs::ChannelLayout::Rgba, [0u8, 255, 0, 255].repeat(64)).unwrap();
             photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &Default::default()).unwrap()
+        } else if r.url.ends_with("/upload/image") {
+            br#"{"name":"uploaded.png","subfolder":"","type":"input"}"#.to_vec()
         } else if r.url.ends_with("/models/diffusion_models") {
             br#"["z_image_turbo_bf16.safetensors","flux1-dev.safetensors","qwen_image_edit_2511_bf16.safetensors"]"#.to_vec()
         } else if r.url.contains("/models/") {
@@ -615,7 +617,9 @@ fn a_long_reason_under_generate_fits_in_the_panel() {
             ctx.run_ui(Default::default(), |ui| {
                 let area = egui::Rect::from_min_size(ui.max_rect().min, vec2(w, h));
                 let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
-                panel(&mut app, &mut child, true);
+                // The content itself, as the dock group lays it out (there it scrolls only when
+                // even a two-line prompt box doesn't fit).
+                panel_body(&mut app, &mut child, Some(h));
                 overflow = child.min_rect().bottom() - area.bottom();
             })
             .textures_delta
@@ -623,4 +627,155 @@ fn a_long_reason_under_generate_fits_in_the_panel() {
         }
         assert!(overflow <= 1.0, "{w}x{h}: the panel's content runs {overflow} points past its bottom");
     }
+    // The same on the InPaint tab, which has a row more.
+    app.run("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    for (w, h) in [(300.0, 420.0), (260.0, 340.0)] {
+        let mut overflow = 0.0f32;
+        for _ in 0..3 {
+            ctx.run_ui(Default::default(), |ui| {
+                let area = egui::Rect::from_min_size(ui.max_rect().min, vec2(w, h));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+                panel_body(&mut app, &mut child, Some(h));
+                overflow = child.min_rect().bottom() - area.bottom();
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(overflow <= 1.0, "inpaint {w}x{h}: the panel's content runs {overflow} points past its bottom");
+    }
+}
+
+#[test]
+fn the_inpaint_tab_lists_the_models_that_can_inpaint_and_keeps_its_own_choice() {
+    let mut app = app();
+    // Ernie doesn't inpaint well enough to be offered unasked; ticking its box offers it.
+    add_model(&mut app, Model { id: "ernie".into(), ..Family::Ernie.preset() });
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
+    add_model(&mut app, Model { id: "off".into(), inpaint: Some(false), ..Family::Flux2.preset() });
+    let ids = |app: &PhotocraftApp| enabled_models(app).into_iter().map(|m| m.id).collect::<Vec<_>>();
+    assert_eq!(ids(&app), ["ernie", "z", "flux", "off"]);
+    app.ui.ai_gen.model = "ernie".into();
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    assert_eq!(ids(&app), ["z", "flux"]);
+    draw_panel(&mut app);
+    // Each tab has its own model: choosing one for inpainting leaves the other tab's alone.
+    assert_eq!((app.ui.ai_gen.inpaint_model.as_str(), app.ui.ai_gen.model.as_str()), ("z", "ernie"));
+    app.ui.ai_gen.inpaint_model = "flux".into();
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.chosen(), "flux");
+    app.ui.ai_gen.mode = Mode::Txt2img;
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.chosen(), "ernie");
+    // No model that can: the tab says so instead of offering a list of nothing.
+    let only = vec![Model { id: "ernie".into(), ..Family::Ernie.preset() }];
+    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": only})).unwrap();
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    assert!(ids(&app).is_empty());
+    draw_panel(&mut app);
+    // A tab the engine can't run yet (set from outside: the panel doesn't offer it) is Txt2Img.
+    for mode in [Mode::Img2img, Mode::ImgEdit] {
+        app.ui.ai_gen.mode = mode;
+        assert!(!mode.available() && app.ui.ai_gen.mode() == Mode::Txt2img);
+        draw_panel(&mut app);
+        assert_eq!(app.ui.ai_gen.mode, Mode::Txt2img);
+    }
+    // The state reads and writes like the engine names the modes.
+    assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["txt2img", "inpaint", "img2img", "imgEdit"]));
+    assert_eq!(Mode::ALL.map(Mode::key), ["txt2img", "inpaint", "img2img", "imgEdit"]);
+    let old: AiGenUi = serde_json::from_value(json!({"prompt": "x"})).unwrap();
+    assert_eq!((old.mode, old.strength, old.context), (Mode::Txt2img, 1.0, 0.5));
+    let hostile = AiGenUi { strength: f64::NAN, context: -7.0, ..Default::default() };
+    assert_eq!((hostile.strength(), hostile.context()), (1.0, 0.0));
+}
+
+#[test]
+fn inpainting_from_the_panel_needs_a_selection_on_a_pixel_layer_and_adds_a_masked_layer() {
+    let mut app = app();
+    let z = z_image("z");
+    add_model(&mut app, z.clone());
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    app.ui.ai_gen.prompt = "a pond".into();
+    // No selection: Generate is off and says what to do.
+    assert!(generate_blocked(&app, &z).unwrap().contains("needs a selection"));
+    assert_eq!(target_size(&app), Some((64, 48, false)));
+    draw_panel(&mut app);
+    app.run("select.rect", json!({"x": 24, "y": 16, "width": 16, "height": 16})).unwrap();
+    assert_eq!(generate_blocked(&app, &z), None);
+    // The model renders the selection with half its edge of context on every side.
+    assert_eq!(target_size(&app), Some((32, 32, true)));
+    app.ui.ai_gen.context = 0.0;
+    assert_eq!(target_size(&app), Some((16, 16, true)));
+    app.ui.ai_gen.context = 0.5;
+    // An empty layer has nothing to repaint.
+    app.run("layer.new.layer", json!({})).unwrap();
+    assert!(generate_blocked(&app, &z).unwrap().contains("is empty inside the selection"));
+    draw_panel(&mut app);
+    app.run("edit.undo", json!({})).unwrap();
+    // A custom workflow ticked for inpainting but without an image to load can't.
+    let custom = Model {
+        family: Family::Custom,
+        name: "Mine".into(),
+        inpaint: Some(true),
+        workflow: r#"{"1":{"class_type":"X","inputs":{"t":"%prompt%"}}}"#.into(),
+        ..Model::default()
+    };
+    assert!(generate_blocked(&app, &custom).unwrap().contains("%image%"));
+    app.ui.ai_gen.strength = 0.6;
+    let before = app.session.active().unwrap().doc.layers.len();
+    draw_panel(&mut app);
+    let r = generate(&mut app).unwrap();
+    assert_eq!((r["mode"].as_str(), r["model"].as_str()), (Some("inpaint"), Some("z")));
+    assert_eq!(r["bounds"], json!([16, 8, 32, 32]));
+    let d = app.session.active().unwrap();
+    assert_eq!(d.doc.layers.len(), before + 1);
+    assert!(d.doc.layer(d.active_layer.unwrap()).unwrap().mask.is_some());
+    // The same button on the other tab is text to image, as before.
+    app.ui.ai_gen.mode = Mode::Txt2img;
+    assert_eq!(generate(&mut app).unwrap()["mode"], "txt2img");
+}
+
+#[test]
+fn the_inpainting_box_follows_the_architecture_until_it_is_used() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "ernie".into(), ..Family::Ernie.preset() });
+    let (_, mut f) = dialog_fields(&mut app);
+    draw_section(&mut f);
+    // Drawing the settings stores no choice: the models keep following their architecture.
+    let models: Vec<Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
+    assert_eq!(models.iter().map(|m| (m.inpaint, m.can_inpaint())).collect::<Vec<_>>(), [(None, true), (None, false)]);
+}
+
+#[test]
+fn the_dock_gives_the_panel_room_for_its_generate_button() {
+    use crate::dock::{DockLayout, Group};
+    let shown = [Group::Color, Group::Properties, Group::Layers];
+    let layout = DockLayout::default();
+    // A 900-point window: Properties is squeezed to its compact height, less than the panel needs.
+    let plain = layout.heights_for(&shown, 800.0, 28.0);
+    let mut app = app();
+    let want = 28.0 + wanted_height(&app);
+    assert!(plain[1].1 < want, "{plain:?}");
+    let roomy = layout.with_room(plain.clone(), Group::Properties, want);
+    assert_eq!(roomy[1].1, want);
+    // The room comes from Layers, which keeps its compact height; the column is as tall as before.
+    assert!(roomy[2].1 >= Group::Layers.compact_height());
+    assert_eq!(roomy.iter().map(|(_, h)| h).sum::<f32>(), plain.iter().map(|(_, h)| h).sum::<f32>());
+    // InPaint has a row more.
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    assert_eq!(wanted_height(&app), want - 28.0 + INPAINT_ROW);
+    // A column with nothing to spare gives nothing; a height the user dragged is theirs.
+    let tight = layout.heights_for(&shown, 420.0, 28.0);
+    assert_eq!(layout.with_room(tight.clone(), Group::Properties, want), tight);
+    let mut mine = DockLayout::default();
+    mine.heights.insert(Group::Properties, 120.0);
+    let dragged = mine.heights_for(&shown, 800.0, 28.0);
+    assert_eq!(mine.with_room(dragged.clone(), Group::Properties, want), dragged);
+    for hostile in [f32::NAN, f32::INFINITY, -5.0] {
+        assert_eq!(layout.with_room(plain.clone(), Group::Properties, hostile), plain);
+    }
+    assert!(layout.with_room(Vec::new(), Group::Properties, want).is_empty());
 }
