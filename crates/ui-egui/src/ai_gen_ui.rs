@@ -336,6 +336,12 @@ fn generate_blocked(app: &PhotocraftApp, model: &Model) -> Option<String> {
     if let Err(why) = app.session.ai.ready(model) {
         return Some(why);
     }
+    // A model set up in a way that can't run: say so before a server is started for it.
+    if model.provider.is_local()
+        && let Some(why) = photocraft_aigen::detect::problem(model)
+    {
+        return Some(why);
+    }
     if app.ui.ai_gen.prompt.trim().is_empty() {
         return Some(tr("Write a prompt first.").to_string());
     }
@@ -985,8 +991,11 @@ fn connected(f: &mut Map<String, Value>, action: &str, result: &Value) {
         text = format!("{text} · {}", tr("started by PhotoCraft"));
     }
     if action == "detect" {
-        let added = add_detected(f, &folders);
+        let (added, repaired) = add_detected(f, &folders);
         text = format!("{text} · {added} {}", tr("models added"));
+        if repaired > 0 {
+            text = format!("{text} · {repaired} {}", tr("repaired"));
+        }
     }
     f.insert(FILES.into(), folders);
     f.insert(STATUS.into(), json!({"error": false, "text": text}));
@@ -1135,24 +1144,40 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     }
 }
 
-/// Add the models detected in `folders` that the draft doesn't have yet. Returns how many.
-fn add_detected(f: &mut Map<String, Value>, folders: &Value) -> usize {
-    let Ok(folders) = serde_json::from_value(folders.clone()) else { return 0 };
-    let Some(ai) = f.get("values").and_then(|v| v.pointer("/integrations/ai")).and_then(Value::as_object).cloned() else { return 0 };
+/// Add the models detected in `folders` that the draft doesn't have yet, and repair the ones it
+/// has under the wrong architecture (the same model file, set up in a way that can't run).
+/// Returns how many were added and how many repaired.
+fn add_detected(f: &mut Map<String, Value>, folders: &Value) -> (usize, usize) {
+    let Ok(folders) = serde_json::from_value(folders.clone()) else { return (0, 0) };
+    let Some(ai) = f.get("values").and_then(|v| v.pointer("/integrations/ai")).and_then(Value::as_object).cloned() else { return (0, 0) };
     let mut ai = ai;
     let before: Settings = serde_json::from_value(Value::Object(ai.clone())).unwrap_or_default();
-    let mut added = 0;
+    let (mut added, mut repaired) = (0, 0);
     for m in photocraft_aigen::detect::detect(&folders) {
-        let have = before.models.iter().any(|x| x.provider.is_local() && x.family == m.family && x.unet == m.unet && x.checkpoint == m.checkpoint);
-        if !have {
-            push_model(&mut ai, f, m);
-            added += 1;
+        let same_file = |x: &&Model| x.provider.is_local() && x.unet == m.unet && x.checkpoint == m.checkpoint;
+        if before.models.iter().filter(same_file).any(|x| x.family == m.family && photocraft_aigen::detect::problem(x).is_none()) {
+            continue;
+        }
+        // The file is listed, but in a way that is known not to work: fix that entry in place
+        // instead of adding a second one beside it.
+        let broken = before.models.iter().position(|x| same_file(&x) && photocraft_aigen::detect::problem(x).is_some());
+        match broken.and_then(|i| Some((i, serde_json::to_value(photocraft_aigen::detect::repaired(before.models.get(i)?, &m)).ok()?))) {
+            Some((i, fixed)) => {
+                if let Some(slot) = ai.get_mut("models").and_then(Value::as_array_mut).and_then(|list| list.get_mut(i)) {
+                    *slot = fixed;
+                    repaired += 1;
+                }
+            }
+            None => {
+                push_model(&mut ai, f, m);
+                added += 1;
+            }
         }
     }
     if let Some(slot) = f.get_mut("values").and_then(|v| v.pointer_mut("/integrations/ai")) {
         *slot = Value::Object(ai);
     }
-    added
+    (added, repaired)
 }
 
 /// Preferences confirmed (OK / Apply): store the keys typed in the dialog, and save them.

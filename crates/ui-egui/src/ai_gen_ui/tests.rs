@@ -393,6 +393,56 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
 }
 
 #[test]
+fn scanning_repairs_a_model_set_up_as_the_wrong_architecture() {
+    /// A server with the Qwen Image 2.1 files.
+    struct Qwen;
+    impl Transport for Qwen {
+        fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+            let body: &[u8] = if r.url.ends_with("/models/diffusion_models") {
+                br#"["qwen_image_2.1_int8_convrot.safetensors"]"#
+            } else if r.url.ends_with("/models/text_encoders") {
+                br#"["qwen_2.5_vl_7b_fp8_scaled.safetensors","qwen3vl_8b_int8_convrot.safetensors"]"#
+            } else if r.url.ends_with("/models/vae") {
+                br#"["qwen_image_vae.safetensors","qwen_image_2.1_vae_bf16.safetensors"]"#
+            } else {
+                b"[]"
+            };
+            Ok(Response { status: 200, body: body.to_vec() })
+        }
+    }
+    let mut app = app();
+    app.session.ai.transport = Some(Arc::new(Qwen));
+    // As an older scan left it, with the user's own name and seed.
+    add_model(
+        &mut app,
+        Model { id: "q".into(), name: "my qwen".into(), seed: 7, unet: "qwen_image_2.1_int8_convrot.safetensors".into(), ..Family::QwenImage.preset() },
+    );
+    // Generating with it says what is wrong instead of failing in the sampler.
+    app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+    let e = app.run("ai.generate", json!({"prompt": "x", "model": "q"})).unwrap_err();
+    assert!(e.contains("Qwen Image 2.1 model") && e.contains("Scan Server"), "{e}");
+    // The panel says so under a disabled Generate, before anything is started.
+    app.ui.ai_gen.prompt = "x".into();
+    let broken = app.session.prefs().integrations.ai.models[0].clone();
+    assert!(generate_blocked(&app, &broken).unwrap().contains("Scan Server"));
+    // Scan Server fixes that entry in place: no second one beside it.
+    let (_, mut f) = dialog_fields(&mut app);
+    f.insert(ACTION.into(), json!("detect"));
+    after_body(&mut app, &mut f);
+    let models = f["values"]["integrations"]["ai"]["models"].as_array().unwrap().clone();
+    assert_eq!(models.len(), 1, "{models:?}");
+    assert_eq!((models[0]["id"].as_str(), models[0]["name"].as_str(), models[0]["seed"].as_i64()), (Some("q"), Some("my qwen"), Some(7)));
+    assert_eq!((models[0]["family"].as_str(), models[0]["clip"].as_str()), (Some("qwenImage21"), Some("qwen3vl_8b_int8_convrot.safetensors")));
+    assert_eq!(models[0]["vae"], "qwen_image_2.1_vae_bf16.safetensors");
+    assert!(f[STATUS]["text"].as_str().unwrap().contains("1 repaired"), "{}", f[STATUS]);
+    // A second scan has nothing left to do.
+    f.insert(ACTION.into(), json!("detect"));
+    after_body(&mut app, &mut f);
+    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 1);
+    assert!(!f[STATUS]["text"].as_str().unwrap().contains("repaired"));
+}
+
+#[test]
 fn the_page_divides_whatever_width_the_dialog_gives_it() {
     assert_eq!(page_widths(540.0), (180.0, 200.0));
     let (list, field) = page_widths(830.0);

@@ -59,6 +59,61 @@ fn family_of(file: &str) -> Option<Family> {
     })
 }
 
+/// A model set up in a way that is known not to run, and what to do: files of one architecture
+/// under another's settings. Only the combinations that are certain to fail are reported (the
+/// user is free to try anything else); the alternative is ComfyUI's own error, a tensor shape.
+pub fn problem(model: &Model) -> Option<String> {
+    let name = if model.name.trim().is_empty() { model.family.label() } else { model.name.trim() };
+    let fix = "On Preferences › AI Integrations › Local Models, press Scan Server to repair it";
+    let unet = model.unet.to_ascii_lowercase();
+    let is_21_file = family_of(&model.unet) == Some(Family::QwenImage21);
+    match model.family {
+        // The model that prompted this: scanned as Qwen Image before 2.1 had its own settings.
+        Family::QwenImage if is_21_file => Some(format!(
+            "{name}: {} is a Qwen Image 2.1 model, but it is set up as Qwen Image, whose text encoder and VAE it can't use. {fix}, or set its Architecture to Qwen Image 2.1.",
+            model.unet.trim()
+        )),
+        Family::QwenImage21 if !unet.is_empty() && !is_21_file && family_of(&model.unet) == Some(Family::QwenImage) => Some(format!(
+            "{name}: {} is a Qwen Image model, but it is set up as Qwen Image 2.1. {fix}, or set its Architecture to Qwen Image.",
+            model.unet.trim()
+        )),
+        Family::QwenImage21 => {
+            let clip = model.clip.to_ascii_lowercase();
+            let vae = model.vae.to_ascii_lowercase();
+            if clip.contains("qwen_2.5") || clip.contains("qwen2.5") {
+                Some(format!(
+                    "{name}: Qwen Image 2.1 needs the Qwen 3 VL 8B text encoder (qwen3vl_8b…), not {}. {fix}, or choose that text encoder.",
+                    model.clip.trim()
+                ))
+            } else if vae == "qwen_image_vae.safetensors" {
+                Some(format!("{name}: Qwen Image 2.1 needs its own VAE (qwen_image_2.1_vae…), not {}. {fix}, or choose that VAE.", model.vae.trim()))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `existing` with the architecture, files and sampling of `detected` (the same model file,
+/// detected afresh): what Scan Server does to a model that was set up as the wrong
+/// architecture. The user's own choices that still apply are kept: its id, name, whether it is
+/// listed, seed, render size, LoRA, negative prompt and transparency.
+pub fn repaired(existing: &Model, detected: &Model) -> Model {
+    Model {
+        id: existing.id.clone(),
+        name: existing.name.clone(),
+        enabled: existing.enabled,
+        seed: existing.seed,
+        megapixels: existing.megapixels,
+        lora: existing.lora.clone(),
+        lora_strength: existing.lora_strength,
+        negative_prompt: existing.negative_prompt.clone(),
+        alpha: existing.alpha,
+        ..detected.clone()
+    }
+}
+
 /// Models for the text-to-image files in `folders` (as [`crate::comfy_models`] returns them),
 /// each with its family's reference settings and the encoder / VAE files the server has.
 pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
@@ -219,6 +274,46 @@ mod tests {
         );
         let q = by("qwen_image_2512_fp8_e4m3fn.safetensors");
         assert_eq!((q.family, q.clip.as_str(), q.vae.as_str()), (Family::QwenImage, "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"));
+    }
+
+    #[test]
+    fn a_qwen_2_1_file_under_qwen_image_settings_is_caught_and_repaired() {
+        let found = detect(&folders());
+        let right = found.iter().find(|m| m.unet == "qwen_image_2.1_int8_convrot.safetensors").unwrap();
+        assert_eq!(problem(right), None);
+        // As an older scan left it: the 2.1 file with Qwen Image's architecture, encoder and VAE.
+        let wrong = Model {
+            id: "qwen-image-2-1-int8-convrot".into(),
+            name: "my qwen".into(),
+            enabled: false,
+            seed: 42,
+            megapixels: 2.0,
+            unet: right.unet.clone(),
+            ..Family::QwenImage.preset()
+        };
+        let why = problem(&wrong).unwrap();
+        assert!(why.contains("my qwen") && why.contains("Qwen Image 2.1 model") && why.contains("Scan Server"), "{why}");
+        // The architecture changed by hand but the files left as they were.
+        let half = Model { family: Family::QwenImage21, ..wrong.clone() };
+        assert!(problem(&half).unwrap().contains("qwen3vl_8b"), "{:?}", problem(&half));
+        let vae_only = Model { clip: right.clip.clone(), ..half.clone() };
+        assert!(problem(&vae_only).unwrap().contains("VAE"));
+        // The other way round, too.
+        let reversed = Model { unet: "qwen_image_2512_fp8_e4m3fn.safetensors".into(), ..right.clone() };
+        assert!(problem(&reversed).unwrap().contains("set up as Qwen Image 2.1"));
+        // Repairing takes the detected architecture and files and keeps the user's own choices.
+        let fixed = repaired(&wrong, right);
+        assert_eq!(problem(&fixed), None);
+        assert_eq!((fixed.family, fixed.clip.as_str(), fixed.vae.as_str(), fixed.steps), (Family::QwenImage21, right.clip.as_str(), right.vae.as_str(), 25));
+        assert_eq!(
+            (fixed.id.as_str(), fixed.name.as_str(), fixed.enabled, fixed.seed, fixed.megapixels),
+            ("qwen-image-2-1-int8-convrot", "my qwen", false, 42, 2.0)
+        );
+        // Nothing else is second-guessed: every preset, and a file name that says nothing.
+        for f in Family::ALL {
+            assert_eq!(problem(&f.preset()), None, "{f:?}");
+        }
+        assert_eq!(problem(&Model { unet: "mystery.safetensors".into(), ..Family::Flux2.preset() }), None);
     }
 
     #[test]

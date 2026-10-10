@@ -72,6 +72,11 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
     if model.family == Family::Custom {
         return custom_workflow(model, job);
     }
+    // A set-up that can't run: say so in words here, not as a tensor shape from the sampler
+    // after the models have loaded.
+    if let Some(why) = crate::detect::problem(model) {
+        return Err(Error::Config(why));
+    }
     let f = model.family;
     let mut g = Graph::default();
     let (mut unet, clip, vae) = if f.uses_checkpoint() {
@@ -454,6 +459,13 @@ mod tests {
         let text = w.to_string();
         assert!(text.contains("qwen3vl_8b") && text.contains("qwen_image_2.1_vae") && !text.contains("qwen_2.5_vl"), "{text}");
         assert_eq!(Family::QwenImage21.size_multiple(), 32);
+    }
+
+    #[test]
+    fn a_set_up_that_cannot_run_is_refused_in_words() {
+        let wrong = Model { unet: "qwen_image_2.1_int8_convrot.safetensors".into(), name: "qwen 2.1".into(), ..Family::QwenImage.preset() };
+        let e = workflow(&wrong, &job()).unwrap_err();
+        assert!(matches!(&e, Error::Config(s) if s.contains("Qwen Image 2.1 model") && s.contains("Scan Server")), "{e}");
     }
 
     #[test]
