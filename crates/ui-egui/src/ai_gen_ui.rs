@@ -370,6 +370,8 @@ const AUTO: &str = "__aiAutoConnect";
 /// it started itself (for the Stop button).
 const JOB: &str = "__aiJob";
 const STARTED: &str = "__aiStarted";
+/// What the last Find Installation / Browse / Stop Server did (`{error, text}`).
+const LAUNCH_STATUS: &str = "__aiLaunchStatus";
 
 fn text_of(obj: &Map<String, Value>, key: &str) -> String {
     obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -384,7 +386,7 @@ fn label(ui: &mut egui::Ui, text: &str) {
 fn text_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &str, hint: &str) {
     label(ui, title);
     let mut s = text_of(obj, key);
-    ui.add(egui::TextEdit::singleline(&mut s).desired_width(FIELD).hint_text(hint));
+    ui.add(egui::TextEdit::singleline(&mut s).desired_width(field_width(ui)).hint_text(hint));
     obj.insert(key.into(), json!(s));
     ui.end_row();
 }
@@ -420,10 +422,10 @@ fn file_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &
                 options.push((String::new(), none.as_str()));
             }
             options.extend(names.iter().map(|n| (n.clone(), n.as_str())));
-            widgets::dropdown(ui, &format!("ai-file-{key}"), &mut cur, &options, FIELD);
+            widgets::dropdown(ui, &format!("ai-file-{key}"), &mut cur, &options, field_width(ui));
         }
         None => {
-            ui.add(egui::TextEdit::singleline(&mut cur).desired_width(FIELD).hint_text("model.safetensors"));
+            ui.add(egui::TextEdit::singleline(&mut cur).desired_width(field_width(ui)).hint_text(tr("Not set")));
         }
     }
     obj.insert(key.into(), json!(cur));
@@ -439,7 +441,7 @@ fn choice_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title:
     if !choices.contains(&cur.as_str()) {
         options.insert(0, (extra.clone(), extra.as_str()));
     }
-    widgets::dropdown(ui, &format!("ai-choice-{key}"), &mut cur, &options, FIELD);
+    widgets::dropdown(ui, &format!("ai-choice-{key}"), &mut cur, &options, field_width(ui));
     obj.insert(key.into(), json!(cur));
     ui.end_row();
 }
@@ -477,10 +479,29 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
 /// The pages of the Integrations section: (key, title).
 const PAGES: [(&str, &str); 4] = [("local", "Local Models"), ("cloud", "Cloud Models"), ("keys", "API Keys"), ("server", "Local Server")];
 /// Width of the model list beside the selected model's settings, and height of both.
-const LIST_WIDTH: f32 = 180.0;
 const PANE_HEIGHT: f32 = 420.0;
-/// Width of a field in the model settings (what the pane leaves beside the labels).
-const FIELD: f32 = 200.0;
+
+/// The widths of the model list and of a field in the model settings, for a page `page` wide:
+/// the Preferences dialog's width is the app's to decide, so the page divides what it gets
+/// (a third to the list, the rest less the labels to the fields) within sensible bounds.
+fn page_widths(page: f32) -> (f32, f32) {
+    let page = if page.is_finite() { page } else { 540.0 };
+    let list = (page * 0.32).clamp(180.0, 280.0);
+    (list, (page - list - 160.0).clamp(200.0, 420.0))
+}
+
+fn widths_id() -> egui::Id {
+    egui::Id::new("ai-settings-widths")
+}
+
+/// The field width of the page being drawn (see [`page_widths`]).
+fn field_width(ui: &egui::Ui) -> f32 {
+    ui.data(|d| d.get_temp::<(f32, f32)>(widths_id())).map_or(200.0, |(_, field)| field)
+}
+
+fn list_width(ui: &egui::Ui) -> f32 {
+    ui.data(|d| d.get_temp::<(f32, f32)>(widths_id())).map_or(180.0, |(list, _)| list)
+}
 
 fn is_local_model(m: &Value) -> bool {
     m.get("provider").and_then(Value::as_str).unwrap_or(Provider::Comfy.key()) == Provider::Comfy.key()
@@ -491,6 +512,8 @@ fn is_local_model(m: &Value) -> bool {
 /// models (each a list beside the selected model's settings), API keys, and the local server.
 pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>) {
     let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
+    let widths = page_widths(ui.available_width());
+    ui.data_mut(|d| d.insert_temp(widths_id(), widths));
     let mut page = f.get(PAGE).and_then(Value::as_str).filter(|p| PAGES.iter().any(|(k, _)| k == p)).unwrap_or("local").to_string();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -578,24 +601,27 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     ui.add_space(6.0);
     let mut launch = ai.get("comfyLaunch").and_then(Value::as_object).cloned().unwrap_or_default();
     egui::Grid::new("ai-launch").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-        for (key, title, hint, tip) in [
-            (
-                "python",
-                "Python",
-                "…\\.venv\\Scripts\\python.exe",
-                "The Python that has ComfyUI's packages: its virtual environment's, or the portable build's python_embeded",
-            ),
-            ("folder", "Folder", "…\\ComfyUI", "The folder ComfyUI is started in"),
+        // (key, title, tooltip, what Browse asks for)
+        for (key, title, tip, browse) in [
+            ("python", "Python", "The Python that has ComfyUI's packages: its virtual environment's, or the portable build's python_embeded", "browsePython"),
+            ("folder", "Folder", "The folder ComfyUI is started in: the one with main.py, unless the arguments name the script with a path", "browseScript"),
         ] {
             label(ui, title);
-            let mut v = text_of(&launch, key);
-            ui.add(egui::TextEdit::singleline(&mut v).desired_width(380.0).hint_text(hint)).on_hover_text(tr(tip));
-            launch.insert(key.into(), json!(v));
+            ui.horizontal(|ui| {
+                let mut v = text_of(&launch, key);
+                // "Not set", not a sample path: a sample reads as if the field were filled in.
+                ui.add(egui::TextEdit::singleline(&mut v).desired_width(300.0).hint_text(tr("Not set"))).on_hover_text(tr(tip));
+                launch.insert(key.into(), json!(v));
+                // Python has no file type to filter by outside Windows: there the path is typed.
+                if (key != "python" || cfg!(windows)) && ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Browse…"), 72.0)).inner.clicked() {
+                    f.insert(ACTION.into(), json!(browse));
+                }
+            });
             ui.end_row();
         }
         label(ui, "Arguments");
         let mut v = text_of(&launch, "args");
-        ui.add(egui::TextEdit::multiline(&mut v).desired_rows(3).desired_width(380.0).hint_text("main.py"))
+        ui.add(egui::TextEdit::multiline(&mut v).desired_rows(3).desired_width(380.0).hint_text(tr("Not set (main.py)")))
             .on_hover_text(tr("The script and its options, as on ComfyUI's command line. Leave out --port: the address above decides it"));
         // One line: a pasted command line with line breaks is still one command.
         launch.insert("args".into(), json!(v.replace(['\r', '\n'], " ")));
@@ -605,7 +631,12 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     ui.add_space(6.0);
     ui.horizontal(|ui| {
         let find = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Find Installation"), 130.0)).inner;
-        if find.on_hover_text(tr("Fill these in from the ComfyUI that is running now. Start it once the way you usually do, then press this")).clicked() {
+        if find
+            .on_hover_text(tr(
+                "Fill these in: from the ComfyUI that is running now, or else from the one ComfyUI Desktop installed. For any other installation use Browse",
+            ))
+            .clicked()
+        {
             f.insert(ACTION.into(), json!("find"));
         }
         let started = f.get(STARTED).and_then(Value::as_bool).unwrap_or(false);
@@ -617,6 +648,16 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             ui.label(RichText::new(tr("Running, started by PhotoCraft")).color(t.text_faint).size(11.5));
         }
     });
+    // What Find, Browse or Stop did, where the eye is: right under the buttons.
+    if let Some(status) = f.get(LAUNCH_STATUS).and_then(Value::as_object) {
+        let error = status.get("error").and_then(Value::as_bool).unwrap_or(false);
+        let text = status.get("text").and_then(Value::as_str).unwrap_or("");
+        ui.add_space(2.0);
+        ui.scope(|ui| {
+            ui.set_max_width(520.0);
+            ui.add(egui::Label::new(RichText::new(text).color(if error { t.danger } else { t.text_dim }).size(11.5)).wrap().selectable(true));
+        });
+    }
     // What the server offers, once it has been read.
     if let Some(files) = f.get(FILES).and_then(Value::as_object) {
         ui.add_space(10.0);
@@ -716,7 +757,8 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         }
     });
     if local {
-        status_line(ui, f, "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page.", 520.0);
+        let page = ui.available_width();
+        status_line(ui, f, "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page.", page);
     } else {
         // A cloud model without its key can't run: say so here, where the model is.
         let keys = f.get(KEYS).and_then(Value::as_object);
@@ -754,7 +796,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     ui.horizontal_top(|ui| {
         // ----- the list -----
         ui.vertical(|ui| {
-            ui.set_width(LIST_WIDTH);
+            ui.set_width(list_width(ui));
             egui::ScrollArea::vertical().id_salt(("ai-model-list", local)).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
                 for &i in &shown {
                     let Some(m) = models.get_mut(i).and_then(Value::as_object_mut) else { continue };
@@ -837,7 +879,7 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
             label(ui, "Architecture");
             let mut family = Family::from_key(&text_of(m, "family")).unwrap_or_default();
             let options: Vec<(Family, &str)> = Family::ALL.into_iter().map(|x| (x, x.label())).collect();
-            widgets::dropdown(ui, "ai-family", &mut family, &options, FIELD);
+            widgets::dropdown(ui, "ai-family", &mut family, &options, field_width(ui));
             m.insert("family".into(), json!(family.key()));
             ui.end_row();
 
@@ -846,8 +888,8 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
                 label(ui, "Workflow");
                 let mut text = text_of(m, "workflow");
                 ui.vertical(|ui| {
-                    ui.set_max_width(FIELD + 8.0);
-                    ui.add(egui::TextEdit::multiline(&mut text).desired_rows(6).desired_width(FIELD).font(egui::TextStyle::Monospace).hint_text("{ \"1\": { \"class_type\": … } }"));
+                    ui.set_max_width(field_width(ui) + 8.0);
+                    ui.add(egui::TextEdit::multiline(&mut text).desired_rows(6).desired_width(field_width(ui)).font(egui::TextStyle::Monospace).hint_text("{ \"1\": { \"class_type\": … } }"));
                     ui.label(
                         RichText::new(tr("ComfyUI › Workflow › Export (API). Use %prompt%, %negative%, %width%, %height%, %seed%, %steps% and %cfg% where those values go."))
                             .color(t.text_faint)
@@ -969,6 +1011,54 @@ fn connect_failed(f: &mut Map<String, Value>, action: &str, why: &str) {
     f.insert(STATUS.into(), json!({"error": false, "text": text}));
 }
 
+fn launch_status(f: &mut Map<String, Value>, error: bool, text: &str) {
+    f.insert(LAUNCH_STATUS.into(), json!({"error": error, "text": text}));
+}
+
+/// Browse…: ask for ComfyUI's Python (`python`) or its `main.py`, and fill the launch settings
+/// of the open Preferences dialog from the choice when it is made (the file dialog answers on a
+/// later frame, so the answer goes to whichever Preferences dialog is open then).
+fn browse(app: &mut PhotocraftApp, f: &mut Map<String, Value>, python: bool) {
+    let current: photocraft_aigen::Launch = serde_json::from_value(draft(f).get("comfyLaunch").cloned().unwrap_or(Value::Null)).unwrap_or_default();
+    // Start where the current choice is, else where the other half points.
+    let near = |p: &str| std::path::Path::new(p.trim()).parent().filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_string_lossy().into_owned());
+    let initial_dir =
+        if python { near(&current.python).or_else(|| Some(current.folder.clone())) } else { Some(current.folder.clone()).or_else(|| near(&current.python)) }
+            .filter(|d| !d.trim().is_empty());
+    let extensions = Some(vec![if python { "exe" } else { "py" }.to_string()]);
+    let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Open { multiple: false, initial_dir, extensions }, |app, answer| {
+        let crate::file_dialog::FileDialogAnswer::Paths(paths) = answer else { return Ok(Value::Null) };
+        let Some(path) = paths.first() else { return Ok(Value::Null) };
+        let Some(d) = app.ui.dialogs.iter_mut().find(|d| crate::prefs_ui::is_preferences(&d.fields)) else { return Ok(Value::Null) };
+        picked(&mut d.fields, path);
+        Ok(Value::Null)
+    });
+    if let Err(e) = asked {
+        launch_status(f, true, &format!("{}: {e}", tr("Could not open the file dialog")));
+    }
+}
+
+/// The user chose `path` with Browse: fill the draft's launch settings from it and say what is
+/// still missing.
+fn picked(f: &mut Map<String, Value>, path: &str) {
+    let current: photocraft_aigen::Launch = serde_json::from_value(draft(f).get("comfyLaunch").cloned().unwrap_or(Value::Null)).unwrap_or_default();
+    let launch = photocraft_aigen::launch::from_picked(path, &current, &|p| p.is_file());
+    let missing = match (launch.python.trim().is_empty(), launch.folder.trim().is_empty()) {
+        (true, _) => Some(tr("Now choose its Python with Browse (python.exe in ComfyUI's .venv or python_embeded folder).")),
+        (_, true) => Some(tr("Now choose ComfyUI's main.py with Browse.")),
+        _ => None,
+    };
+    if let (Some(ai), Ok(v)) =
+        (f.get_mut("values").and_then(|v| v.pointer_mut("/integrations/ai")).and_then(Value::as_object_mut), serde_json::to_value(&launch))
+    {
+        ai.insert("comfyLaunch".into(), v);
+    }
+    match missing {
+        Some(text) => launch_status(f, false, text),
+        None => launch_status(f, false, tr("Python and folder are set. Switch on \"Start ComfyUI…\" above and press OK; Connect starts it now to check.")),
+    }
+}
+
 /// After the dialog body: run what a button asked for (the body has no access to the app), and
 /// follow a Connect / Scan that is running in the background.
 pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
@@ -1007,22 +1097,23 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
                     }
                 }
                 let text = if complete {
-                    tr("Found the running ComfyUI. PhotoCraft will start it this way when it isn't running.")
+                    tr("Found your ComfyUI and switched on starting it. Press OK to save: PhotoCraft will then start it whenever a local model needs it.")
                 } else {
-                    tr("Found its arguments, but not its Python and folder: fill those in.")
+                    tr("Found its arguments, but not its Python and folder: choose them with Browse.")
                 };
-                f.insert(STATUS.into(), json!({"error": !complete, "text": text}));
+                launch_status(f, !complete, text);
             }
-            Err(e) => failed(f, &e.to_string()),
+            Err(e) => launch_status(f, true, &e.to_string()),
         },
         "stop" => match app.session.execute("ai.server.stop", json!({})) {
             Ok(r) if r.get("stopped").and_then(Value::as_bool) == Some(true) => {
-                f.insert(STATUS.into(), json!({"error": false, "text": tr("Stopped the ComfyUI that PhotoCraft started.")}));
+                launch_status(f, false, tr("Stopped the ComfyUI that PhotoCraft started."));
                 f.insert(STARTED.into(), json!(false));
             }
-            Ok(_) => failed(f, tr("PhotoCraft has not started a ComfyUI. One started elsewhere is left running.")),
-            Err(e) => failed(f, &e.to_string()),
+            Ok(_) => launch_status(f, true, tr("PhotoCraft has not started a ComfyUI. One started elsewhere is left running.")),
+            Err(e) => launch_status(f, true, &e.to_string()),
         },
+        "browsePython" | "browseScript" => browse(app, f, action == "browsePython"),
         _ => {
             // Opening the page only looks: it never starts a server.
             let params = json!({"settings": settings, "start": action != "peek"});

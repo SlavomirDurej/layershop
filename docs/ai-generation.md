@@ -44,9 +44,14 @@ stopped when PhotoCraft quits.
 - **A ComfyUI that is already running is used as it is.** PhotoCraft first asks the address; if a
   ComfyUI answers (ComfyUI Desktop, a terminal), nothing is started, and nothing is stopped later:
   it is yours. Only a server PhotoCraft started is ever stopped (on quit, or with **Stop Server**).
-- **Find Installation** fills in the Python, folder and arguments from the ComfyUI that is running
-  now: start it once the way you usually do, press the button, and from then on PhotoCraft can
-  start it the same way. The port comes from the address.
+- **Find Installation** fills in the Python, folder and arguments: from the ComfyUI that is
+  running now (exactly how it was started), or, when none is running, from the installation
+  ComfyUI Desktop recorded on this computer. The port comes from the address.
+- **Browse…** is for any other installation (a git clone, the portable build): choose its
+  `main.py` and its `python.exe`. Whichever half sits in a usual place next to the other
+  (`.venv`, `venv`, `python_embeded`) is filled in for you. Outside Windows the Python path is
+  typed, as it has no file type to browse by.
+- What these buttons did is reported right under them.
 - Its output goes to `comfyui.log` in the settings folder; a start that fails quotes its last lines.
 - If PhotoCraft crashes, a server it started keeps running. The next launch finds it answering
   and uses it, but no longer stops it on quit: close it from the Task Manager, or just leave it.

@@ -32,6 +32,30 @@ fn run() -> Result<(), String> {
         println!("args:   {}", launch.args);
         return Ok(());
     }
+    // `<url> installed [port]`: what Find Installation fills in while ComfyUI is closed; with a
+    // port, also start it that way, wait for it, and stop it.
+    if args.get(1).map(String::as_str) == Some("installed") {
+        use photocraft_aigen::{ComfyProcess, LocalServer};
+        let launch = photocraft_aigen::launch::find_installed().ok_or("no ComfyUI Desktop installation found")?;
+        println!("python: {}", launch.python);
+        println!("folder: {}", launch.folder);
+        println!("args:   {}", launch.args);
+        let Some(port) = args.get(2) else { return Ok(()) };
+        let settings = Settings { comfy_url: format!("http://127.0.0.1:{port}"), comfy_autostart: true, comfy_launch: launch, ..Settings::default() };
+        let log = std::env::temp_dir().join("photocraft-comfy-example.log");
+        let server = ComfyProcess::new(Some(log));
+        let control = Control { cancelled: &|| false, progress: &|_, _| {}, sleep: &|d: Duration| std::thread::sleep(d) };
+        let begun = std::time::Instant::now();
+        server.ensure(&transport, &settings, &control).map_err(|e| e.to_string())?;
+        let files = comfy_models(&transport, &settings.comfy_url).map_err(|e| e.to_string())?;
+        println!(
+            "answering on port {port} after {:.1}s, {} diffusion models",
+            begun.elapsed().as_secs_f32(),
+            files.get("diffusion_models").map_or(0, Vec::len)
+        );
+        println!("stopped: {}", server.stop());
+        return Ok(());
+    }
     // `<url> start <port>`: start a second, hidden ComfyUI on <port> the way the one at <url> was
     // started, wait for it, then stop it. A check of the launcher that leaves <url> alone.
     if args.get(1).map(String::as_str) == Some("start") {

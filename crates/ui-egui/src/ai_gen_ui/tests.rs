@@ -339,7 +339,9 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     assert_eq!(ai["comfyLaunch"]["python"], "C:/comfy/.venv/Scripts/python.exe");
     assert_eq!(ai["comfyLaunch"]["args"], "main.py --enable-manager");
     assert_eq!(ai["comfyAutostart"], true);
-    assert_eq!(f[STATUS]["error"], false);
+    // The result is reported under the button that was pressed.
+    assert_eq!(f[LAUNCH_STATUS]["error"], false);
+    assert!(f[LAUNCH_STATUS]["text"].as_str().unwrap().contains("Press OK"));
     draw_section(&mut f);
     // Opening the Local Models page only looks: it must not start a server, or even ask to.
     let asked = server.ensured.lock().unwrap().len();
@@ -373,10 +375,10 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     // Stop Server stops ours; a second press has nothing to stop and says so.
     f.insert(ACTION.into(), json!("stop"));
     after_body(&mut app, &mut f);
-    assert_eq!((f[STARTED].clone(), f[STATUS]["error"].clone()), (json!(false), json!(false)));
+    assert_eq!((f[STARTED].clone(), f[LAUNCH_STATUS]["error"].clone()), (json!(false), json!(false)));
     f.insert(ACTION.into(), json!("stop"));
     after_body(&mut app, &mut f);
-    assert_eq!(f[STATUS]["error"], true);
+    assert_eq!(f[LAUNCH_STATUS]["error"], true);
     // The launch settings are saved with OK and survive a round trip.
     crate::prefs_ui::confirm(&mut app, &f).unwrap();
     let saved = &app.session.prefs().integrations.ai;
@@ -386,7 +388,56 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     app.session.ai.server = None;
     f.insert(ACTION.into(), json!("find"));
     after_body(&mut app, &mut f);
-    assert!(f[STATUS]["text"].as_str().unwrap().contains("desktop app"));
+    assert!(f[LAUNCH_STATUS]["text"].as_str().unwrap().contains("desktop app"));
+    draw_section(&mut f);
+}
+
+#[test]
+fn the_page_divides_whatever_width_the_dialog_gives_it() {
+    assert_eq!(page_widths(540.0), (180.0, 200.0));
+    let (list, field) = page_widths(830.0);
+    assert!(list > 250.0 && field > 380.0 && list + field + 160.0 <= 830.0, "{list} {field}");
+    for odd in [0.0, -5.0, f32::NAN, f32::INFINITY, 1e9] {
+        let (list, field) = page_widths(odd);
+        assert!((180.0..=280.0).contains(&list) && (200.0..=420.0).contains(&field), "{odd}: {list} {field}");
+    }
+}
+
+#[test]
+fn browse_fills_the_launch_settings_from_the_chosen_file() {
+    let mut app = app();
+    let (_, mut f) = dialog_fields(&mut app);
+    // Without a file dialog (tests, the web) Browse says so instead of doing nothing.
+    f.insert(ACTION.into(), json!("browseScript"));
+    after_body(&mut app, &mut f);
+    assert_eq!(f[LAUNCH_STATUS]["error"], true);
+    // A chosen main.py sets the folder and the script, and asks for the other half.
+    picked(&mut f, "C:/nowhere/ComfyUI/main.py");
+    let launch = f["values"]["integrations"]["ai"]["comfyLaunch"].clone();
+    assert_eq!(launch["args"], "main.py");
+    assert!(launch["folder"].as_str().unwrap().replace('\\', "/").ends_with("nowhere/ComfyUI"));
+    assert!(f[LAUNCH_STATUS]["text"].as_str().unwrap().contains("Python"));
+    // Then the Python: both set, nothing else changed.
+    picked(&mut f, "C:/nowhere/ComfyUI/.venv/Scripts/python.exe");
+    let launch = f["values"]["integrations"]["ai"]["comfyLaunch"].clone();
+    assert!(launch["python"].as_str().unwrap().ends_with("python.exe"));
+    assert_eq!(launch["args"], "main.py");
+    assert_eq!(f[LAUNCH_STATUS]["error"], false);
+    assert!(f[LAUNCH_STATUS]["text"].as_str().unwrap().contains("Python and folder are set"));
+    draw_section(&mut f);
+    // With a dialog service the request asks for the right kind of file.
+    let asked: std::rc::Rc<std::cell::RefCell<Vec<crate::file_dialog::FileDialogRequest>>> = Default::default();
+    let log = asked.clone();
+    app.services.file_dialog = Some(Box::new(move |request, _, _| log.borrow_mut().push(request)));
+    f.insert(ACTION.into(), json!("browsePython"));
+    after_body(&mut app, &mut f);
+    let ctx = egui::Context::default();
+    app.poll_file_dialog(&ctx, None);
+    assert!(
+        matches!(asked.borrow().first(), Some(crate::file_dialog::FileDialogRequest::Open { multiple: false, extensions: Some(e), .. }) if e == &["exe"]),
+        "{:?}",
+        asked.borrow()
+    );
 }
 
 #[test]

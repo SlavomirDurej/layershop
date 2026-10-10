@@ -132,6 +132,114 @@ pub fn without_port(args: Vec<String>) -> Vec<String> {
     out
 }
 
+/// Where a Python for the ComfyUI in `dir` usually is: its own virtual environment, the portable
+/// build's embedded one beside it, or a virtual environment one level up.
+fn python_candidates(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let up = dir.parent().unwrap_or(dir);
+    vec![
+        dir.join(".venv/Scripts/python.exe"),
+        dir.join("venv/Scripts/python.exe"),
+        up.join("python_embeded/python.exe"),
+        up.join(".venv/Scripts/python.exe"),
+        dir.join(".venv/bin/python"),
+        dir.join("venv/bin/python"),
+        up.join(".venv/bin/python"),
+    ]
+}
+
+/// The launch settings after the user picked `path` with Browse, starting from `current`:
+/// a Python executable sets the Python; a script (`main.py`) sets the folder and, when there are
+/// no arguments yet, the script to run. Whichever half is still empty is filled in when it sits
+/// in one of the usual places next to the other. `exists` answers "is this a file?".
+pub fn from_picked(path: &str, current: &Launch, exists: &dyn Fn(&std::path::Path) -> bool) -> Launch {
+    use std::path::Path;
+    let mut launch = current.clone();
+    let picked = Path::new(path.trim());
+    let name = picked.file_name().and_then(|n| n.to_str()).unwrap_or("").to_ascii_lowercase();
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    if name.ends_with(".py") {
+        let folder = picked.parent().unwrap_or(Path::new(""));
+        launch.folder = text(folder);
+        if split_args(&launch.args).first().is_none_or(|a| !a.to_ascii_lowercase().ends_with(".py")) {
+            let script = picked.file_name().and_then(|n| n.to_str()).unwrap_or("main.py").to_string();
+            launch.args = join_args(&std::iter::once(script).chain(split_args(&launch.args)).collect::<Vec<_>>());
+        }
+        if launch.python.trim().is_empty()
+            && let Some(python) = python_candidates(folder).into_iter().find(|p| exists(p))
+        {
+            // The portable build wants its own flag, as its `run_*.bat` files pass it.
+            if python.components().any(|c| c.as_os_str() == "python_embeded") && !launch.args.contains("--windows-standalone-build") {
+                launch.args = format!("{} --windows-standalone-build", launch.args);
+            }
+            launch.python = text(&python);
+        }
+    } else if !name.is_empty() {
+        launch.python = text(picked);
+        if launch.folder.trim().is_empty() {
+            // `<project>/.venv/Scripts/python.exe`, `<portable>/python_embeded/python.exe`.
+            let roots = picked.ancestors().skip(1).take(3);
+            if let Some(folder) = roots.flat_map(|r| [r.to_path_buf(), r.join("ComfyUI")]).find(|d| exists(&d.join("main.py"))) {
+                launch.folder = text(&folder);
+                if launch.args.trim().is_empty() {
+                    launch.args = "main.py".into();
+                }
+            }
+        }
+    }
+    launch
+}
+
+/// The launch settings of a ComfyUI that ComfyUI Desktop installed, from Desktop's own record
+/// (`installations.json` in its settings folder `config`): the installation used last that has
+/// a Python and a `main.py` on disk. `exists` answers "is this a file?".
+pub fn desktop_install(record: &str, config: &std::path::Path, exists: &dyn Fn(&std::path::Path) -> bool) -> Option<Launch> {
+    use std::path::{Path, PathBuf};
+    let v: serde_json::Value = serde_json::from_str(record).ok()?;
+    let mut entries: Vec<&serde_json::Value> = v.as_array()?.iter().take(64).collect();
+    let stamp = |e: &serde_json::Value| e.get("lastLaunchedAt").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    entries.sort_by(|a, b| stamp(b).total_cmp(&stamp(a)));
+    let text_of = |e: &serde_json::Value, keys: &[&str]| {
+        keys.iter().find_map(|k| e.get(*k).and_then(serde_json::Value::as_str)).filter(|s| !s.trim().is_empty()).map(str::to_string)
+    };
+    for e in entries {
+        let Some(install) = text_of(e, &["installPath"]) else { continue };
+        let install = PathBuf::from(install);
+        let python = text_of(e, &["adoptedPythonPath", "pythonPath"])
+            .map(PathBuf::from)
+            .filter(|p| exists(p))
+            .or_else(|| python_candidates(&install.join("ComfyUI")).into_iter().chain(python_candidates(&install)).find(|p| exists(p)));
+        let Some(python) = python else { continue };
+        // Started from the installation's folder with the script relative to it, as Desktop does.
+        let Some(script) = ["ComfyUI/main.py", "main.py"].into_iter().find(|s| exists(&install.join(s))) else { continue };
+        let mut args =
+            vec![Path::new(script).components().map(|c| c.as_os_str().to_string_lossy().into_owned()).collect::<Vec<_>>().join(std::path::MAIN_SEPARATOR_STR)];
+        let base = text_of(e, &["adoptedBaseDir", "baseDir", "basePath"]);
+        if let Some(base) = &base {
+            args.extend([
+                "--base-directory".to_string(),
+                base.clone(),
+                "--user-directory".to_string(),
+                Path::new(base).join("user").to_string_lossy().into_owned(),
+            ]);
+        }
+        for (flag, keys) in [("--input-directory", ["inputDir"]), ("--output-directory", ["outputDir"])] {
+            if let Some(dir) = text_of(e, &keys) {
+                args.extend([flag.to_string(), dir]);
+            }
+        }
+        // Desktop's list of shared model folders for this installation.
+        if let Some(id) = text_of(e, &["id"]).filter(|id| id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')) {
+            let paths = config.join("instance-model-paths").join(format!("{id}.yaml"));
+            if exists(&paths) {
+                args.extend(["--extra-model-paths-config".to_string(), paths.to_string_lossy().into_owned()]);
+            }
+        }
+        args.extend(without_port(split_args(&text_of(e, &["launchArgs"]).unwrap_or_default())));
+        return Some(Launch { python: python.to_string_lossy().into_owned(), folder: install.to_string_lossy().into_owned(), args: join_args(&args) });
+    }
+    None
+}
+
 /// Where the launch settings are, for messages.
 const WHERE: &str = "Preferences › AI Integrations › Local Server";
 
@@ -337,7 +445,17 @@ mod native {
         }
 
         fn find(&self, transport: &dyn Transport, url: &str) -> Result<Launch> {
-            find_running(transport, url)
+            let base = comfy::base_url(url)?;
+            // The running server knows exactly how it was started; without one, ComfyUI Desktop's
+            // record of what it installed is the next best thing.
+            if is_running(transport, &base) {
+                return find_running(transport, url);
+            }
+            find_installed().ok_or_else(|| {
+                Error::Config(format!(
+                    "ComfyUI is not running at {base}, and no ComfyUI Desktop installation was found on this computer. Use Browse to choose its python.exe and main.py, or start ComfyUI and press Find Installation again."
+                ))
+            })
         }
     }
 
@@ -345,6 +463,30 @@ mod native {
         fn drop(&mut self) {
             self.stop();
         }
+    }
+
+    /// ComfyUI Desktop's settings folder.
+    fn desktop_config_dir() -> Option<PathBuf> {
+        let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
+        let dir = if cfg!(windows) {
+            env("APPDATA")
+        } else if cfg!(target_os = "macos") {
+            env("HOME").map(|h| h.join("Library/Application Support"))
+        } else {
+            env("XDG_CONFIG_HOME").or_else(|| env("HOME").map(|h| h.join(".config")))
+        };
+        dir.map(|d| d.join("Comfy Desktop"))
+    }
+
+    /// The launch settings of the ComfyUI that ComfyUI Desktop installed on this computer.
+    pub fn find_installed() -> Option<Launch> {
+        let config = desktop_config_dir()?;
+        let file = config.join("installations.json");
+        // A settings file, not a database: anything huge is not it.
+        if std::fs::metadata(&file).ok()?.len() > 4 * 1024 * 1024 {
+            return None;
+        }
+        desktop_install(&std::fs::read_to_string(file).ok()?, &config, &|p| p.is_file())
     }
 
     /// A running process: its executable, working folder (where the OS tells), command line and
@@ -465,7 +607,7 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::find_running;
+pub use native::{find_installed, find_running};
 
 #[cfg(test)]
 mod tests {
@@ -494,6 +636,72 @@ mod tests {
         assert_eq!(split_args("\"unterminated quote"), vec!["unterminated quote"]);
         let v = |x: &[&str]| x.iter().map(|s| s.to_string()).collect::<Vec<_>>();
         assert_eq!(without_port(v(&["main.py", "--port", "8000", "--a", "--port=1", "--port"])), v(&["main.py", "--a"]));
+    }
+
+    #[test]
+    fn browse_fills_in_what_it_can() {
+        use std::path::Path;
+        // Paths are joined with the platform's separator: compare them with forward slashes.
+        let from_picked = |path: &str, current: &Launch, exists: &dyn Fn(&Path) -> bool| {
+            let l = super::from_picked(path, current, exists);
+            Launch { python: l.python.replace('\\', "/"), folder: l.folder.replace('\\', "/"), args: l.args }
+        };
+        let on_disk = |files: &'static [&'static str]| move |p: &Path| files.iter().any(|f| Path::new(f) == p);
+        // main.py of a git clone with its own virtual environment: everything follows.
+        let files = on_disk(&["/home/u/ComfyUI/main.py", "/home/u/ComfyUI/.venv/bin/python"]);
+        let l = from_picked("/home/u/ComfyUI/main.py", &Launch::default(), &files);
+        assert_eq!(l, Launch { python: "/home/u/ComfyUI/.venv/bin/python".into(), folder: "/home/u/ComfyUI".into(), args: "main.py".into() });
+        // The portable build: the embedded Python one level up, and its flag.
+        let files = on_disk(&["/p/ComfyUI/main.py", "/p/python_embeded/python.exe"]);
+        let l = from_picked("/p/ComfyUI/main.py", &Launch::default(), &files);
+        assert_eq!((l.python.as_str(), l.args.as_str()), ("/p/python_embeded/python.exe", "main.py --windows-standalone-build"));
+        // Picking the Python finds the folder beside it; existing choices are kept.
+        let l = from_picked("/p/python_embeded/python.exe", &Launch::default(), &files);
+        assert_eq!((l.folder.as_str(), l.args.as_str()), ("/p/ComfyUI", "main.py"));
+        let mine = Launch { python: "/my/python".into(), folder: "/old".into(), args: "main.py --lowvram".into() };
+        let l = from_picked("/p/ComfyUI/main.py", &mine, &files);
+        assert_eq!(l, Launch { python: "/my/python".into(), folder: "/p/ComfyUI".into(), args: "main.py --lowvram".into() });
+        let l = from_picked("/other/python3", &mine, &files);
+        assert_eq!(l, Launch { python: "/other/python3".into(), ..mine.clone() });
+        // Arguments without a script get the picked one in front.
+        let l = from_picked("/p/ComfyUI/main.py", &Launch { args: "--lowvram".into(), ..Launch::default() }, &on_disk(&[]));
+        assert_eq!((l.python.as_str(), l.args.as_str()), ("", "main.py --lowvram"));
+        // Nothing picked, or nothing recognisable: unchanged.
+        assert_eq!(from_picked("", &mine, &files), mine);
+        assert_eq!(from_picked("   ", &mine, &files), mine);
+    }
+
+    #[test]
+    fn comfyui_desktops_record_gives_the_launch_settings() {
+        use std::path::Path;
+        let record = r#"[
+          {"id":"cloud-1","name":"Comfy Cloud","sourceId":"cloud","remoteUrl":"https://cloud.comfy.org/"},
+          {"id":"old","installPath":"/installs/Old","adoptedPythonPath":"/gone/python","lastLaunchedAt":5},
+          {"id":"inst-1","installPath":"/installs/ComfyUI","adoptedPythonPath":"/docs/ComfyUI/.venv/bin/python","adoptedBaseDir":"/docs/ComfyUI",
+           "launchArgs":"--port 8000 --enable-manager","inputDir":"/docs/ComfyUI/input","outputDir":"/docs/My Output","lastLaunchedAt":9}
+        ]"#;
+        let files = ["/installs/ComfyUI/ComfyUI/main.py", "/docs/ComfyUI/.venv/bin/python", "/cfg/instance-model-paths/inst-1.yaml", "/installs/Old/main.py"];
+        let exists = |p: &Path| files.iter().any(|f| Path::new(f) == p);
+        let l = desktop_install(record, Path::new("/cfg"), &exists).unwrap();
+        assert_eq!(l.python, "/docs/ComfyUI/.venv/bin/python");
+        assert_eq!(l.folder, "/installs/ComfyUI");
+        let args = split_args(&l.args);
+        assert_eq!(args[0], format!("ComfyUI{}main.py", std::path::MAIN_SEPARATOR));
+        for pair in [["--base-directory", "/docs/ComfyUI"], ["--output-directory", "/docs/My Output"], ["--input-directory", "/docs/ComfyUI/input"]] {
+            assert!(args.windows(2).any(|w| w == pair), "{pair:?} in {args:?}");
+        }
+        assert!(
+            args.iter().any(|a| a.ends_with("inst-1.yaml")) && args.contains(&"--enable-manager".to_string()) && !args.contains(&"--port".to_string()),
+            "{args:?}"
+        );
+        // Nothing usable: no Python on disk, no script, or not Desktop's file at all.
+        assert_eq!(desktop_install(record, Path::new("/cfg"), &|_| false), None);
+        for junk in ["", "{}", "[]", "[1, null, {\"installPath\": 7}]", "not json", "[{\"installPath\":\"/x\"}]"] {
+            assert_eq!(desktop_install(junk, Path::new("/cfg"), &exists), None, "{junk}");
+        }
+        // An id that isn't a plain name can't reach outside the settings folder.
+        let sneaky = r#"[{"id":"../../etc/passwd","installPath":"/installs/ComfyUI","adoptedPythonPath":"/docs/ComfyUI/.venv/bin/python"}]"#;
+        assert!(!desktop_install(sneaky, Path::new("/cfg"), &|_| true).unwrap().args.contains("passwd"));
     }
 
     struct Fake(Option<&'static str>);
@@ -620,6 +828,11 @@ mod tests {
         #[test]
         fn finding_needs_a_running_local_server() {
             assert!(find_running(&Fake(None), "http://127.0.0.1:8000").unwrap_err().to_string().contains("not running"));
+            // The launcher's Find falls back to an installation on disk, or says how to go on.
+            match ComfyProcess::new(None).find(&Fake(None), "http://127.0.0.1:8000") {
+                Ok(found) => assert!(!found.python.is_empty() && !found.folder.is_empty(), "{found:?}"),
+                Err(e) => assert!(e.to_string().contains("Browse"), "{e}"),
+            }
             let up = Fake(Some(r#"{"system":{"argv":["main.py","--port","8000","--enable-manager"]}}"#));
             assert!(find_running(&up, "http://10.0.0.5:8000").unwrap_err().to_string().contains("another computer"));
             // No such process on the test machine: the arguments are still reported.
