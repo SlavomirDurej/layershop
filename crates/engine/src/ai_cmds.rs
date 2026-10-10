@@ -36,9 +36,14 @@ pub const LABEL: &str = "AI Generate";
 /// History label of an inpainting.
 pub const INPAINT_LABEL: &str = "AI Inpaint";
 /// How much of the layer around the selection the model is shown when `context` is not given:
-/// this fraction of the selection's longer edge, on every side. Enough to match the light and
-/// the perspective; more leaves fewer rendered pixels for the selection itself.
-pub const DEFAULT_CONTEXT: f64 = 0.5;
+/// this fraction of the selection's longer edge, on every side. A model frames its subject in
+/// the picture it renders, so the nearer that picture is to the selection, the surer what it
+/// paints fits inside it; a margin is still needed to match the light and the perspective.
+pub const DEFAULT_CONTEXT: f64 = 0.25;
+/// How far into the selection the mask a local model gets fades in, as a fraction of the
+/// selection's shorter edge: in that band the model keeps more and more of what is there, so
+/// what it paints is composed inside the selection and joins the picture without a seam.
+const MASK_FADE: f64 = 0.12;
 /// Longest prompt accepted (characters).
 const MAX_PROMPT: usize = 20_000;
 
@@ -210,9 +215,57 @@ fn byte(v: f32) -> u8 {
     if v.is_finite() { (v.clamp(0.0, 1.0) * 255.0).round() as u8 } else { 0 }
 }
 
+/// Blur `v` (`width` wide) with a box of `radius` on each side, along rows; beyond the edges it
+/// counts as zero.
+fn box_blur_rows(v: &[f32], width: usize, radius: usize) -> Vec<f32> {
+    let mut out = vec![0.0; v.len()];
+    let window = (2 * radius + 1) as f32;
+    for (row, out_row) in v.chunks_exact(width.max(1)).zip(out.chunks_exact_mut(width.max(1))) {
+        let mut sum: f32 = row.iter().take(radius + 1).sum();
+        for (x, o) in out_row.iter_mut().enumerate() {
+            *o = sum / window;
+            sum += row.get(x + radius + 1).copied().unwrap_or(0.0) - x.checked_sub(radius).and_then(|i| row.get(i)).copied().unwrap_or(0.0);
+        }
+    }
+    out
+}
+
+fn transposed(v: &[f32], width: usize, height: usize) -> Vec<f32> {
+    let mut out = Vec::with_capacity(v.len());
+    for x in 0..width {
+        out.extend((0..height).map(|y| v.get(y * width + x).copied().unwrap_or(0.0)));
+    }
+    out
+}
+
+/// Fade a `width` × `height` coverage mask in from its edge: zero at the edge of what it covers
+/// (and at the picture's own edge), rising to the mask's value `band` pixels inside. Nothing
+/// outside the mask is added to it.
+fn fade_inwards(mask: &mut [f32], width: usize, height: usize, band: usize) {
+    if band == 0 || width == 0 || height == 0 || mask.len() != width * height {
+        return;
+    }
+    // Three box blurs make a Gaussian near enough, about `band` / 2 wide.
+    let radius = (band / 4).max(1);
+    let mut soft = mask.to_vec();
+    for _ in 0..3 {
+        soft = box_blur_rows(&soft, width, radius);
+    }
+    soft = transposed(&soft, width, height);
+    for _ in 0..3 {
+        soft = box_blur_rows(&soft, height, radius);
+    }
+    soft = transposed(&soft, height, width);
+    // Half covered is the edge itself: from there to fully covered becomes 0 to 1.
+    for (m, s) in mask.iter_mut().zip(soft) {
+        *m = m.min((2.0 * s - 1.0).clamp(0.0, 1.0));
+    }
+}
+
 /// What an inpainting sends the model: the layer's pixels inside `crop` (over white where the
-/// layer is transparent) and the selection there as the mask, both at `size`.
-fn inpaint_source(layer: &Surface, selection: &Surface, crop: Rect, size: (u32, u32), strength: f64) -> Result<Source> {
+/// layer is transparent) and the selection there as the mask, both at `size`. With `fade` the
+/// mask fades in from the selection's edge ([`MASK_FADE`]).
+fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Rect, size: (u32, u32), strength: f64, fade: bool) -> Result<Source> {
     let (width, height) = size;
     let pixels = (width as usize).checked_mul(height as usize).filter(|n| *n > 0 && *n <= 64 << 20);
     let pixels = pixels.ok_or_else(|| EngineError::Other("the area to inpaint is too large to send to the model".into()))?;
@@ -224,9 +277,19 @@ fn inpaint_source(layer: &Surface, selection: &Surface, crop: Rect, size: (u32, 
         rgb.extend([r, g, b].map(|c| byte(c * a + (1.0 - a))));
     }
     // Transparent where the model paints: the selection's coverage, inverted, as alpha.
+    let mut coverage: Vec<f32> = resampled(selection, crop, width, height)
+        .chunks_exact(selection.format().channels().max(1))
+        .map(|px| px.first().copied().filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0))
+        .collect();
+    if fade {
+        // The selection's shorter edge, in rendered pixels.
+        let (sx, sy) = (f64::from(width) / f64::from(crop.width().max(1)), f64::from(height) / f64::from(crop.height().max(1)));
+        let shorter = (f64::from(selected.width()) * sx).min(f64::from(selected.height()) * sy);
+        fade_inwards(&mut coverage, width as usize, height as usize, (shorter * MASK_FADE).round().clamp(0.0, 256.0) as usize);
+    }
     let mut mask = Vec::with_capacity(pixels * 4);
-    for px in resampled(selection, crop, width, height).chunks_exact(selection.format().channels().max(1)) {
-        mask.extend([0, 0, 0, 255 - byte(px.first().copied().unwrap_or(0.0))]);
+    for v in coverage {
+        mask.extend([0, 0, 0, 255 - byte(v)]);
     }
     if rgb.len() != pixels * 3 || mask.len() != pixels * 4 {
         return Err(EngineError::Other("could not read the area to inpaint".into()));
@@ -263,10 +326,44 @@ fn fit(bytes: &[u8], fmt: PixelFormat, area: Rect, exact: bool) -> Result<Surfac
     Ok(out)
 }
 
-/// A layer name from the prompt: its first words, on one line.
-fn layer_name(prompt: &str) -> String {
+/// A short name for a model, for layer names: its name in lower case with `_` between the words
+/// (`flux_2_klein`), without the words that only tell one file of the model from another
+/// (precision, quantisation, parameter count).
+pub fn short_model_name(model: &Model) -> String {
+    let noise = |w: &str| {
+        let digits_then = |suffix: &str| w.strip_suffix(suffix).is_some_and(|d| !d.is_empty() && d.chars().all(|c| c.is_ascii_digit() || c == '.'));
+        let after = |prefix: &str| w.strip_prefix(prefix).is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()));
+        after("fp")
+            || after("bf")
+            || after("int")
+            || after("q")
+            || digits_then("b")
+            || matches!(w, "scaled" | "convrot" | "mixed" | "e4m3fn" | "safetensors" | "gguf")
+    };
+    let short = |text: &str| {
+        let lower = text.to_lowercase();
+        let mut out = String::new();
+        for word in lower.split(|c: char| !(c.is_alphanumeric() || c == '.')).map(|w| w.trim_matches('.')).filter(|w| !w.is_empty() && !noise(w)) {
+            // Whole words, to a length a layer name has room for.
+            if !out.is_empty() && out.chars().count() + 1 + word.chars().count() > 28 {
+                break;
+            }
+            if !out.is_empty() {
+                out.push('_');
+            }
+            out.extend(word.chars().take(28));
+        }
+        out
+    };
+    Some(short(&model.name)).filter(|s| !s.is_empty()).or_else(|| Some(short(&model.id)).filter(|s| !s.is_empty())).unwrap_or_else(|| "ai".into())
+}
+
+/// A layer name for a generation: the model in brackets, then the prompt's first words, on one
+/// line (`[flux_2_klein] a deer eating grass`).
+fn layer_name(model: &Model, prompt: &str) -> String {
     let flat = prompt.split_whitespace().collect::<Vec<_>>().join(" ");
-    if flat.chars().count() <= 40 { flat } else { flat.chars().take(40).chain(['…']).collect() }
+    let start: String = if flat.chars().count() <= 40 { flat } else { flat.chars().take(40).chain(['…']).collect() };
+    format!("[{}] {start}", short_model_name(model))
 }
 
 fn generate(s: &mut Session, p: &Value) -> Result<Value> {
@@ -334,7 +431,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
     let mut job = Job { prompt: prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
-    let name = layer_name(&prompt);
+    let name = layer_name(&model, &prompt);
     let model_id = model.id.clone();
     let label = if inpaint { INPAINT_LABEL } else { LABEL };
     let job_selection = selection.clone().filter(|_| inpaint);
@@ -347,7 +444,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             if let (Some(layer), Some(selection)) = (&source_layer, &job_selection) {
                 ctx.progress(0.0, "Reading the layer\u{2026}");
                 let size = photocraft_aigen::source_size(&model, area.width(), area.height());
-                job.source = Some(inpaint_source(layer, selection, area, size, strength)?);
+                // Local models honour a soft mask; a cloud model's mask is where it may paint.
+                let selected = selected.unwrap_or(area);
+                job.source = Some(inpaint_source(layer, selection, selected, area, size, strength, model.provider.is_local())?);
                 ctx.check()?;
             }
             // A local model needs its server: use the one running, or start it.
@@ -502,7 +601,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there),"strength":0..1=1 (inpaint, local models: how far the result may depart from what is there),"context":0..4=0.5 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there),"strength":0..1=1 (inpaint, local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,

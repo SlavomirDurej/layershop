@@ -685,7 +685,7 @@ fn the_inpaint_tab_lists_the_models_that_can_inpaint_and_keeps_its_own_choice() 
     assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["txt2img", "inpaint", "img2img", "imgEdit"]));
     assert_eq!(Mode::ALL.map(Mode::key), ["txt2img", "inpaint", "img2img", "imgEdit"]);
     let old: AiGenUi = serde_json::from_value(json!({"prompt": "x"})).unwrap();
-    assert_eq!((old.mode, old.strength, old.context), (Mode::Txt2img, 1.0, 0.5));
+    assert_eq!((old.mode, old.strength, old.context), (Mode::Txt2img, 1.0, 0.25));
     let hostile = AiGenUi { strength: f64::NAN, context: -7.0, ..Default::default() };
     assert_eq!((hostile.strength(), hostile.context()), (1.0, 0.0));
 }
@@ -704,8 +704,8 @@ fn inpainting_from_the_panel_needs_a_selection_on_a_pixel_layer_and_adds_a_maske
     draw_panel(&mut app);
     app.run("select.rect", json!({"x": 24, "y": 16, "width": 16, "height": 16})).unwrap();
     assert_eq!(generate_blocked(&app, &z), None);
-    // The model renders the selection with half its edge of context on every side.
-    assert_eq!(target_size(&app), Some((32, 32, true)));
+    // The model renders the selection with a quarter of its edge of context on every side.
+    assert_eq!(target_size(&app), Some((24, 24, true)));
     app.ui.ai_gen.context = 0.0;
     assert_eq!(target_size(&app), Some((16, 16, true)));
     app.ui.ai_gen.context = 0.5;

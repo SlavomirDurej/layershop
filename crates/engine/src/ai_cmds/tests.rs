@@ -91,7 +91,7 @@ fn generates_onto_a_new_layer_over_the_selection() {
     assert_eq!(layer_count(&s), before + 1);
     let d = s.active().unwrap();
     let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
-    assert_eq!(layer.name, "a green field at dawn");
+    assert_eq!(layer.name, "[z_image_turbo] a green field at dawn");
     assert!(layer.mask.is_some(), "the selection becomes the layer mask");
     assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(8, 4, 24, 20));
     // Green inside the selection, the white background outside it.
@@ -280,7 +280,7 @@ fn settings_survive_a_preferences_round_trip() {
     // Preferences written before this section existed still load.
     again.load_prefs_json(r#"{"integrations":{"allowAgentControl":false}}"#).unwrap();
     assert!(again.prefs().integrations.ai.models.is_empty());
-    assert_eq!(layer_name(&"word ".repeat(40)).chars().count(), 41);
+    assert_eq!(layer_name(&Family::ZImage.preset(), &"word ".repeat(40)).chars().count(), "[z_image_turbo] ".len() + 41);
 }
 
 #[test]
@@ -290,22 +290,23 @@ fn inpainting_repaints_the_selected_part_of_the_layer_on_a_new_masked_layer() {
     let before = layer_count(&s);
     s.execute("select.rect", json!({"x": 24, "y": 16, "width": 16, "height": 16})).unwrap();
     let r = s.execute("ai.generate", json!({"prompt": "a green pond", "mode": "inpaint", "strength": 0.75, "seed": 9})).unwrap();
-    // The model is shown half the selection's edge more on every side: 8 pixels.
-    assert_eq!(r["bounds"], json!([16, 8, 32, 32]));
+    // The model is shown a quarter of the selection's edge more on every side: 4 pixels.
+    assert_eq!(r["bounds"], json!([20, 12, 24, 24]));
     assert_eq!((r["mode"].as_str(), r["seed"].as_u64()), (Some("inpaint"), Some(9)));
     assert_eq!(r["renderSize"], json!([1008, 1008]));
     assert_eq!(layer_count(&s), before + 1);
     {
         let d = s.active().unwrap();
         let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
-        assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(16, 8, 48, 40));
+        assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(20, 12, 44, 36));
+        assert_eq!(layer.name, "[z_image_turbo] a green pond");
         // The selection is the mask: the new layer shows inside it only.
         assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), Rect::new(24, 16, 40, 32));
         assert_eq!(d.history.entries().last().map(String::as_str), Some(INPAINT_LABEL));
     }
     let inside = px(&mut s, 30, 20);
     assert!(inside[0] < 0.05 && inside[1] > 0.95, "{inside:?}");
-    let context = px(&mut s, 18, 10);
+    let context = px(&mut s, 21, 13);
     assert!(context[0] > 0.95 && context[2] > 0.95, "outside the selection the layer below shows: {context:?}");
     // The model got the layer (white here) and the mask, at the size it renders.
     let image = fake.uploaded("photocraft_inpaint_image.png");
@@ -314,11 +315,24 @@ fn inpainting_repaints_the_selected_part_of_the_layer_on_a_new_masked_layer() {
     let mask = fake.uploaded("photocraft_inpaint_mask.png");
     assert_eq!((mask.width(), mask.height(), mask.layout()), (1008, 1008, ChannelLayout::Rgba));
     let alpha = |x: usize, y: usize| mask.data()[(y * 1008 + x) * 4 + 3];
-    // Transparent where the model paints (the selection, the middle half), opaque around it.
+    // Transparent where the model paints: the selection (168..840 of 1008), opaque around it.
     assert_eq!((alpha(504, 504), alpha(300, 300), alpha(700, 700)), (0, 0, 0));
-    assert_eq!((alpha(10, 10), alpha(200, 504), alpha(1000, 504), alpha(504, 800)), (255, 255, 255, 255));
+    assert_eq!((alpha(10, 10), alpha(100, 504), alpha(900, 504), alpha(504, 950)), (255, 255, 255, 255));
+    // It fades in from the selection's edge, so what is painted joins what is kept: just inside
+    // the edge the picture is mostly kept, a little further in half of it, then none.
+    assert!(alpha(172, 504) > 200 && alpha(504, 836) > 200, "{} {}", alpha(172, 504), alpha(504, 836));
+    assert!((40..215).contains(&alpha(200, 504)), "{}", alpha(200, 504));
+    assert!(alpha(260, 504) < 10, "{}", alpha(260, 504));
     let queued = fake.queued().to_string();
-    for want in ["SetLatentNoiseMask", "VAEEncode", "photocraft_inpaint_image.png", "photocraft_inpaint_mask.png", "\"denoise\":0.75", "a green pond"] {
+    for want in [
+        "SetLatentNoiseMask",
+        "DifferentialDiffusion",
+        "VAEEncode",
+        "photocraft_inpaint_image.png",
+        "photocraft_inpaint_mask.png",
+        "\"denoise\":0.75",
+        "a green pond",
+    ] {
         assert!(queued.contains(want), "{want} missing in {queued}");
     }
     assert!(!queued.contains("EmptySD3LatentImage"));
@@ -414,4 +428,57 @@ fn the_inpaint_area_grows_the_selection_within_the_canvas() {
         assert!(!r.is_empty() && r.intersect(&canvas) == r, "{hostile}: {r:?}");
     }
     assert_eq!(inpaint_area(Rect::new(i32::MAX - 5, 0, i32::MAX, 5), canvas, 4.0), Rect::EMPTY.intersect(&canvas));
+}
+
+#[test]
+fn the_mask_fades_in_from_the_edge_of_what_it_covers_and_never_grows() {
+    // A 40 x 30 picture, covered from x = 10 to 30 over its whole height.
+    let (w, h) = (40usize, 30usize);
+    let hard: Vec<f32> = (0..w * h).map(|i| if (10..30).contains(&(i % w)) { 1.0 } else { 0.0 }).collect();
+    let mut soft = hard.clone();
+    fade_inwards(&mut soft, w, h, 8);
+    let at = |x: usize, y: usize| soft[y * w + x];
+    assert!(soft.iter().zip(&hard).all(|(s, m)| s <= m && (0.0..=1.0).contains(s)), "the fade only takes away");
+    assert!(at(10, 15) < 0.2 && at(29, 15) < 0.2, "{} {}", at(10, 15), at(29, 15));
+    assert!(at(20, 15) > 0.95, "{}", at(20, 15));
+    assert!(at(12, 15) < at(14, 15) && at(14, 15) < at(18, 15));
+    // The picture's own edge counts as an edge: there is nothing beyond it to join.
+    assert!(at(20, 0) < 0.2 && at(20, 29) < 0.2);
+    // No band, an empty picture or a buffer of the wrong size: left alone, not a panic.
+    for (len, w, h, band) in [(w * h, w, h, 0), (0, 0, 0, 8), (7, w, h, 8), (w * h, w, h, 100_000)] {
+        let mut m = vec![1.0; len];
+        fade_inwards(&mut m, w, h, band);
+        assert!(m.iter().all(|v| (0.0..=1.0).contains(v)));
+    }
+    assert_eq!(box_blur_rows(&[], 0, 3), Vec::<f32>::new());
+}
+
+#[test]
+fn layers_are_named_after_the_model_and_the_prompt() {
+    let named = |name: &str| short_model_name(&Model { name: name.into(), id: "the-id".into(), ..Model::default() });
+    for (name, want) in [
+        ("flux 2 klein 9b fp8", "flux_2_klein"),
+        ("flux 2 klein base 9b fp8", "flux_2_klein_base"),
+        ("FLUX.2 Klein 9B", "flux.2_klein"),
+        ("z image turbo bf16", "z_image_turbo"),
+        ("qwen image 2512 fp8 e4m3fn", "qwen_image_2512"),
+        ("qwen image 2.1 int8 convrot", "qwen_image_2.1"),
+        ("flux2 dev fp8mixed", "flux2_dev"),
+        ("ltx 2.3 22b dev Q4_K_M", "ltx_2.3_dev_k_m"),
+        ("GPT Image 2.5 Sunburst", "gpt_image_2.5_sunburst"),
+        ("zImageUltimateNSFW v20", "zimageultimatensfw_v20"),
+        ("Mój  modèle…", "mój_modèle"),
+        // Nothing left of the name: the id, then a word.
+        ("fp8 9b", "the_id"),
+        ("", "the_id"),
+    ] {
+        assert_eq!(named(name), want, "{name}");
+    }
+    assert_eq!(short_model_name(&Model::default()), "ai");
+    // Whole words, to a bounded length; one endless word is cut.
+    let long = named("a very long model name that goes on and on and on");
+    assert!(long.chars().count() <= 28 && !long.ends_with('_'), "{long}");
+    assert_eq!(named(&"x".repeat(500)).chars().count(), 28);
+    let m = Model { name: "flux 2 klein 9b fp8".into(), ..Model::default() };
+    assert_eq!(layer_name(&m, "  Add here a\n beautiful deer "), "[flux_2_klein] Add here a beautiful deer");
 }

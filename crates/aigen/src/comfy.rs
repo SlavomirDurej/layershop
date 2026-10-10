@@ -80,10 +80,6 @@ pub struct Inpaint<'a> {
 /// the next one, so ComfyUI's input folder holds two files of ours, not one pair per generation.
 pub const UPLOAD_IMAGE: &str = "photocraft_inpaint_image.png";
 pub const UPLOAD_MASK: &str = "photocraft_inpaint_mask.png";
-/// How far past the mask the model repaints, in rendered pixels: the latent is coarser than the
-/// mask (8 or 16 pixels a cell), and a seam belongs under the layer's mask, not on its edge.
-const MASK_GROW: u32 = 8;
-
 /// The workflow that renders `job` with `model`, ending in a preview image (kept in ComfyUI's
 /// temp folder, not its output folder).
 pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
@@ -93,6 +89,11 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
 /// The workflow that repaints the masked part of an uploaded image with `model`: the image is
 /// encoded to a latent and only the masked part of it is denoised (Set Latent Noise Mask), so
 /// what surrounds it steers the result and comes back as it was. `job` holds the image's size.
+///
+/// The mask may be soft: Differential Diffusion denoises each part of it for as long as it is
+/// white, so a mask that fades towards its edge blends the new into the old there. FLUX.2 is an
+/// edit model and is also given the image as a reference: it then paints into the scene it sees
+/// (its light, its scale) instead of composing a picture of its own inside the mask.
 pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Result<Value> {
     build(model, job, Some(inpaint))
 }
@@ -151,7 +152,7 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         };
     }
     let cfg = finite(model.cfg, 1.0);
-    let (mut positive, negative) = if f == Family::QwenImage21 {
+    let (mut positive, mut negative) = if f == Family::QwenImage21 {
         // Its own node encodes both prompts (and reference images, of which there are none here).
         let id = g.add(
             "TextEncodeQwenImage21",
@@ -179,8 +180,12 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
             let image = g.node("LoadImage", json!({"image": i.image}));
             // Load Image's second output is the mask: where the file is transparent.
             let mask = json!([g.add("LoadImage", json!({"image": i.mask})), 1]);
-            let mask = g.node("GrowMask", json!({"mask": mask, "expand": MASK_GROW, "tapered_corners": true}));
             let encoded = g.node("VAEEncode", json!({"pixels": image, "vae": vae}));
+            unet = g.node("DifferentialDiffusion", json!({"model": unet}));
+            if f == Family::Flux2 {
+                positive = g.node("ReferenceLatent", json!({"conditioning": positive, "latent": encoded}));
+                negative = g.node("ReferenceLatent", json!({"conditioning": negative, "latent": encoded}));
+            }
             g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
         }
         None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
@@ -643,9 +648,12 @@ mod tests {
             let nodes = w.as_object().unwrap();
             let linked = |v: &Value| &nodes[v[0].as_str().unwrap()];
             assert_eq!(linked(&masked["inputs"]["samples"])["class_type"], "VAEEncode", "{f:?}");
-            let grow = linked(&masked["inputs"]["mask"]);
-            assert_eq!((grow["class_type"].as_str(), grow["inputs"]["mask"][1].as_u64()), (Some("GrowMask"), Some(1)), "{f:?}");
-            assert_eq!(linked(&grow["inputs"]["mask"])["inputs"]["image"], "mask.png");
+            // The mask is the second output of its Load Image, used as it is (it may be soft).
+            assert_eq!(masked["inputs"]["mask"][1], 1, "{f:?}");
+            assert_eq!(linked(&masked["inputs"]["mask"])["inputs"]["image"], "mask.png");
+            // The sampler's model goes through Differential Diffusion, which honours a soft mask.
+            assert_eq!(c.iter().filter(|x| *x == "DifferentialDiffusion").count(), 1, "{f:?}");
+            assert_eq!(c.iter().filter(|x| *x == "ReferenceLatent").count(), if f == Family::Flux2 { 2 } else { 0 }, "{f:?}");
             assert_eq!(linked(&node(&w, "VAEEncode")["inputs"]["pixels"])["inputs"]["image"], "src.png");
             assert!(check(&m, true).is_ok() && check(&m, false).is_ok());
         }
@@ -658,9 +666,19 @@ mod tests {
         assert_eq!(node(&flux, "SamplerCustomAdvanced")["inputs"]["sigmas"][1], 1);
         let full = inpaint_workflow(&Family::Flux2.preset(), &job(), &Inpaint { denoise: f64::NAN, ..INPAINT }).unwrap();
         assert!(!classes(&full).iter().any(|x| x == "SplitSigmasDenoise") && !full.to_string().contains("null"));
+        // FLUX.2 sees the image as a reference on both sides of its guidance.
+        let guider = node(&flux, "CFGGuider");
+        let nodes = flux.as_object().unwrap();
+        for side in ["positive", "negative"] {
+            let reference = &nodes[guider["inputs"][side][0].as_str().unwrap()];
+            assert_eq!(reference["class_type"], "ReferenceLatent", "{side}");
+            assert_eq!(nodes[reference["inputs"]["latent"][0].as_str().unwrap()]["class_type"], "VAEEncode", "{side}");
+        }
+        assert_eq!(nodes[guider["inputs"]["model"][0].as_str().unwrap()]["class_type"], "DifferentialDiffusion");
         // Text to image is what it was: an empty latent, fully denoised.
         let plain = workflow(&Family::ZImage.preset(), &job()).unwrap();
-        assert!(!classes(&plain).iter().any(|x| x == "LoadImage"));
+        assert!(!classes(&plain).iter().any(|x| x == "LoadImage" || x == "DifferentialDiffusion"));
+        assert!(!classes(&workflow(&Family::Flux2.preset(), &job()).unwrap()).iter().any(|x| x == "ReferenceLatent"));
         assert_eq!(node(&plain, "KSampler")["inputs"]["denoise"], 1.0);
     }
 

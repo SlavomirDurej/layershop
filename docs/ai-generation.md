@@ -21,7 +21,7 @@ back end you set up, and places the answer on a new layer.
    press **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt box fills the height of the
    panel: drag the edge of the dock group to make it taller. The gear opens that model's settings.
 3. The result is a new layer over the **selection's bounds** (the whole canvas without a
-   selection). The selection becomes the layer's mask, so a lasso or feathered selection shapes
+   selection), named after the model and the prompt (`[flux_2_klein] a deer eating grass`). The selection becomes the layer's mask, so a lasso or feathered selection shapes
    the result and stays editable. One undo step; Esc or Cancel stops a running generation.
 
 **Size.** The selection decides the shape. Models are trained near one megapixel and need edges
@@ -48,13 +48,18 @@ there, press **Generate**.
    empty there or is not pixels (type, shape, adjustment, group), Generate is off and the panel
    says which.
 2. The model is sent that layer around the selection and a mask of the selection. It paints
-   inside the mask and sees the rest, so the light, perspective and colours carry over.
+   inside the mask and sees the rest, so the light, perspective and colours carry over. For
+   local models the mask fades in over the outer eighth of the selection: there the picture is
+   kept more and more, which makes the model compose what it paints **inside** the selection
+   (a subject is not cut off at its edge) and joins it to the picture without a seam.
 3. The result is a **new layer** above, masked by the selection. The layer you selected on is
    not changed; hide or delete the new one to compare, or paint on its mask to blend the edge.
 
 - **Context** is how much of the layer around the selection the model is shown, as a share of
-  the selection's longer edge on every side (50% by default). More helps it match the
-  surroundings; less leaves more of the rendered pixels for the selection itself. The panel
+  the selection's longer edge on every side (25% by default). More helps it match the
+  surroundings, but a model frames its subject in the whole picture it is given, so with a lot
+  of context a subject can come out larger than the selection and be cut by it; less keeps it
+  inside and leaves more of the rendered pixels for the selection. The panel
   shows the sizes (`Selection and context 720 × 760 px → 992 × 1040 px`).
 - **Strength** is how far the result may depart from what is there. 100% paints the selection
   afresh; around 50–70% keeps its shapes and colours and changes the detail. Local models only.
@@ -62,13 +67,16 @@ there, press **Generate**.
   remembers its own choice of model.
 
 **Which models.** Local models inpaint by encoding the picture and denoising only the masked
-part (ComfyUI's *Set Latent Noise Mask*), which every architecture runs but not every one does
-well. Tried against ComfyUI 0.39 with the same picture, mask and prompt:
+part (ComfyUI's *Set Latent Noise Mask* with *Differential Diffusion*, which honours the fading
+mask), which every architecture runs but not every one does well. FLUX.2 is an edit model and
+is also given the picture as a reference (*Reference Latent*), so it paints into the scene it
+sees, at its scale and in its light; the others only see the picture through the part of it
+that is kept. Tried against ComfyUI 0.39 with the same picture, mask and prompt:
 
 | Architecture | Inpainting | On by default |
 |---|---|---|
-| FLUX.2 (Klein, Dev) | blends cleanly; the best of the set | yes |
-| FLUX.1, Krea 2, Z-Image | blend well | yes |
+| FLUX.2 (Klein, Dev) | fits the selection and matches the scene; the one to use for adding something to a picture | yes |
+| FLUX.1, Krea 2, Z-Image | good at replacing a surface or an object; a new subject fits the selection but can bring its own background | yes |
 | Qwen Image | usable; edges can shift a little | yes |
 | Qwen Image 2.1, Checkpoint (SD / SDXL) | same method, not tried here | yes |
 | Ernie Image, HiDream I1, HiDream O1 | visible seams, or a different scene in the box | no |
@@ -176,7 +184,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | Command | |
 |---|---|
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
-| `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it |
+| `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it against a real server without the app |
 | `ai.models` | the models, whether each can run now, and whether it is offered for inpainting (`inpaint`) |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
