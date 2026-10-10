@@ -4,6 +4,37 @@ use photocraft_color::ColorMode;
 const DEPTHS: [u64; 3] = [8, 16, 32];
 
 #[test]
+fn proximity_match_reads_original_pixels_for_overlapping_offsets() {
+    // Shifting source one pixel to the left overlaps the destination in a
+    // left-to-right traversal: reading the output would repeat the first value.
+    let img = vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0];
+    let mask = [false, true, true, true, false, false];
+    let result = proximity_source_patch(&img, 6, 1, 1, &mask, -1, 0).unwrap();
+    assert_eq!(result, vec![10.0, 10.0, 20.0, 30.0, 50.0, 60.0]);
+    assert_eq!(img, vec![10.0, 20.0, 30.0, 40.0, 50.0, 60.0], "source remains untouched");
+}
+
+#[test]
+fn proximity_match_preserves_channels_and_unmasked_pixels() {
+    // A two-channel image shifted from the row above.
+    let img = vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let mask = [false, false, true, false];
+    let result = proximity_source_patch(&img, 2, 2, 2, &mask, 0, -1).unwrap();
+    assert_eq!(result, vec![1.0, 2.0, 3.0, 4.0, 1.0, 2.0, 7.0, 8.0]);
+}
+
+#[test]
+fn proximity_match_rejects_invalid_translations_without_panicking() {
+    let img = vec![1.0, 2.0, 3.0, 4.0];
+    let mask = [true, false, false, false];
+    assert!(proximity_source_patch(&img, 2, 2, 1, &mask, -1, 0).is_none());
+    assert!(proximity_source_patch(&img, 2, 2, 1, &mask, 0, -1).is_none());
+    assert!(proximity_source_patch(&img, 2, 2, 1, &mask, i32::MAX, 0).is_none());
+    assert!(proximity_source_patch(&img, 2, 2, 1, &mask[..3], 0, 0).is_none());
+    assert!(proximity_source_patch(&img, usize::MAX, 2, 1, &mask, 0, 0).is_none());
+}
+
+#[test]
 fn clone_preview_matches_source_without_mutating_session() {
     use crate::presets::clone_source::Mapping;
     for depth in DEPTHS {
@@ -280,7 +311,8 @@ fn blur_reduces_local_variance_and_sharpen_increases_it() {
         let v0 = var(&s, 10);
         s.execute("paint.sharpen", json!({"points": [[5, 15], [25, 15]], "size": 20, "hardness": 100, "strength": 100, "protectDetail": false})).unwrap();
         assert!(var(&s, 10) > v0 * 1.5, "depth {depth}: {v0} → {}", var(&s, 10));
-        s.execute("paint.sharpen", json!({"points": [[35, 15], [55, 15]], "size": 20, "hardness": 100, "strength": 100})).unwrap();
+        // Pinned at 25%: Protect Detail clamps per dab, so denser dabs creep past the range.
+        s.execute("paint.sharpen", json!({"points": [[35, 15], [55, 15]], "size": 20, "hardness": 100, "strength": 100, "spacing": 25})).unwrap();
         let hi = (10..20).flat_map(|y| (40..50).map(move |x| (x, y))).map(|(x, y)| rgba(&s, x, y)[0]).fold(0.0, f32::max);
         assert!(hi <= 0.55 + tol(depth), "protect detail: {hi}");
     }
@@ -300,6 +332,32 @@ fn smudge_moves_colour_along_the_stroke() {
         s.execute("paint.smudge", json!({"points": [[80, 25], [95, 25]], "size": 6, "hardness": 100, "fingerPainting": true})).unwrap();
         assert!(rgba(&s, 81, 25)[0] < 0.7, "finger painting lays down the foreground colour");
     }
+}
+
+#[test]
+fn smudge_uses_the_brush_settings_spacing() {
+    // #2140: the Brush Settings spacing (the session brush) drives Smudge dabs when the stroke
+    // has no `spacing` param, as it drives the Brush.
+    let run = |spacing: f32, p: Value| {
+        let mut s = session(100, 30, 8, "rgb");
+        paint_layer(&mut s, |x, _| if x < 30 { [1.0, 0.0, 0.0, 1.0] } else { [1.0, 1.0, 1.0, 1.0] });
+        s.tools.brush.spacing = spacing;
+        let mut p = p;
+        p["points"] = json!([[20, 15], [90, 15]]);
+        s.execute("paint.smudge", p).unwrap();
+        (30..95).map(|x| rgba(&s, x, 15)[1]).collect::<Vec<_>>()
+    };
+    let base = json!({"size": 12, "hardness": 100, "strength": 80});
+    let dense = run(0.01, base.clone());
+    let sparse = run(10.0, base.clone());
+    // 1000% of 12 px puts the next dab 120 px away: only the first dab, behind the edge, lands.
+    assert!(sparse.iter().all(|g| *g > 0.99), "1000% spacing: nothing dragged past the edge");
+    assert!(dense.first().is_some_and(|g| *g < 0.6), "1% spacing: red dragged right ({:?})", dense.first());
+    assert_ne!(dense, run(0.25, base.clone()), "1% and 25% differ");
+    // An explicit `spacing` param still wins over the Brush Settings value.
+    let mut explicit = base;
+    explicit["spacing"] = json!(1000);
+    assert_eq!(run(0.01, explicit), sparse);
 }
 
 #[test]
@@ -1133,6 +1191,68 @@ fn live_clone_matches_the_commit() {
     }
 }
 
+// Both preview implementations must reject an entire pointer batch before their renderer,
+// coverage, tail or working surface changes. Compare a resumed stroke with a clean control.
+macro_rules! live_coordinate_regression {
+    ($name:ident, $live:ty, [$($cmd:literal),+]) => {
+        #[test]
+        fn $name() {
+            for depth in DEPTHS {
+                let mut s = session(32, 32, depth, "rgb");
+                paint_layer(&mut s, texture);
+                let st = s.active().unwrap();
+                let (doc, revision, history) = (st.doc.clone(), st.revision, st.history.past_len());
+                let id = st.active_layer.unwrap();
+                for cmd in [$($cmd),+] {
+                    let p = json!({"points": [[8, 16]], "source": [4, 8], "size": 4, "hardness": 100});
+                    let mut live = <$live>::begin(&s, cmd, &p).unwrap();
+                    let mut control = <$live>::begin(&s, cmd, &p).unwrap();
+                    // The first regression case fails fast even without the guard, before any
+                    // enormous coordinate reaches the path walker.
+                    for (x, y) in [
+                        (f64::NAN, 16.0),
+                        (16.0, f64::NAN),
+                        (f64::INFINITY, 16.0),
+                        (16.0, f64::NEG_INFINITY),
+                        (1e300, 16.0),
+                        (16.0, -crate::brush_cmds::MAX_COORD - 1.0),
+                    ] {
+                        let shown = live.doc.clone();
+                        let bounds = live.bounds();
+                        let batch = [StrokePoint::new(12.0, 18.0, 1.0), StrokePoint::new(x, y, 1.0)];
+                        let err = live.push(&batch).unwrap_err();
+                        assert!(matches!(err, EngineError::BadParams { cmd: ref actual, ref msg }
+                            if actual == cmd && msg.contains("point coordinates must be finite")));
+                        assert!(std::sync::Arc::ptr_eq(&shown, &live.doc), "{cmd}: invalid batch changed the preview");
+                        assert_eq!(live.bounds(), bounds, "{cmd}");
+                    }
+                    let next = [StrokePoint::new(-4.0, 16.0, 1.0), StrokePoint::new(24.0, 16.0, 1.0)];
+                    assert_eq!(live.push(&next).unwrap(), control.push(&next).unwrap(), "{cmd}");
+                    assert_eq!(live.bounds(), control.bounds(), "{cmd}");
+                    let got = live.doc.layer(id).unwrap().surface().unwrap();
+                    let want = control.doc.layer(id).unwrap().surface().unwrap();
+                    assert_eq!(got.read_region(live.bounds()), want.read_region(control.bounds()), "{cmd}");
+                    assert_eq!(got.content_bounds(), want.content_bounds(), "{cmd}");
+                }
+                let st = s.active().unwrap();
+                assert!(std::sync::Arc::ptr_eq(&doc, &st.doc));
+                assert_eq!((st.revision, st.history.past_len()), (revision, history));
+            }
+        }
+    };
+}
+
+live_coordinate_regression!(
+    live_retouch_rejects_invalid_batches_without_changing_the_preview,
+    LiveRetouch,
+    ["paint.cloneStamp", "paint.healingBrush", "paint.historyBrush"]
+);
+live_coordinate_regression!(
+    live_dab_rejects_invalid_batches_without_changing_the_preview,
+    LiveDab,
+    ["paint.dodge", "paint.burn", "paint.sponge", "paint.blur", "paint.sharpen", "paint.smudge"]
+);
+
 /// The live Dodge shows what the commit paints, also where a stroke doubles back across the
 /// cells that remember each pixel's original colour (the live stroke edits one dab at a time).
 /// 32-bit, so the live working copy isn't quantised between dabs.
@@ -1163,4 +1283,41 @@ fn live_dodge_matches_the_commit_across_cells() {
     }
     assert!(changed);
     assert!(worst <= 1e-4, "live and commit differ by {worst}");
+}
+
+#[test]
+fn retouch_strokes_refuse_absurd_point_coordinates() {
+    // #976: a segment to (1e300, 0) has an infinite length and the dab walker would never stop, so
+    // every retouch tool's `points` must stay within ±1e6, as the painting tools' do.
+    let cmds = [
+        "paint.dodge",
+        "paint.burn",
+        "paint.sponge",
+        "paint.blur",
+        "paint.sharpen",
+        "paint.smudge",
+        "paint.cloneStamp",
+        "paint.healingBrush",
+        "paint.spotHealing",
+        "paint.historyBrush",
+        "paint.patternStamp",
+    ];
+    // A single far point first: cheap even without the bound, so a regression fails fast.
+    let far = [json!([[1_000_001, 0]]), json!([[0, 0], [0, -2_000_000]]), json!([[0, 0], [1e300, 0]]), json!([[1e300, 1e300]])];
+    for depth in DEPTHS {
+        let mut s = session(32, 32, depth, "rgb");
+        paint_layer(&mut s, |x, y| [x as f32 / 32.0, y as f32 / 32.0, 0.25, 1.0]);
+        s.execute("cloneSource.set", json!({"source": [8, 8]})).unwrap();
+        let (before, past) = (rgba(&s, 16, 16), s.active().unwrap().history.past_len());
+        for cmd in cmds {
+            for points in &far {
+                let err = s.execute(cmd, json!({ "points": points })).unwrap_err();
+                assert!(err.to_string().contains("within ±"), "{cmd} {points} at {depth}: {err}");
+            }
+        }
+        assert_eq!((rgba(&s, 16, 16), s.active().unwrap().history.past_len()), (before, past), "{depth}: nothing changed");
+        // Control: a stroke on the canvas still retouches.
+        s.execute("paint.dodge", json!({"points": [[4, 16], [28, 16]], "size": 8})).unwrap();
+        assert_ne!(rgba(&s, 16, 16), before, "{depth}");
+    }
 }

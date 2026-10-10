@@ -235,7 +235,7 @@ pub(crate) fn layer_param(s: &Session, p: &Value) -> Result<LayerId> {
 pub fn blend_from_str(s: &str) -> Option<BlendMode> {
     let norm = |x: &str| x.to_ascii_lowercase().replace([' ', '_', '-', '(', ')'], "");
     let want = norm(s);
-    std::iter::once(BlendMode::PassThrough).chain(BlendMode::LAYER_MODES).find(|m| norm(m.label()) == want || norm(&format!("{m:?}")) == want)
+    std::iter::once(BlendMode::PassThrough).chain(BlendMode::layer_modes()).find(|m| norm(m.label()) == want || norm(&format!("{m:?}")) == want)
 }
 
 /// The active selection as the mask of a layer being created, or None without a selection.
@@ -248,7 +248,8 @@ pub(crate) fn selection_mask(doc: &Document) -> Option<LayerMask> {
 /// Mask a fill or adjustment layer being created, as Photoshop does: the path selected in the
 /// Paths panel (`"path"`: `"work"`, a saved path's name or a path object) becomes its vector
 /// mask, which makes a Solid Color fill a shape (#1419); without one, the selection becomes its
-/// layer mask ([`selection_mask`]). A path that isn't there is an error.
+/// layer mask ([`selection_mask`]); without either, a white mask reveals the whole layer (#1768).
+/// A path that isn't there is an error.
 pub(crate) fn mask_new_layer(doc: &Document, l: &mut Layer, p: &Value, cmd: &str) -> Result<()> {
     let path = match p.get("path") {
         None | Some(Value::Null) => None,
@@ -260,14 +261,14 @@ pub(crate) fn mask_new_layer(doc: &Document, l: &mut Layer, p: &Value, cmd: &str
     };
     match path {
         Some(path) => l.vector_mask = Some(photocraft_doc::VectorMask::new(path)),
-        None => l.mask = selection_mask(doc),
+        None => l.mask = Some(selection_mask(doc).unwrap_or_else(LayerMask::reveal_all)),
     }
     Ok(())
 }
 
 /// The `"path"` param of the new fill and adjustment layer commands ([`mask_new_layer`]).
 pub(crate) const NEW_LAYER_PATH: &str =
-    r##""path":"work"|saved path name|{…path}? (the active path: becomes the vector mask; else the selection is the layer mask)"##;
+    r##""path":"work"|saved path name|{…path}? (the active path: becomes the vector mask; else the selection is the layer mask, or white with no selection)"##;
 
 fn new_adjustment(s: &mut Session, adj: Adjustment, p: &Value, cmd: &str) -> Result<Value> {
     let label = format!("New {} Layer", adj.label());
@@ -339,10 +340,11 @@ fn build() -> Vec<CommandSpec> {
             "New…",
             ["File"],
             Some("Cmd+N"),
-            r##"{"width":u32=1920,"height":u32=1080,"mode":"rgb|gray|cmyk|lab"="rgb","depth":8|16|32=8,"background":"white|black|backgroundColor|transparent|#rrggbb"="white","backgroundColor":[r,g,b]? (0..1; defaults to toolbox colour),"resolution":ppi=72,"name":str}"##,
+            r##"{"width":1..300000=1920,"height":1..300000=1080 (pixel counts are rounded),"mode":"rgb|gray|grayscale|cmyk|lab"="rgb","depth":8|16|32=8,"background":"white|black|backgroundColor|transparent|#rrggbb"="white","backgroundColor":[r,g,b]? (0..1; defaults to toolbox colour),"resolution":1..30000=72 (ppi),"name":str}"##,
             always,
             |s, p| {
                 use crate::document_preset_cmds::{MAX_DIMENSION, MAX_RESOLUTION, background_color, color_mode, sample_type};
+                crate::document_preset_cmds::validate_new_params(s, p)?;
                 // A size given as a float (`512.0`, as JSON from a UI field) is still that size (#254).
                 let px = |k: &str, d: u32| match p.get(k) {
                     Some(v) => v
@@ -513,6 +515,7 @@ fn build() -> Vec<CommandSpec> {
                 *active = Some(id);
                 Ok(id)
             })?;
+            crate::layer_multi_cmds::note_inert_insert(s, id);
             Ok(json!({ "layer": id.0 }))
         }),
         cmd!("layer.new.group", "Group…", ["Layer", "New"], None, r##"{"name":str?}"##, has_doc, |s, p| {
@@ -522,6 +525,7 @@ fn build() -> Vec<CommandSpec> {
                 *active = Some(id);
                 Ok(id)
             })?;
+            crate::layer_multi_cmds::note_inert_insert(s, id);
             Ok(json!({ "layer": id.0 }))
         }),
         cmd!(
@@ -564,12 +568,13 @@ fn build() -> Vec<CommandSpec> {
             }
             let id = layer_param(s, p)?;
             s.edit("Delete Layer", |doc, active| {
+                let neighbours = crate::layer_multi_cmds::deletion_neighbours(doc, id);
                 doc.remove(id).ok_or(EngineError::NoLayer(id))?;
                 if doc.layers.is_empty() {
                     return Err(EngineError::Other("a document must keep at least one layer".into()));
                 }
-                if *active == Some(id) {
-                    *active = doc.top_layer();
+                if active.is_some_and(|current| doc.layer(current).is_none()) {
+                    *active = neighbours.into_iter().find(|candidate| doc.layer(*candidate).is_some());
                 }
                 Ok(())
             })?;
@@ -677,23 +682,37 @@ fn build() -> Vec<CommandSpec> {
             has_layer,
             |s, p| set_clipped(s, p, false)
         ),
-        cmd!("layer.layerMask.revealAll", "Reveal All", ["Layer", "Layer Mask"], None, r##"{"layer":id?}"##, has_layer, |s, p| set_mask(
-            s,
-            p,
-            "Add Layer Mask",
-            Some(LayerMask::reveal_all())
-        )),
-        cmd!("layer.layerMask.hideAll", "Hide All", ["Layer", "Layer Mask"], None, r##"{"layer":id?}"##, has_layer, |s, p| set_mask(
-            s,
-            p,
-            "Add Layer Mask",
-            Some(LayerMask::hide_all())
-        )),
-        cmd!("layer.layerMask.revealSelection", "Reveal Selection", ["Layer", "Layer Mask"], None, r##"{"layer":id?}"##, has_selection, |s, p| {
-            let sel = s.active().and_then(|d| d.doc.selection.clone()).ok_or(EngineError::Other("no selection".into()))?;
-            let mask = LayerMask { surface: sel, ..LayerMask::reveal_all() };
-            set_mask(s, p, "Add Layer Mask", Some(mask))
-        }),
+        cmd!(
+            "layer.layerMask.revealAll",
+            "Reveal All",
+            ["Layer", "Layer Mask"],
+            None,
+            r##"{"layer":id?} (no layer: every selected layer that can take a mask)"##,
+            has_layer,
+            |s, p| set_mask(s, p, "Add Layer Mask", Some(LayerMask::reveal_all()))
+        ),
+        cmd!(
+            "layer.layerMask.hideAll",
+            "Hide All",
+            ["Layer", "Layer Mask"],
+            None,
+            r##"{"layer":id?} (no layer: every selected layer that can take a mask)"##,
+            has_layer,
+            |s, p| set_mask(s, p, "Add Layer Mask", Some(LayerMask::hide_all()))
+        ),
+        cmd!(
+            "layer.layerMask.revealSelection",
+            "Reveal Selection",
+            ["Layer", "Layer Mask"],
+            None,
+            r##"{"layer":id?} (no layer: every selected layer that can take a mask)"##,
+            has_selection,
+            |s, p| {
+                let sel = s.active().and_then(|d| d.doc.selection.clone()).ok_or(EngineError::Other("no selection".into()))?;
+                let mask = LayerMask { surface: sel, ..LayerMask::reveal_all() };
+                set_mask(s, p, "Add Layer Mask", Some(mask))
+            }
+        ),
         cmd!("layer.layerMask.delete", "Delete", ["Layer", "Layer Mask"], None, r##"{"layer":id?}"##, has_layer, |s, p| set_mask(
             s,
             p,
@@ -743,7 +762,8 @@ fn build() -> Vec<CommandSpec> {
             |s, p| {
                 let c = color_param(p, "color", s.tools.foreground);
                 let id = s.edit("New Color Fill Layer", |doc, active| {
-                    let mut l = Layer::new(doc.next_layer_name("Color Fill"), LayerContent::Fill(Fill::Solid(Color::rgba(c[0], c[1], c[2], c[3]))));
+                    let fill = Fill::Solid(Color::rgba(c[0], c[1], c[2], c[3])).in_mode(doc.mode);
+                    let mut l = Layer::new(doc.next_layer_name("Color Fill"), LayerContent::Fill(fill));
                     mask_new_layer(doc, &mut l, p, "layer.newFillLayer.solidColor")?;
                     let id = doc.insert_above(*active, l);
                     *active = Some(id);
@@ -772,7 +792,8 @@ fn build() -> Vec<CommandSpec> {
                         1.0,
                         style,
                         reverse,
-                    );
+                    )
+                    .in_mode(doc.mode);
                     let mut l = Layer::new(doc.next_layer_name("Gradient Fill"), LayerContent::Fill(fill));
                     mask_new_layer(doc, &mut l, p, "layer.newFillLayer.gradient")?;
                     let id = doc.insert_above(*active, l);
@@ -1089,8 +1110,10 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::layer_style::specs());
     v.extend(crate::filters::specs());
     v.extend(crate::filters_ext::specs());
+    v.extend(crate::color_to_alpha_cmds::specs());
     v.extend(crate::gallery_cmds::specs());
     v.extend(crate::gradient_fill_cmds::specs());
+    v.extend(crate::solid_fill_cmds::specs());
     v.extend(crate::type_cmds::specs());
     v.extend(crate::transform_cmds::specs());
     v.extend(crate::float_cmds::specs());
@@ -1125,6 +1148,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::prefs::specs());
     v.extend(crate::edit_menu_cmds::specs());
     v.extend(crate::fill_key_cmds::specs());
+    v.extend(crate::sample_cmds::specs());
     v.extend(crate::brush_key_cmds::specs());
     v.extend(crate::stamp_cmds::specs());
     v.extend(crate::align_cmds::specs());
@@ -1144,6 +1168,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::distort_cmds::specs());
     v.extend(crate::analysis_cmds::specs());
     v.extend(crate::notes_cmds::specs());
+    v.extend(crate::history_cmds::specs());
     v.extend(crate::proof_sim::specs());
     v.extend(crate::presets::specs());
     v.extend(crate::document_preset_cmds::specs());
@@ -1166,9 +1191,25 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::plugin_cmds::specs());
     v.extend(crate::group_view_cmds::specs());
     v.extend(crate::fx_view_cmds::specs());
+    v.extend(crate::fx_visibility_cmds::specs());
     v.extend(crate::mask_view_cmds::specs());
+    v.extend(crate::layer_mask_props_cmds::specs());
     v.extend(crate::actions_cmds::specs());
+    // The dispatch guard's unit test needs a command that panics on purpose (REL-3).
+    #[cfg(test)]
+    v.push(test_panic_command());
     v
+}
+
+/// A command whose `run` panics on purpose, so the last-resort guard in `jobs::dispatch`
+/// can be tested (REL-3). Test builds only: `commands::build` pushes it under `cfg(test)`.
+#[cfg(test)]
+fn test_panic_command() -> CommandSpec {
+    #[allow(clippy::panic)]
+    fn run(_: &mut Session, _: &Value) -> Result<Value> {
+        panic!("test: this command panicked on purpose")
+    }
+    CommandSpec { id: "test.panic", label: "Test Panic", menu: &[], shortcut: None, params: r##"{}"##, enabled: |_: &Session| Ok(()), run, journal: false }
 }
 
 /// Commands generated from a table share one `run` fn; the kind is recovered from the id.
@@ -1226,13 +1267,17 @@ fn arrange(s: &mut Session, p: &Value, delta: i32) -> Result<Value> {
     Ok(Value::Null)
 }
 
+/// Add (`Some`) or remove (`None`) a layer mask. Adding acts on every selected layer that can take
+/// one ([`crate::layer_multi_cmds::mask_targets`]), in one history step.
 fn set_mask(s: &mut Session, p: &Value, label: &str, mask: Option<LayerMask>) -> Result<Value> {
-    let id = layer_param(s, p)?;
+    let ids = if mask.is_some() { crate::layer_multi_cmds::mask_targets(s, p)? } else { vec![layer_param(s, p)?] };
     s.edit(label, |doc, _| {
-        if mask.is_some() {
-            crate::extra_cmds::background_to_layer_for_mask(doc, id);
+        for id in &ids {
+            if mask.is_some() {
+                crate::extra_cmds::background_to_layer_for_mask(doc, *id);
+            }
+            doc.layer_mut(*id).ok_or(EngineError::NoLayer(*id))?.mask = mask.clone();
         }
-        doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?.mask = mask;
         Ok(())
     })?;
     Ok(Value::Null)
