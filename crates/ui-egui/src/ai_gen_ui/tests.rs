@@ -587,3 +587,40 @@ fn api_keys_are_saved_apart_from_the_preferences() {
     crate::prefs_ui::confirm(&mut app, &f).unwrap();
     assert!(!keys.lock().unwrap().as_deref().unwrap().contains("g-secret"));
 }
+
+#[test]
+fn a_long_reason_under_generate_fits_in_the_panel() {
+    let mut app = app();
+    // A model whose set-up can't run: the reason Generate is off is several lines long.
+    add_model(
+        &mut app,
+        Model {
+            id: "q".into(),
+            name: "qwen image 2.1 int8 convrot".into(),
+            unet: "qwen_image_2.1_int8_convrot.safetensors".into(),
+            ..Family::QwenImage.preset()
+        },
+    );
+    app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
+    app.ui.ai_gen.model = "q".into();
+    app.ui.ai_gen.prompt = "a long prompt\n".repeat(60);
+    let broken = app.session.prefs().integrations.ai.models[0].clone();
+    assert!(generate_blocked(&app, &broken).unwrap().len() > 150);
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    // Panels of several sizes, down to a short narrow one: the notes always end inside.
+    for (w, h) in [(300.0, 420.0), (260.0, 300.0), (420.0, 700.0)] {
+        let mut overflow = 0.0f32;
+        for _ in 0..3 {
+            ctx.run_ui(Default::default(), |ui| {
+                let area = egui::Rect::from_min_size(ui.max_rect().min, vec2(w, h));
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(area));
+                panel(&mut app, &mut child, true);
+                overflow = child.min_rect().bottom() - area.bottom();
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(overflow <= 1.0, "{w}x{h}: the panel's content runs {overflow} points past its bottom");
+    }
+}

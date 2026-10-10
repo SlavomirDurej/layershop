@@ -174,8 +174,10 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
 
 /// Height of the prompt box when the panel has no height of its own to fill.
 const PROMPT_HEIGHT: f32 = 84.0;
-/// What the rows under the prompt need: spacing, the Generate row and two lines of notes.
-const BELOW_PROMPT: f32 = 6.0 + 32.0 + 3.0 + 34.0;
+/// What the rows under the prompt need besides the notes: spacing and the Generate row.
+const BELOW_PROMPT: f32 = 6.0 + 32.0 + 3.0 + 6.0;
+/// Size of the notes under Generate.
+const NOTE_SIZE: f32 = 11.0;
 
 /// The AI Gen panel body. With `fill` the prompt box takes the height the panel has left (the
 /// dock group: drag its edge and the prompt grows); without it the box has a fixed height.
@@ -218,11 +220,35 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
     }
     ui.add_space(6.0);
 
+    // What goes under Generate, worked out first: the prompt box takes the height that is left,
+    // so it has to know how tall the notes are (a reason Generate is off can be several lines).
+    let why = generate_blocked(app, &current);
+    let note = match (&job, &why) {
+        (Some(job), _) => Some(if job.message.is_empty() { job.label.clone() } else { job.message.clone() }),
+        (None, Some(why)) => Some(why.clone()),
+        (None, None) => target_size(app).map(|(w, h, selection)| {
+            let (rw, rh) = render_size(&current, w, h);
+            let area = if selection { tr("Selection") } else { tr("Canvas") };
+            if current.provider == Provider::Gemini {
+                format!("{area} {w} × {h} px → {rw}:{rh}, {}", current.image_size)
+            } else {
+                format!("{area} {w} × {h} px → {rw} × {rh} px")
+            }
+        }),
+    };
+    let price = (current.provider == Provider::Openai).then(|| price_note(app, &current));
+    let line_gap = ui.spacing().item_spacing.y;
+    let notes_height: f32 = note
+        .iter()
+        .chain(price.iter().map(|(text, _)| text))
+        .map(|text| ui.painter().layout(text.clone(), egui::FontId::proportional(NOTE_SIZE), t.text_faint, width).size().y + line_gap)
+        .sum();
+
     // Prompt. ⌘/Ctrl+Return generates.
     let mut submit = false;
     ui.add_enabled_ui(!busy, |ui| {
         let left = ui.available_height();
-        let height = if fill && left.is_finite() { (left - BELOW_PROMPT).clamp(40.0, 1200.0) } else { PROMPT_HEIGHT };
+        let height = if fill && left.is_finite() { (left - BELOW_PROMPT - notes_height).clamp(40.0, 1200.0) } else { PROMPT_HEIGHT };
         // A prompt longer than the box scrolls inside it instead of pushing Generate away.
         egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             let edit = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt)
@@ -237,7 +263,6 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
 
     // One row, so the button stays in view in a short dock group: the alpha option on the left,
     // Generate on the right; a running generation shows its progress and Cancel there instead.
-    let why = generate_blocked(app, &current);
     let mut clicked = false;
     let mut cancel = None;
     ui.horizontal(|ui| match &job {
@@ -273,26 +298,14 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
 
     // Under it: the job's status, or why Generate is off, or what will be rendered (so the size
     // is no surprise).
-    let note = match (&job, &why) {
-        (Some(job), _) => Some(if job.message.is_empty() { job.label.clone() } else { job.message.clone() }),
-        (None, Some(why)) => Some(why.clone()),
-        (None, None) => target_size(app).map(|(w, h, selection)| {
-            let (rw, rh) = render_size(&current, w, h);
-            let area = if selection { tr("Selection") } else { tr("Canvas") };
-            if current.provider == Provider::Gemini {
-                format!("{area} {w} × {h} px → {rw}:{rh}, {}", current.image_size)
-            } else {
-                format!("{area} {w} × {h} px → {rw} × {rh} px")
-            }
-        }),
-    };
     if let Some(note) = note {
-        ui.label(RichText::new(note).color(t.text_faint).size(11.0));
+        // A reason Generate is off is something to act on: a shade stronger, and selectable.
+        let color = if job.is_none() && why.is_some() { t.text_dim } else { t.text_faint };
+        ui.add(egui::Label::new(RichText::new(note).color(color).size(NOTE_SIZE)).wrap().selectable(true));
     }
     // OpenAI bills per image: what this one should cost, and what the last one did.
-    if current.provider == Provider::Openai {
-        let (text, tip) = price_note(app, &current);
-        ui.label(RichText::new(text).color(t.text_faint).size(11.0)).on_hover_text(tip);
+    if let Some((text, tip)) = price {
+        ui.label(RichText::new(text).color(t.text_faint).size(NOTE_SIZE)).on_hover_text(tip);
     }
     if job.is_none()
         && why.is_none()
