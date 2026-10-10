@@ -65,6 +65,12 @@ pub enum Family {
     QwenImage,
     /// Qwen Image 2.1: a different text encoder, VAE and prompt node from Qwen Image.
     QwenImage21,
+    /// FLUX.1 Fill (Fill Dev, OneReward): BFL's inpainting model. It is given the picture and
+    /// the mask as conditioning, so it knows where it paints; it can't generate from text alone.
+    Flux1Fill,
+    /// Qwen Image steered by InstantX's inpainting ControlNet, which is given the picture and
+    /// the mask. Inpainting only.
+    QwenInpaint,
     /// An all-in-one checkpoint (Stable Diffusion, SDXL, …).
     Checkpoint,
     /// The user's own workflow (API format) with `%prompt%`-style placeholders.
@@ -72,7 +78,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 12] = [
+    pub const ALL: [Family; 14] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux2,
@@ -83,6 +89,8 @@ impl Family {
         Family::Ideogram4,
         Family::QwenImage,
         Family::QwenImage21,
+        Family::Flux1Fill,
+        Family::QwenInpaint,
         Family::Checkpoint,
         Family::Custom,
     ];
@@ -99,6 +107,8 @@ impl Family {
             Family::Ideogram4 => "ideogram4",
             Family::QwenImage => "qwenImage",
             Family::QwenImage21 => "qwenImage21",
+            Family::Flux1Fill => "flux1Fill",
+            Family::QwenInpaint => "qwenInpaint",
             Family::Checkpoint => "checkpoint",
             Family::Custom => "custom",
         }
@@ -120,6 +130,8 @@ impl Family {
             Family::Ideogram4 => "Ideogram 4",
             Family::QwenImage => "Qwen Image",
             Family::QwenImage21 => "Qwen Image 2.1",
+            Family::Flux1Fill => "FLUX.1 Fill (inpainting)",
+            Family::QwenInpaint => "Qwen Image + InstantX ControlNet (inpainting)",
             Family::Checkpoint => "Checkpoint (SD / SDXL)",
             Family::Custom => "Custom workflow",
         }
@@ -134,7 +146,7 @@ impl Family {
     pub fn text_encoders(self) -> usize {
         match self {
             Family::HidreamO1 | Family::Checkpoint | Family::Custom => 0,
-            Family::Flux1 => 2,
+            Family::Flux1 | Family::Flux1Fill => 2,
             Family::HidreamI1 => 4,
             _ => 1,
         }
@@ -142,7 +154,7 @@ impl Family {
 
     /// Has a "shift" (model sampling) control.
     pub fn has_shift(self) -> bool {
-        matches!(self, Family::ZImage | Family::HidreamI1 | Family::Ideogram4 | Family::QwenImage | Family::HidreamO1)
+        matches!(self, Family::ZImage | Family::HidreamI1 | Family::Ideogram4 | Family::QwenImage | Family::QwenInpaint | Family::HidreamO1)
     }
 
     /// The multiple each edge of the rendered image must be.
@@ -153,16 +165,24 @@ impl Family {
 
     /// Has a distilled-guidance control (FLUX), separate from CFG.
     pub fn has_guidance(self) -> bool {
-        matches!(self, Family::Flux1 | Family::Flux2)
+        matches!(self, Family::Flux1 | Family::Flux2 | Family::Flux1Fill)
     }
 
-    /// Offered for inpainting unless the user says otherwise ([`Model::can_inpaint`]). The built-in
-    /// workflow (encode the image, denoise only the masked part) runs with every architecture, but
-    /// only these blend what they paint into the picture around it; tried against ComfyUI 0.39,
-    /// Ernie, HiDream and Ideogram 4 leave seams or paint a different scene. A custom workflow
-    /// inpaints when it takes an `%image%`.
+    /// A dedicated inpainting model: it is given the picture and the mask as conditioning, so it
+    /// paints what belongs inside the mask, and it can't generate from a prompt alone. These are
+    /// the models of ComfyUI's own inpainting templates; the settings list them on their own page
+    /// and the panel offers them on the InPaint tab only.
+    pub fn inpaint_only(self) -> bool {
+        matches!(self, Family::Flux1Fill | Family::QwenInpaint)
+    }
+
+    /// Offered for inpainting unless the user says otherwise ([`Model::can_inpaint`]): the
+    /// dedicated inpainting models, and FLUX.2, an edit model that is given the picture as a
+    /// reference. The built-in workflow runs with every other architecture too (encode the
+    /// picture, denoise only the masked part), but those don't know where the mask is: tried
+    /// against ComfyUI 0.39 they paint a picture of their own inside it, or leave seams.
     pub fn inpaints(self) -> bool {
-        matches!(self, Family::ZImage | Family::Krea2 | Family::Flux2 | Family::Flux1 | Family::QwenImage | Family::QwenImage21 | Family::Checkpoint)
+        self.inpaint_only() || self == Family::Flux2
     }
 
     /// A model of this family with the settings its reference workflow uses. File names are the
@@ -275,6 +295,29 @@ impl Family {
                 cfg: 1.0,
                 ..base
             },
+            Family::Flux1Fill => Model {
+                name: "FLUX.1 Fill Dev".into(),
+                unet: "flux1-fill-dev.safetensors".into(),
+                clip: "clip_l.safetensors".into(),
+                clip2: "t5xxl_fp16.safetensors".into(),
+                vae: "ae.safetensors".into(),
+                steps: 20,
+                cfg: 1.0,
+                guidance: 30.0,
+                scheduler: "normal".into(),
+                ..base
+            },
+            Family::QwenInpaint => Model {
+                name: "Qwen Image InstantX Inpainting".into(),
+                unet: "qwen_image_fp8_e4m3fn.safetensors".into(),
+                clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors".into(),
+                vae: "qwen_image_vae.safetensors".into(),
+                controlnet: "Qwen-Image-InstantX-ControlNet-Inpainting.safetensors".into(),
+                steps: 20,
+                cfg: 2.5,
+                shift: 3.1,
+                ..base
+            },
             Family::Checkpoint => Model { steps: 25, cfg: 7.0, scheduler: "normal".into(), ..base },
             Family::Custom => base,
         }
@@ -309,6 +352,8 @@ pub struct Model {
     pub clip4: String,
     /// VAE file (`models/vae`).
     pub vae: String,
+    /// ControlNet file (`models/controlnet`): the inpainting ControlNet of [`Family::QwenInpaint`].
+    pub controlnet: String,
     /// Optional LoRA file (`models/loras`) and its strength.
     pub lora: String,
     pub lora_strength: f64,
@@ -364,6 +409,7 @@ impl Default for Model {
             clip3: String::new(),
             clip4: String::new(),
             vae: String::new(),
+            controlnet: String::new(),
             lora: String::new(),
             lora_strength: 1.0,
             steps: 20,
@@ -391,17 +437,22 @@ impl Model {
         Model { provider, name: name.into(), api_model: api_model.into(), alpha, ..Model::default() }
     }
 
-    /// Offered for inpainting: the user's choice when they made one, else what the model can do.
-    /// Local: the architectures the built-in inpainting workflow runs, and a custom workflow
-    /// that takes an `%image%`. Cloud: OpenAI's GPT Image models (they have a masked edit
-    /// endpoint) and Gemini's image models (they edit an image they are given).
+    /// Offered for inpainting: the user's choice when they made one, else what the model does
+    /// well. Local: [`Family::inpaints`], and a custom workflow that takes an `%image%`. Cloud
+    /// models can be sent the picture and a mask, but repaint more than was asked: off unless
+    /// the user ticks the box.
     pub fn can_inpaint(&self) -> bool {
         self.inpaint.unwrap_or(match self.provider {
             Provider::Comfy if self.family == Family::Custom => self.workflow.contains("%image%"),
             Provider::Comfy => self.family.inpaints(),
-            Provider::Openai => self.api_model.trim().starts_with("gpt-image"),
-            Provider::Gemini => true,
+            Provider::Openai | Provider::Gemini => false,
         })
+    }
+
+    /// Generates from a prompt alone (the panel's Txt2Img tab): everything but the dedicated
+    /// inpainting models.
+    pub fn can_generate(&self) -> bool {
+        !(self.provider.is_local() && self.family.inpaint_only())
     }
 
     /// The cloud models offered by "Add Cloud Model".
@@ -502,14 +553,19 @@ mod tests {
 
     #[test]
     fn inpainting_follows_the_architecture_unless_the_user_says_otherwise() {
-        assert!(Family::Flux2.preset().can_inpaint() && Family::ZImage.preset().can_inpaint());
-        assert!(!Family::HidreamO1.preset().can_inpaint());
+        for f in Family::ALL {
+            let want = matches!(f, Family::Flux2 | Family::Flux1Fill | Family::QwenInpaint);
+            assert_eq!(f.preset().can_inpaint(), want, "{f:?}");
+            // A dedicated inpainting model does nothing else.
+            assert_eq!(f.preset().can_generate(), !matches!(f, Family::Flux1Fill | Family::QwenInpaint), "{f:?}");
+        }
         assert!(Model { inpaint: Some(true), ..Family::HidreamO1.preset() }.can_inpaint());
         assert!(!Model { inpaint: Some(false), ..Family::Flux2.preset() }.can_inpaint());
         let custom = Model { family: Family::Custom, workflow: r#"{"1":{"inputs":{"image":"%image%"}}}"#.into(), ..Model::default() };
         assert!(custom.can_inpaint() && !Family::Custom.preset().can_inpaint());
-        assert!(Model::cloud_presets().iter().all(Model::can_inpaint));
-        assert!(!Model::cloud(Provider::Openai, "DALL-E 3", "dall-e-3", false).can_inpaint());
+        // Cloud models generate; they inpaint only when the user says so.
+        assert!(Model::cloud_presets().iter().all(|m| m.can_generate() && !m.can_inpaint()));
+        assert!(Model { inpaint: Some(true), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) }.can_inpaint());
         // Models saved before the setting existed have none: they get their architecture's.
         let old: Model = serde_json::from_str(r#"{"id":"a","family":"flux2"}"#).unwrap();
         assert_eq!((old.inpaint, old.can_inpaint()), (None, true));

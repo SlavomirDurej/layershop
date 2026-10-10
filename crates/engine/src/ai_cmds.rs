@@ -396,6 +396,12 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => v.as_f64().filter(|x| x.is_finite() && (0.0..=max).contains(x)).ok_or_else(|| bad(cmd, format!("`{key}` must be a number from 0 to {max}"))),
     };
     let (strength, context) = (number("strength", 1.0, 1.0)?, number("context", DEFAULT_CONTEXT, 4.0)?);
+    if !inpaint && !model.can_generate() {
+        return Err(EngineError::Other(format!(
+            "{} is an inpainting model: it repaints a selection (`\"mode\": \"inpaint\"`, the panel's InPaint tab) and can't generate from a prompt alone",
+            model.name
+        )));
+    }
     if inpaint && !model.can_inpaint() {
         return Err(EngineError::Other(format!("{} is not set up for inpainting (Preferences \u{203a} AI Integrations, its Inpainting box)", model.name)));
     }
@@ -444,9 +450,12 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             if let (Some(layer), Some(selection)) = (&source_layer, &job_selection) {
                 ctx.progress(0.0, "Reading the layer\u{2026}");
                 let size = photocraft_aigen::source_size(&model, area.width(), area.height());
-                // Local models honour a soft mask; a cloud model's mask is where it may paint.
+                // A model that is not told where the mask is gets one that fades in, so it
+                // composes inside it. The dedicated inpainting models are given the mask, and a
+                // cloud model's mask is where it may paint: those get the selection as it is.
                 let selected = selected.unwrap_or(area);
-                job.source = Some(inpaint_source(layer, selection, selected, area, size, strength, model.provider.is_local())?);
+                let fade = model.provider.is_local() && !model.family.inpaint_only();
+                job.source = Some(inpaint_source(layer, selection, selected, area, size, strength, fade)?);
                 ctx.check()?;
             }
             // A local model needs its server: use the one running, or start it.
@@ -495,7 +504,7 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
             let ready = s.ai.ready(m);
             json!({
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
-                "alpha": m.alpha, "inpaint": m.can_inpaint(), "ready": ready.is_ok(), "why": ready.err(),
+                "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "ready": ready.is_ok(), "why": ready.err(),
             })
         })
         .collect();
@@ -611,7 +620,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Models",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,inpaint,ready,why}],comfyUrl,available}"##,
+            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,generate (text to image),inpaint,ready,why}],comfyUrl,available}"##,
             enabled: always,
             run: models,
             journal: false,
@@ -621,7 +630,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras:[file,…]},startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
             journal: false,

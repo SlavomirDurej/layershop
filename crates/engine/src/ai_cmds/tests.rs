@@ -58,11 +58,12 @@ impl Transport for FakeComfy {
     }
 }
 
-/// A 64×48 document, one local model, and a fake server behind it.
+/// A 64×48 document, one local model (ticked for inpainting, which Z-Image is not unasked), and a
+/// fake server behind it.
 fn session(fake: &Arc<FakeComfy>) -> Session {
     let mut s = Session::new();
     s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
-    let model = serde_json::to_value(Model { id: "z".into(), ..Family::ZImage.preset() }).unwrap();
+    let model = serde_json::to_value(Model { id: "z".into(), inpaint: Some(true), ..Family::ZImage.preset() }).unwrap();
     s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
     s.ai.transport = Some(fake.clone());
     s
@@ -351,7 +352,7 @@ fn inpainting_reads_the_layers_pixels_at_every_depth() {
         let fake = FakeComfy::new(16, 16, [255, 0, 0, 255]);
         let mut s = Session::new();
         s.execute("file.new", json!({"width": 40, "height": 40, "mode": mode, "depth": depth, "background": "white"})).unwrap();
-        let model = serde_json::to_value(Model { id: "z".into(), megapixels: 0.0, ..Family::ZImage.preset() }).unwrap();
+        let model = serde_json::to_value(Model { id: "z".into(), megapixels: 0.0, inpaint: Some(true), ..Family::ZImage.preset() }).unwrap();
         s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
         s.ai.transport = Some(fake.clone());
         s.execute("select.rect", json!({"x": 10, "y": 10, "width": 20, "height": 20})).unwrap();
@@ -481,4 +482,38 @@ fn layers_are_named_after_the_model_and_the_prompt() {
     assert_eq!(named(&"x".repeat(500)).chars().count(), 28);
     let m = Model { name: "flux 2 klein 9b fp8".into(), ..Model::default() };
     assert_eq!(layer_name(&m, "  Add here a\n beautiful deer "), "[flux_2_klein] Add here a beautiful deer");
+}
+
+#[test]
+fn a_dedicated_inpainting_model_gets_the_selection_as_its_mask_and_does_nothing_else() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = session(&fake);
+    let models = [
+        Model { id: "fill".into(), ..Family::Flux1Fill.preset() },
+        Model { id: "qwen".into(), ..Family::QwenInpaint.preset() },
+        Model { id: "z".into(), ..Family::ZImage.preset() },
+    ];
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": serde_json::to_value(&models).unwrap()})).unwrap();
+    let listed = s.execute("ai.models", json!({})).unwrap();
+    let flags: Vec<(bool, bool)> =
+        listed["models"].as_array().unwrap().iter().map(|m| (m["generate"].as_bool().unwrap(), m["inpaint"].as_bool().unwrap())).collect();
+    assert_eq!(flags, [(false, true), (false, true), (true, false)]);
+    // From a prompt alone it is refused in words; so is the first enabled model when it is one.
+    for p in [json!({"prompt": "x", "model": "fill"}), json!({"prompt": "x", "model": "qwen", "mode": "txt2img"}), json!({"prompt": "x"})] {
+        let e = s.execute("ai.generate", p.clone()).unwrap_err().to_string();
+        assert!(e.contains("is an inpainting model"), "{p}: {e}");
+    }
+    s.execute("select.rect", json!({"x": 24, "y": 16, "width": 16, "height": 16})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "a pond", "mode": "inpaint", "model": "fill"})).unwrap();
+    assert_eq!((r["mode"].as_str(), r["model"].as_str()), (Some("inpaint"), Some("fill")));
+    let queued = fake.queued().to_string();
+    assert!(queued.contains("InpaintModelConditioning") && queued.contains("flux1-fill-dev.safetensors"), "{queued}");
+    // The model knows where the mask is: it gets the selection itself, whole up to its edge
+    // (168..840 of 1008), not one that fades in (32 pixels inside, a faded mask still keeps half the picture).
+    let mask = fake.uploaded("photocraft_inpaint_mask.png");
+    let alpha = |x: usize, y: usize| mask.data()[(y * 1008 + x) * 4 + 3];
+    assert_eq!((alpha(200, 504), alpha(220, 504), alpha(504, 808), alpha(504, 504)), (0, 0, 0, 0));
+    assert_eq!((alpha(160, 504), alpha(504, 850)), (255, 255));
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.layer(d.active_layer.unwrap()).unwrap().name, "[flux.1_fill_dev] a pond");
 }

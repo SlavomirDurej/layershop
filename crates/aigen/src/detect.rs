@@ -36,6 +36,10 @@ fn family_of(file: &str) -> Option<Family> {
     if ["edit", "video", "i2v", "t2v", "ltx", "wan", "unconditional", "anima", "controlnet", "inpaint", "kontext"].iter().any(|x| n.contains(x)) {
         return None;
     }
+    // BFL's inpainting model and its fine-tunes: not a text-to-image FLUX.1.
+    if n.contains("flux") && (n.contains("fill") || n.contains("onereward")) {
+        return Some(Family::Flux1Fill);
+    }
     Some(if n.contains("z_image") || n.contains("zimage") || n.contains("z-image") {
         Family::ZImage
     } else if n.contains("krea2") || n.contains("krea-2") || n.contains("krea_2") {
@@ -149,7 +153,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::Krea2 => &["qwen3vl_4b"],
             Family::Flux2 if n.contains("klein") => &["qwen_3_8b"],
             Family::Flux2 => &["mistral_3_small_flux2", "mistral"],
-            Family::Flux1 | Family::HidreamI1 => &["clip_l"],
+            Family::Flux1 | Family::Flux1Fill | Family::HidreamI1 => &["clip_l"],
             Family::Ernie => &["ministral"],
             Family::Ideogram4 => &["qwen3vl_8b"],
             Family::QwenImage => &["qwen_2.5_vl"],
@@ -158,7 +162,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         };
         m.clip = choose(clips, &m.clip, clip_needles);
         match family {
-            Family::Flux1 => m.clip2 = choose(clips, &m.clip2, &["t5xxl"]),
+            Family::Flux1 | Family::Flux1Fill => m.clip2 = choose(clips, &m.clip2, &["t5xxl"]),
             Family::HidreamI1 => {
                 m.clip2 = choose(clips, &m.clip2, &["clip_g"]);
                 m.clip3 = choose(clips, &m.clip3, &["t5xxl"]);
@@ -174,6 +178,25 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             _ => &["ae.safetensors"],
         };
         m.vae = choose(vaes, &m.vae, vae_needles);
+        out.push(m);
+    }
+    // Qwen Image becomes an inpainting model with InstantX's ControlNet: one model per such
+    // ControlNet, on the Qwen Image file ComfyUI's template names (or the one the server has).
+    for file in get("controlnet").iter().take(500) {
+        let n = file.to_ascii_lowercase();
+        if !(n.contains("qwen") && n.contains("inpaint")) {
+            continue;
+        }
+        let mut m = Family::QwenInpaint.preset();
+        m.controlnet = file.clone();
+        if !unets.contains(&m.unet) {
+            // The original Qwen Image is what the ControlNet was trained on; a later one is a guess.
+            let qwen = |u: &&String| family_of(u) == Some(Family::QwenImage);
+            let Some(unet) = unets.iter().find(|u| qwen(u) && !u.contains("2512")).or_else(|| unets.iter().find(qwen)) else { continue };
+            m.unet = unet.clone();
+        }
+        m.clip = choose(clips, &m.clip, &["qwen_2.5_vl"]);
+        m.vae = choose(vaes, &m.vae, &["qwen_image_vae"]);
         out.push(m);
     }
     for file in checkpoints.iter().take(500) {
@@ -248,6 +271,34 @@ mod tests {
             assert!(!names.iter().any(|n| n.contains(skipped)), "{skipped} in {names:?}");
         }
         assert_eq!(found.iter().filter(|m| !m.checkpoint.is_empty()).count(), 2);
+    }
+
+    #[test]
+    fn dedicated_inpainting_models_are_detected_as_such() {
+        let mut f = folders();
+        let unets = f.get_mut("diffusion_models").unwrap();
+        unets.extend(
+            ["flux1-fill-dev.safetensors", "flux.1-fill-dev-OneReward-transformer_fp8.safetensors", "qwen_image_fp8_e4m3fn.safetensors"].map(String::from),
+        );
+        f.insert("controlnet".into(), vec!["Qwen-Image-InstantX-ControlNet-Inpainting.safetensors".into(), "flux-canny.safetensors".into()]);
+        let found = detect(&f);
+        let fill: Vec<&Model> = found.iter().filter(|m| m.family == Family::Flux1Fill).collect();
+        assert_eq!(fill.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["flux1 fill dev", "flux.1 fill dev OneReward transformer fp8"]);
+        // Not mistaken for a text-to-image FLUX.1, and with the encoders the server has.
+        assert!(fill.iter().all(|m| m.can_inpaint() && !m.can_generate() && m.guidance == 30.0 && m.clip2 == "t5xxl_fp16.safetensors"));
+        assert_eq!(found.iter().filter(|m| m.family == Family::Flux1).count(), 1);
+        let qwen: Vec<&Model> = found.iter().filter(|m| m.family == Family::QwenInpaint).collect();
+        assert_eq!(qwen.len(), 1);
+        assert_eq!(
+            (qwen[0].unet.as_str(), qwen[0].controlnet.as_str()),
+            ("qwen_image_fp8_e4m3fn.safetensors", "Qwen-Image-InstantX-ControlNet-Inpainting.safetensors")
+        );
+        // Without the Qwen Image file the template names, the one the server has; without any, none.
+        f.get_mut("diffusion_models").unwrap().retain(|u| u != "qwen_image_fp8_e4m3fn.safetensors");
+        let found = detect(&f);
+        assert_eq!(found.iter().find(|m| m.family == Family::QwenInpaint).map(|m| m.unet.as_str()), Some("qwen_image_2512_fp8_e4m3fn.safetensors"));
+        f.get_mut("diffusion_models").unwrap().retain(|u| !u.starts_with("qwen_image_2512"));
+        assert!(!detect(&f).iter().any(|m| m.family == Family::QwenInpaint));
     }
 
     #[test]

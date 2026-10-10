@@ -13,7 +13,7 @@ use crate::run::Job;
 use crate::{Error, Result};
 
 /// The folders of `models/` that hold each kind of file, as `GET /models/<folder>` names them.
-pub const FOLDERS: [&str; 5] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras"];
+pub const FOLDERS: [&str; 6] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet"];
 
 /// A workflow under construction, in ComfyUI's API format: `{"<id>": {class_type, inputs}}`.
 #[derive(Default)]
@@ -53,7 +53,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::Krea2 => "krea2",
         Family::Flux2 | Family::Ernie => "flux2",
         Family::Ideogram4 => "ideogram4",
-        Family::QwenImage | Family::QwenImage21 => "qwen_image",
+        Family::QwenImage | Family::QwenImage21 | Family::QwenInpaint => "qwen_image",
         _ => "stable_diffusion",
     }
 }
@@ -114,6 +114,10 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         return Err(Error::Config(why));
     }
     let f = model.family;
+    if f.inpaint_only() && inpaint.is_none() {
+        let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
+        return Err(Error::Config(format!("{name} is an inpainting model: it repaints a selection (the InPaint tab) and can't generate from a prompt alone")));
+    }
     let mut g = Graph::default();
     let (mut unet, clip, vae) = if f.uses_checkpoint() {
         let id = g.add("CheckpointLoaderSimple", json!({"ckpt_name": file(&model.checkpoint, "a checkpoint file", model)?}));
@@ -182,11 +186,37 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
             let mask = json!([g.add("LoadImage", json!({"image": i.mask})), 1]);
             let encoded = g.node("VAEEncode", json!({"pixels": image, "vae": vae}));
             unet = g.node("DifferentialDiffusion", json!({"model": unet}));
-            if f == Family::Flux2 {
-                positive = g.node("ReferenceLatent", json!({"conditioning": positive, "latent": encoded}));
-                negative = g.node("ReferenceLatent", json!({"conditioning": negative, "latent": encoded}));
+            match f {
+                // The dedicated inpainting models take the picture and the mask as conditioning
+                // (ComfyUI's own inpainting templates): they know where they paint.
+                Family::Flux1Fill => {
+                    let id = g.add(
+                        "InpaintModelConditioning",
+                        json!({"positive": positive, "negative": negative, "vae": vae, "pixels": image, "mask": mask, "noise_mask": true}),
+                    );
+                    (positive, negative) = (json!([id, 0]), json!([id, 1]));
+                    json!([id, 2])
+                }
+                Family::QwenInpaint => {
+                    let control = g.node("ControlNetLoader", json!({"control_net_name": file(&model.controlnet, "an inpainting ControlNet file", model)?}));
+                    let id = g.add(
+                        "ControlNetInpaintingAliMamaApply",
+                        json!({
+                            "positive": positive, "negative": negative, "control_net": control, "vae": vae, "image": image, "mask": mask,
+                            "strength": 1.0, "start_percent": 0.0, "end_percent": 1.0,
+                        }),
+                    );
+                    (positive, negative) = (json!([id, 0]), json!([id, 1]));
+                    g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
+                }
+                _ => {
+                    if f == Family::Flux2 {
+                        positive = g.node("ReferenceLatent", json!({"conditioning": positive, "latent": encoded}));
+                        negative = g.node("ReferenceLatent", json!({"conditioning": negative, "latent": encoded}));
+                    }
+                    g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
+                }
             }
-            g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
         }
         None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
     };
@@ -493,6 +523,12 @@ mod tests {
             if f == Family::Checkpoint {
                 m.checkpoint = "sdxl.safetensors".into();
             }
+            if f.inpaint_only() {
+                // A dedicated inpainting model has no text-to-image workflow, and says so.
+                let e = workflow(&m, &job()).unwrap_err().to_string();
+                assert!(e.contains("inpainting model") && check(&m, false).is_err() && check(&m, true).is_ok(), "{f:?}: {e}");
+                continue;
+            }
             let w = workflow(&m, &job()).unwrap_or_else(|e| panic!("{f:?}: {e}"));
             assert_well_formed(&w);
             let text = w.to_string();
@@ -644,6 +680,11 @@ mod tests {
             // No empty latent: the sampler starts from the encoded image with a noise mask.
             assert!(!c.iter().any(|x| x.starts_with("Empty")), "{f:?}: {c:?}");
             assert_eq!(c.iter().filter(|x| *x == "LoadImage").count(), 2, "{f:?}");
+            // The sampler's model goes through Differential Diffusion, which honours a soft mask.
+            assert_eq!(c.iter().filter(|x| *x == "DifferentialDiffusion").count(), 1, "{f:?}");
+            if f == Family::Flux1Fill {
+                continue;
+            }
             let masked = node(&w, "SetLatentNoiseMask");
             let nodes = w.as_object().unwrap();
             let linked = |v: &Value| &nodes[v[0].as_str().unwrap()];
@@ -651,11 +692,9 @@ mod tests {
             // The mask is the second output of its Load Image, used as it is (it may be soft).
             assert_eq!(masked["inputs"]["mask"][1], 1, "{f:?}");
             assert_eq!(linked(&masked["inputs"]["mask"])["inputs"]["image"], "mask.png");
-            // The sampler's model goes through Differential Diffusion, which honours a soft mask.
-            assert_eq!(c.iter().filter(|x| *x == "DifferentialDiffusion").count(), 1, "{f:?}");
             assert_eq!(c.iter().filter(|x| *x == "ReferenceLatent").count(), if f == Family::Flux2 { 2 } else { 0 }, "{f:?}");
             assert_eq!(linked(&node(&w, "VAEEncode")["inputs"]["pixels"])["inputs"]["image"], "src.png");
-            assert!(check(&m, true).is_ok() && check(&m, false).is_ok());
+            assert!(check(&m, true).is_ok() && (f.inpaint_only() || check(&m, false).is_ok()));
         }
         // The strength reaches each kind of sampler: KSampler, a scheduler, and FLUX.2's by
         // cutting its schedule.
@@ -680,6 +719,50 @@ mod tests {
         assert!(!classes(&plain).iter().any(|x| x == "LoadImage" || x == "DifferentialDiffusion"));
         assert!(!classes(&workflow(&Family::Flux2.preset(), &job()).unwrap()).iter().any(|x| x == "ReferenceLatent"));
         assert_eq!(node(&plain, "KSampler")["inputs"]["denoise"], 1.0);
+    }
+
+    #[test]
+    fn dedicated_inpainting_models_are_given_the_picture_and_the_mask() {
+        // FLUX.1 Fill, as ComfyUI's template: Inpaint Model Conditioning feeds the sampler its
+        // conditioning and its latent.
+        let w = inpaint_workflow(&Family::Flux1Fill.preset(), &job(), &INPAINT).unwrap();
+        let nodes = w.as_object().unwrap();
+        let (id, cond) = nodes.iter().find(|(_, n)| n["class_type"] == "InpaintModelConditioning").unwrap();
+        assert_eq!(cond["inputs"]["noise_mask"], true);
+        assert_eq!(nodes[cond["inputs"]["pixels"][0].as_str().unwrap()]["inputs"]["image"], "src.png");
+        assert_eq!(
+            (nodes[cond["inputs"]["mask"][0].as_str().unwrap()]["inputs"]["image"].as_str(), cond["inputs"]["mask"][1].as_u64()),
+            (Some("mask.png"), Some(1))
+        );
+        assert_eq!(nodes[cond["inputs"]["positive"][0].as_str().unwrap()]["class_type"], "FluxGuidance");
+        let sampler = node(&w, "KSampler");
+        assert_eq!(
+            (&sampler["inputs"]["positive"], &sampler["inputs"]["negative"], &sampler["inputs"]["latent_image"]),
+            (&json!([id, 0]), &json!([id, 1]), &json!([id, 2]))
+        );
+        assert_eq!((sampler["inputs"]["denoise"].as_f64(), sampler["inputs"]["scheduler"].as_str()), (Some(0.6), Some("normal")));
+        assert_eq!(node(&w, "FluxGuidance")["inputs"]["guidance"], 30.0);
+        assert_eq!(node(&w, "DualCLIPLoader")["inputs"]["type"], "flux");
+        assert!(!classes(&w).iter().any(|x| x == "SetLatentNoiseMask" || x == "ReferenceLatent"));
+
+        // Qwen Image with the InstantX ControlNet, as ComfyUI's template.
+        let w = inpaint_workflow(&Family::QwenInpaint.preset(), &job(), &INPAINT).unwrap();
+        let nodes = w.as_object().unwrap();
+        let (id, apply) = nodes.iter().find(|(_, n)| n["class_type"] == "ControlNetInpaintingAliMamaApply").unwrap();
+        assert_eq!(
+            nodes[apply["inputs"]["control_net"][0].as_str().unwrap()]["inputs"]["control_net_name"],
+            "Qwen-Image-InstantX-ControlNet-Inpainting.safetensors"
+        );
+        assert_eq!(nodes[apply["inputs"]["image"][0].as_str().unwrap()]["inputs"]["image"], "src.png");
+        let sampler = node(&w, "KSampler");
+        assert_eq!((&sampler["inputs"]["positive"], &sampler["inputs"]["negative"]), (&json!([id, 0]), &json!([id, 1])));
+        assert_eq!(nodes[sampler["inputs"]["latent_image"][0].as_str().unwrap()]["class_type"], "SetLatentNoiseMask");
+        assert_eq!(node(&w, "ModelSamplingAuraFlow")["inputs"]["shift"], 3.1);
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["type"], "qwen_image");
+        // Without its ControlNet it is not an inpainting model: say which file is missing.
+        let mut m = Family::QwenInpaint.preset();
+        m.controlnet.clear();
+        assert!(inpaint_workflow(&m, &job(), &INPAINT).unwrap_err().to_string().contains("ControlNet"));
     }
 
     #[test]

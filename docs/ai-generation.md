@@ -9,10 +9,12 @@ back end you set up, and places the answer on a new layer.
 
 ## Using it
 
-1. **Edit › Preferences › AI Integrations…** has four pages:
+1. **Edit › Preferences › AI Integrations…** has five pages:
    - **Local Models**: the list of local models beside the selected one's settings. **Scan
      Server** adds a model for every text-to-image model file the ComfyUI server has; **Add
      Model** adds one by architecture.
+   - **Inpainting Models**: the models made for inpainting (below), with their own **Add
+     Model** and **Scan Server**.
    - **Cloud Models**: the same for cloud models; it says which provider still lacks a key.
    - **API Keys**: one key per provider.
    - **Local Server**: the ComfyUI address, **Connect**, the timeout, and starting ComfyUI
@@ -63,33 +65,46 @@ there, press **Generate**.
   shows the sizes (`Selection and context 720 × 760 px → 992 × 1040 px`).
 - **Strength** is how far the result may depart from what is there. 100% paints the selection
   afresh; around 50–70% keeps its shapes and colours and changes the detail. Local models only.
-- The InPaint tab lists the models marked **Supports inpainting** in their settings, and
-  remembers its own choice of model.
+- The InPaint tab lists the inpainting models and any other model ticked **Supports
+  inpainting**, and remembers its own choice of model. Inpainting models are not offered on
+  Txt2Img: they can't generate from a prompt alone.
 
-**Which models.** Local models inpaint by encoding the picture and denoising only the masked
-part (ComfyUI's *Set Latent Noise Mask* with *Differential Diffusion*, which honours the fading
-mask), which every architecture runs but not every one does well. FLUX.2 is an edit model and
-is also given the picture as a reference (*Reference Latent*), so it paints into the scene it
-sees, at its scale and in its light; the others only see the picture through the part of it
-that is kept. Tried against ComfyUI 0.39 with the same picture, mask and prompt:
+**Which models.** Inpainting needs a model that knows where the selection is. Three are made
+for it, the ones behind ComfyUI's own inpainting templates (in ComfyUI: **Templates ›
+Inpainting** downloads their files); they live on the **Inpainting Models** page of the
+settings, and **Scan Server** there adds the ones your server has files for:
 
-| Architecture | Inpainting | On by default |
+| Model | Files | How it is run |
 |---|---|---|
-| FLUX.2 (Klein, Dev) | fits the selection and matches the scene; the one to use for adding something to a picture | yes |
-| FLUX.1, Krea 2, Z-Image | good at replacing a surface or an object; a new subject fits the selection but can bring its own background | yes |
-| Qwen Image | usable; edges can shift a little | yes |
-| Qwen Image 2.1, Checkpoint (SD / SDXL) | same method, not tried here | yes |
-| Ernie Image, HiDream I1, HiDream O1 | visible seams, or a different scene in the box | no |
-| Ideogram 4 | does not blend (its two-model guidance ignores the surroundings) | no |
-| Custom workflow | when it has an `%image%` placeholder | then yes |
+| FLUX.1 Fill Dev | `flux1-fill-dev`, two text encoders (`clip_l`, `t5xxl`), `ae` VAE | *Inpaint Model Conditioning* (picture and mask as conditioning), guidance 30, KSampler |
+| FLUX.1 Fill OneReward | `flux.1-fill-dev-OneReward-transformer`, same encoders and VAE | the same graph. For object removal, set its LoRA to `removal_timestep_alpha-2-1740` and prompt what to remove |
+| Qwen Image + InstantX ControlNet | `qwen_image_fp8_e4m3fn`, `qwen_2.5_vl_7b`, `qwen_image_vae`, and the ControlNet `Qwen-Image-InstantX-ControlNet-Inpainting` | *ControlNet Inpainting (AliMama) Apply* with the picture and mask, AuraFlow shift 3.1, CFG 2.5 |
 
-Tick or untick **Supports inpainting** on a model to overrule the table. Dedicated inpainting
-checkpoints (FLUX.1 Fill) and instruction edit models (Qwen Image Edit, Z-Image Edit) need
-their own workflows and are not built in: use a custom workflow for them.
+They are given the selection as their mask as it is. **FLUX.2** (Klein, Dev) is not an
+inpainting model but an edit model, and inpaints as well as they do: it is given the picture as a
+reference (*Reference Latent*) and a mask that fades in from the selection's edge. It stays on
+the Local Models page and is offered on both tabs.
 
-Cloud models: OpenAI's GPT Image models take the picture and the mask (their image edit
-endpoint). Gemini has no mask input: it is given the picture and the mask as a second image and
-told to change only that part, and the new layer's mask hides whatever else it touched.
+Every other model can be tried by ticking **Supports inpainting** in its settings, and is run
+by encoding the picture and denoising only the masked part (*Set Latent Noise Mask* with
+*Differential Diffusion* and the fading mask). They are not told where the selection is, and it
+shows. Tried against ComfyUI 0.39 with the same picture, selection and prompt (add an animal to
+a meadow):
+
+| Model | Result |
+|---|---|
+| FLUX.1 Fill Dev, FLUX.1 Fill OneReward, Qwen Image + InstantX, FLUX.2 Klein | the subject whole inside the selection, in the scene's light |
+| Z-Image, Krea 2 | the subject inside the selection, on a background of its own |
+| FLUX.1 Dev, Qwen Image | good at replacing a surface; a new subject brings its own surroundings |
+| Ernie Image, HiDream I1 / O1, Ideogram 4 | seams, or a different scene in the box |
+
+Instruction edit models (Qwen Image Edit, Z-Image Edit) have no built-in workflow: use a custom
+workflow for them.
+
+Cloud models are off for inpainting unless ticked. OpenAI's GPT Image models are sent the
+picture and the mask (their image edit endpoint); Gemini has no mask input and is given the
+picture and the mask as a second image. Both tend to repaint more than was asked; the new
+layer's mask hides what falls outside the selection.
 
 ## Starting ComfyUI for you
 
@@ -135,6 +150,8 @@ loads. The workflows follow ComfyUI's own text-to-image templates and use only b
 | Ideogram 4 | diffusion model + unconditional model, text encoder (`ideogram4`), VAE | AuraFlow shift, dual-model guider |
 | Qwen Image | diffusion model, text encoder (`qwen_image`, Qwen 2.5 VL), VAE | AuraFlow shift, KSampler |
 | Qwen Image 2.1 | diffusion model, text encoder (`qwen_image`, Qwen 3 VL 8B), the 2.1 VAE | its own prompt node, KSampler; edges in multiples of 32 |
+| FLUX.1 Fill (inpainting only) | diffusion model, two text encoders, VAE | Inpaint Model Conditioning, FLUX guidance, KSampler |
+| Qwen Image + InstantX ControlNet (inpainting only) | diffusion model, text encoder (`qwen_image`), VAE, ControlNet | ControlNet Inpainting Apply, AuraFlow shift, KSampler |
 | Checkpoint (SD / SDXL) | one checkpoint | KSampler |
 | Custom workflow | whatever your workflow loads | yours |
 
@@ -185,7 +202,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 |---|---|
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it against a real server without the app |
-| `ai.models` | the models, whether each can run now, and whether it is offered for inpainting (`inpaint`) |
+| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`) and is offered for inpainting (`inpaint`) |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |

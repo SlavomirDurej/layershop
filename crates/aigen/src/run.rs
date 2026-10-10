@@ -487,7 +487,7 @@ mod tests {
     fn model_lists_come_from_each_folder() {
         let fake = Fake::new(|r, _| if r.url.ends_with("/models/loras") { Ok(Response { status: 404, body: Vec::new() }) } else { ok(r#"["a.safetensors"]"#) });
         let m = comfy_models(&fake, "http://comfy:8188").unwrap();
-        assert_eq!(m.len(), 4);
+        assert_eq!(m.len(), 5);
         assert_eq!(m["vae"], vec!["a.safetensors"]);
         let down = Fake::new(|_, _| Err(Error::Network("refused".into())));
         assert!(comfy_models(&down, "http://comfy:8188").unwrap_err().to_string().contains("Is it running?"));

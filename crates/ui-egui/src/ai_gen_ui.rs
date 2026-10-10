@@ -216,11 +216,13 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     }
 }
 
-/// The models offered on the tab in front: enabled ones, in settings order; on InPaint those
-/// that can inpaint.
+/// The models offered on the tab in front: enabled ones, in settings order. On InPaint those
+/// that can inpaint (the dedicated inpainting models, and others ticked for it); on Txt2Img
+/// those that generate from a prompt (all but the dedicated inpainting models).
 fn enabled_models(app: &PhotocraftApp) -> Vec<Model> {
     let inpaint = app.ui.ai_gen.mode() == Mode::Inpaint;
-    app.session.prefs().integrations.ai.models.iter().filter(|m| m.enabled && (!inpaint || m.can_inpaint())).cloned().collect()
+    let fits = |m: &&Model| m.enabled && if inpaint { m.can_inpaint() } else { m.can_generate() };
+    app.session.prefs().integrations.ai.models.iter().filter(fits).cloned().collect()
 }
 
 /// The tabs across the top of the panel: equal shares of its width, so all four fit a narrow
@@ -268,11 +270,11 @@ fn running(app: &PhotocraftApp) -> Option<JobInfo> {
 pub fn open_settings(app: &mut PhotocraftApp, model: &str) -> u64 {
     let models = &app.session.prefs().integrations.ai.models;
     let index = models.iter().position(|m| m.id == model).unwrap_or(0);
-    let cloud = models.get(index).is_some_and(|m| !m.provider.is_local());
+    let kind = models.get(index).map_or(Kind::Local, Kind::of_model);
     let id = crate::prefs_ui::open_preferences(app, "integrations");
     if let Some(d) = app.ui.dialog_mut(id) {
         d.fields.insert(SELECTED.into(), json!(index));
-        d.fields.insert(PAGE.into(), json!(if cloud { "cloud" } else { "local" }));
+        d.fields.insert(PAGE.into(), json!(kind.page()));
     }
     id
 }
@@ -362,12 +364,11 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     ui.add_space(6.0);
     let models = enabled_models(app);
     if models.is_empty() {
-        let any = app.session.prefs().integrations.ai.models.iter().any(|m| m.enabled);
-        let (title, hint, button) = if any {
+        let (title, hint, button) = if inpaint {
             (
-                "None of your models is set up for inpainting.",
-                "Tick Inpainting in the settings of a model that can repaint part of an image: FLUX.2, FLUX.1, Krea 2, Z-Image and Qwen Image do it well.",
-                "Model Settings…",
+                "No inpainting model is set up yet.",
+                "Inpainting needs a model made for it: FLUX.1 Fill, FLUX.1 Fill OneReward or Qwen Image with the InstantX ControlNet (ComfyUI's inpainting templates download them), or FLUX.2. Scan Server on the Inpainting Models page adds the ones your ComfyUI has.",
+                "Inpainting Models…",
             )
         } else {
             ("No AI models are set up yet.", "Add local models run by ComfyUI, or cloud models with an API key.", "Set Up Models…")
@@ -377,8 +378,11 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         ui.add_space(2.0);
         ui.label(RichText::new(tr(hint)).color(t.text_faint).size(11.5));
         ui.add_space(8.0);
-        if widgets::secondary_button(ui, tr(button), 130.0).clicked() {
-            open_settings(app, "");
+        if widgets::secondary_button(ui, tr(button), 140.0).clicked() {
+            let id = open_settings(app, "");
+            if inpaint && let Some(d) = app.ui.dialog_mut(id) {
+                d.fields.insert(PAGE.into(), json!(Kind::Inpaint.page()));
+            }
         }
         return;
     }
@@ -740,7 +744,45 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
 }
 
 /// The pages of the Integrations section: (key, title).
-const PAGES: [(&str, &str); 4] = [("local", "Local Models"), ("cloud", "Cloud Models"), ("keys", "API Keys"), ("server", "Local Server")];
+const PAGES: [(&str, &str); 5] =
+    [("local", "Local Models"), ("inpaint", "Inpainting Models"), ("cloud", "Cloud Models"), ("keys", "API Keys"), ("server", "Local Server")];
+
+/// The three lists of models in the settings, each on its own page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Kind {
+    /// Local models that generate from a prompt.
+    Local,
+    /// The dedicated local inpainting models ([`Family::inpaint_only`]).
+    Inpaint,
+    Cloud,
+}
+
+impl Kind {
+    fn page(self) -> &'static str {
+        match self {
+            Kind::Local => "local",
+            Kind::Inpaint => "inpaint",
+            Kind::Cloud => "cloud",
+        }
+    }
+
+    fn of_model(m: &Model) -> Kind {
+        match (m.provider.is_local(), m.family.inpaint_only()) {
+            (false, _) => Kind::Cloud,
+            (true, true) => Kind::Inpaint,
+            (true, false) => Kind::Local,
+        }
+    }
+
+    /// The page a model of the draft is listed on.
+    fn of(m: &Value) -> Kind {
+        if !is_local_model(m) {
+            return Kind::Cloud;
+        }
+        let dedicated = m.get("family").and_then(Value::as_str).and_then(Family::from_key).is_some_and(Family::inpaint_only);
+        if dedicated { Kind::Inpaint } else { Kind::Local }
+    }
+}
 /// Width of the model list beside the selected model's settings, and height of both.
 const PANE_HEIGHT: f32 = 420.0;
 
@@ -792,8 +834,9 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
     match page.as_str() {
         "keys" => keys_page(ui, f),
         "server" => server_page(ui, &mut ai, f),
-        "cloud" => models_page(ui, &mut ai, f, false),
-        _ => models_page(ui, &mut ai, f, true),
+        "cloud" => models_page(ui, &mut ai, f, Kind::Cloud),
+        "inpaint" => models_page(ui, &mut ai, f, Kind::Inpaint),
+        _ => models_page(ui, &mut ai, f, Kind::Local),
     }
     f.insert(PAGE.into(), json!(page));
     obj.insert("ai".into(), Value::Object(ai));
@@ -977,10 +1020,25 @@ fn keys_page(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
     ui.label(RichText::new(tr("Without a saved key, the OPENAI_API_KEY and GEMINI_API_KEY environment variables are used.")).color(t.text_faint).size(11.0));
 }
 
-/// Local Models / Cloud Models: the models of that kind in a list, and the selected one's
-/// settings beside it, so choosing a model shows its settings without scrolling.
-fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>, local: bool) {
+/// Local Models / Inpainting Models / Cloud Models: the models of that kind in a list, and the
+/// selected one's settings beside it, so choosing a model shows its settings without scrolling.
+fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>, kind: Kind) {
     let t = Tokens::get(ui.ctx());
+    let local = kind != Kind::Cloud;
+    if kind == Kind::Inpaint {
+        ui.label(
+            RichText::new(tr("Models made for inpainting: they are given the picture and the mask, so what they paint fits the selection and joins the picture. The AI Gen panel offers them on its InPaint tab. These are the models of ComfyUI's own inpainting templates (Templates › Inpainting there downloads their files)."))
+                .color(t.text_dim),
+        );
+        ui.label(
+            RichText::new(tr(
+                "FLUX.2 inpaints well too and is listed on the Local Models page; any other model can be tried by ticking its Supports inpainting box.",
+            ))
+            .color(t.text_faint)
+            .size(11.0),
+        );
+        ui.add_space(6.0);
+    }
     // Local pages pick files from the server's lists: read them once, when the server is on
     // this machine (it answers or refuses at once; a remote one waits for Connect).
     if local && f.get(FILES).is_none() && f.get(STATUS).is_none() && f.get(AUTO).is_none() {
@@ -994,15 +1052,16 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         if local {
             let add = widgets::secondary_button(ui, tr("Add Model"), 96.0);
             egui::Popup::menu(&add).show(|ui| {
-                for family in Family::ALL {
-                    if ui.button(family.label()).clicked() {
-                        push_model(ai, f, family.preset());
+                for preset in add_presets(kind) {
+                    let title = if kind == Kind::Inpaint { preset.name.clone() } else { preset.family.label().to_string() };
+                    if ui.button(title).clicked() {
+                        push_model(ai, f, preset);
                         ui.close();
                     }
                 }
             });
             if widgets::secondary_button(ui, tr("Scan Server"), 104.0)
-                .on_hover_text(tr("Add a model for every text-to-image model file the ComfyUI server has"))
+                .on_hover_text(tr("Add a model for every text-to-image and inpainting model file the ComfyUI server has"))
                 .clicked()
             {
                 f.insert(ACTION.into(), json!("detect"));
@@ -1021,7 +1080,12 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     });
     if local {
         let page = ui.available_width();
-        status_line(ui, f, "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page.", page);
+        let hint = if kind == Kind::Inpaint {
+            "Scan Server adds the inpainting models your ComfyUI server has files for."
+        } else {
+            "Scan Server adds the models your ComfyUI server has. Set its address on the Local Server page."
+        };
+        status_line(ui, f, hint, page);
     } else {
         // A cloud model without its key can't run: say so here, where the model is.
         let keys = f.get(KEYS).and_then(Value::as_object);
@@ -1045,11 +1109,15 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     ui.add_space(6.0);
 
     let mut models = ai.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
-    let shown: Vec<usize> = models.iter().enumerate().filter(|(_, m)| m.is_object() && is_local_model(m) == local).map(|(i, _)| i).collect();
+    let shown: Vec<usize> = models.iter().enumerate().filter(|(_, m)| m.is_object() && Kind::of(m) == kind).map(|(i, _)| i).collect();
     // The selection is an index into all models; on a page without it, the page's first.
     let mut selected = f.get(SELECTED).and_then(Value::as_u64).map(|i| i as usize).filter(|i| shown.contains(i)).or_else(|| shown.first().copied());
     if shown.is_empty() {
-        let hint = if local { "No local models yet. Use Scan Server, or add one." } else { "No cloud models yet. Add one, then its API key." };
+        let hint = match kind {
+            Kind::Local => "No local models yet. Use Scan Server, or add one.",
+            Kind::Inpaint => "No inpainting models yet. Use Scan Server, or add one.",
+            Kind::Cloud => "No cloud models yet. Add one, then its API key.",
+        };
         ui.label(RichText::new(tr(hint)).color(t.text_faint));
         ai.insert("models".into(), Value::Array(models));
         return;
@@ -1060,7 +1128,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         // ----- the list -----
         ui.vertical(|ui| {
             ui.set_width(list_width(ui));
-            egui::ScrollArea::vertical().id_salt(("ai-model-list", local)).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("ai-model-list", kind.page())).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
                 for &i in &shown {
                     let Some(m) = models.get_mut(i).and_then(Value::as_object_mut) else { continue };
                     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click());
@@ -1103,7 +1171,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         widgets::vline(ui, PANE_HEIGHT);
         // ----- the selected model -----
         ui.vertical(|ui| {
-            egui::ScrollArea::vertical().id_salt(("ai-model-settings", local)).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
+            egui::ScrollArea::vertical().id_salt(("ai-model-settings", kind.page())).max_height(PANE_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
                 if let Some(m) = selected.and_then(|i| models.get_mut(i)).and_then(Value::as_object_mut) {
                     model_settings(ui, m, files.as_ref(), selected.unwrap_or(0));
                 }
@@ -1113,12 +1181,26 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     if let Some(i) = remove.filter(|i| *i < models.len()) {
         models.remove(i);
         // Stay near where the removed model was: the next of this kind, else the previous.
-        let after: Vec<usize> = models.iter().enumerate().filter(|(_, m)| m.is_object() && is_local_model(m) == local).map(|(i, _)| i).collect();
+        let after: Vec<usize> = models.iter().enumerate().filter(|(_, m)| m.is_object() && Kind::of(m) == kind).map(|(i, _)| i).collect();
         selected = after.iter().copied().find(|x| *x >= i).or_else(|| after.last().copied());
     }
     ai.insert("models".into(), Value::Array(models));
     if let Some(i) = selected {
         f.insert(SELECTED.into(), json!(i));
+    }
+}
+
+/// What "Add Model" offers on a page of local models.
+fn add_presets(kind: Kind) -> Vec<Model> {
+    match kind {
+        Kind::Local => Family::ALL.into_iter().filter(|f| !f.inpaint_only()).map(Family::preset).collect(),
+        // The three models of ComfyUI's inpainting templates.
+        Kind::Inpaint => vec![
+            Family::Flux1Fill.preset(),
+            Model { name: "FLUX.1 Fill OneReward".into(), unet: "flux.1-fill-dev-OneReward-transformer_fp8.safetensors".into(), ..Family::Flux1Fill.preset() },
+            Family::QwenInpaint.preset(),
+        ],
+        Kind::Cloud => Model::cloud_presets(),
     }
 }
 
@@ -1173,6 +1255,9 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
                     file_row(ui, m, key, title, folder("text_encoders"), false);
                 }
                 file_row(ui, m, "vae", "VAE", folder("vae"), false);
+                if family == Family::QwenInpaint {
+                    file_row(ui, m, "controlnet", "ControlNet", folder("controlnet"), false);
+                }
             }
             if family != Family::Custom && (!family.uses_checkpoint() || family == Family::Checkpoint) {
                 file_row(ui, m, "lora", "LoRA", folder("loras"), true);
@@ -1220,13 +1305,17 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
         widgets::checkbox(ui, &mut alpha, tr("Can generate it")).on_hover_text(tr("The model can return a transparent background. Enables the Alpha Channel box in the AI Gen panel for it"));
         m.insert("alpha".into(), json!(alpha));
         ui.end_row();
+        // A dedicated inpainting model does nothing else: there is nothing to tick.
+        if provider.is_local() && Family::from_key(&text_of(m, "family")).is_some_and(Family::inpaint_only) {
+            return;
+        }
         label(ui, "Inpainting");
         // Until the box is used the model follows what its architecture or provider does well;
         // using it stores the choice.
         let was = serde_json::from_value::<Model>(Value::Object(m.clone())).map(|model| model.can_inpaint()).unwrap_or(false);
         let mut inpaint = was;
         widgets::checkbox(ui, &mut inpaint, tr("Supports inpainting")).on_hover_text(tr(
-            "List this model on the AI Gen panel's InPaint tab. On by default for the models that blend what they paint into the image around it: FLUX.2, FLUX.1, Krea 2, Z-Image, Qwen Image, checkpoints, GPT Image and Gemini. Others can be tried, with rougher edges",
+            "List this model on the AI Gen panel's InPaint tab. On for FLUX.2, which is given the picture as a reference. Other models are not told where the selection is: they can be tried, but tend to paint a picture of their own inside it. The models made for inpainting are on the Inpainting Models page",
         ));
         if inpaint != was {
             m.insert("inpaint".into(), json!(inpaint));

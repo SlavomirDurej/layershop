@@ -649,22 +649,27 @@ fn a_long_reason_under_generate_fits_in_the_panel() {
 #[test]
 fn the_inpaint_tab_lists_the_models_that_can_inpaint_and_keeps_its_own_choice() {
     let mut app = app();
-    // Ernie doesn't inpaint well enough to be offered unasked; ticking its box offers it.
+    // Text-to-image models are not told where a selection is: they are offered for inpainting
+    // only when their box is ticked. FLUX.2 is, and so are the models made for inpainting, which
+    // in turn are not offered for text to image.
     add_model(&mut app, Model { id: "ernie".into(), ..Family::Ernie.preset() });
     add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "ticked".into(), inpaint: Some(true), ..Family::ZImage.preset() });
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     add_model(&mut app, Model { id: "off".into(), inpaint: Some(false), ..Family::Flux2.preset() });
+    add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
+    add_model(&mut app, Model { id: "qwen".into(), ..Family::QwenInpaint.preset() });
     let ids = |app: &PhotocraftApp| enabled_models(app).into_iter().map(|m| m.id).collect::<Vec<_>>();
-    assert_eq!(ids(&app), ["ernie", "z", "flux", "off"]);
+    assert_eq!(ids(&app), ["ernie", "z", "ticked", "flux", "off"]);
     app.ui.ai_gen.model = "ernie".into();
     app.ui.ai_gen.mode = Mode::Inpaint;
-    assert_eq!(ids(&app), ["z", "flux"]);
+    assert_eq!(ids(&app), ["ticked", "flux", "fill", "qwen"]);
     draw_panel(&mut app);
     // Each tab has its own model: choosing one for inpainting leaves the other tab's alone.
-    assert_eq!((app.ui.ai_gen.inpaint_model.as_str(), app.ui.ai_gen.model.as_str()), ("z", "ernie"));
-    app.ui.ai_gen.inpaint_model = "flux".into();
+    assert_eq!((app.ui.ai_gen.inpaint_model.as_str(), app.ui.ai_gen.model.as_str()), ("ticked", "ernie"));
+    app.ui.ai_gen.inpaint_model = "fill".into();
     draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.chosen(), "flux");
+    assert_eq!(app.ui.ai_gen.chosen(), "fill");
     app.ui.ai_gen.mode = Mode::Txt2img;
     draw_panel(&mut app);
     assert_eq!(app.ui.ai_gen.chosen(), "ernie");
@@ -693,7 +698,7 @@ fn the_inpaint_tab_lists_the_models_that_can_inpaint_and_keeps_its_own_choice() 
 #[test]
 fn inpainting_from_the_panel_needs_a_selection_on_a_pixel_layer_and_adds_a_masked_layer() {
     let mut app = app();
-    let z = z_image("z");
+    let z = Model { inpaint: Some(true), ..z_image("z") };
     add_model(&mut app, z.clone());
     app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
     app.ui.ai_gen.mode = Mode::Inpaint;
@@ -740,7 +745,7 @@ fn inpainting_from_the_panel_needs_a_selection_on_a_pixel_layer_and_adds_a_maske
 #[test]
 fn the_inpainting_box_follows_the_architecture_until_it_is_used() {
     let mut app = app();
-    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     add_model(&mut app, Model { id: "ernie".into(), ..Family::Ernie.preset() });
     let (_, mut f) = dialog_fields(&mut app);
     draw_section(&mut f);
@@ -778,4 +783,52 @@ fn the_dock_gives_the_panel_room_for_its_generate_button() {
         assert_eq!(layout.with_room(plain.clone(), Group::Properties, hostile), plain);
     }
     assert!(layout.with_room(Vec::new(), Group::Properties, want).is_empty());
+}
+
+#[test]
+fn inpainting_models_have_their_own_settings_page() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) });
+    add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
+    add_model(&mut app, Model { id: "qwen".into(), ..Family::QwenInpaint.preset() });
+    assert!(PAGES.iter().any(|(key, title)| (*key, *title) == ("inpaint", "Inpainting Models")));
+    // Each model is listed on one page: by where it runs, and whether it is made for inpainting.
+    let draft = serde_json::to_value(&app.session.prefs().integrations.ai.models).unwrap();
+    let kinds: Vec<Kind> = draft.as_array().unwrap().iter().map(Kind::of).collect();
+    assert_eq!(kinds, [Kind::Local, Kind::Cloud, Kind::Inpaint, Kind::Inpaint]);
+    assert_eq!(app.session.prefs().integrations.ai.models.iter().map(Kind::of_model).collect::<Vec<_>>(), kinds);
+    // The gear on an inpainting model opens its page with it selected.
+    let id = open_settings(&mut app, "qwen");
+    let mut f = app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone();
+    assert_eq!((f[PAGE].as_str(), f[SELECTED].as_u64()), (Some("inpaint"), Some(3)));
+    // Drawing every page keeps the models as they are (the ControlNet row included).
+    draw_section(&mut f);
+    let after: Vec<Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
+    assert_eq!(after, app.session.prefs().integrations.ai.models);
+    assert_eq!(after[3].controlnet, "Qwen-Image-InstantX-ControlNet-Inpainting.safetensors");
+    // Add Model offers each page its own: the three models of ComfyUI's inpainting templates
+    // there, the text-to-image architectures on the local page.
+    let inpaint = add_presets(Kind::Inpaint);
+    assert_eq!(inpaint.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["FLUX.1 Fill Dev", "FLUX.1 Fill OneReward", "Qwen Image InstantX Inpainting"]);
+    assert!(inpaint.iter().all(|m| Kind::of_model(m) == Kind::Inpaint && m.can_inpaint() && !m.can_generate()));
+    assert!(add_presets(Kind::Local).iter().all(|m| Kind::of_model(m) == Kind::Local));
+    assert_eq!(add_presets(Kind::Local).len(), Family::ALL.len() - 2);
+    assert!(add_presets(Kind::Cloud).iter().all(|m| Kind::of_model(m) == Kind::Cloud));
+    // A scan adds the server's inpainting models next to its text-to-image ones.
+    let folders = json!({
+        "diffusion_models": ["z_image_turbo_bf16.safetensors", "flux1-fill-dev.safetensors", "qwen_image_fp8_e4m3fn.safetensors"],
+        "controlnet": ["Qwen-Image-InstantX-ControlNet-Inpainting.safetensors"],
+    });
+    let (_, mut fresh) = dialog_fields(&mut app);
+    *fresh.get_mut("values").and_then(|v| v.pointer_mut("/integrations/ai/models")).unwrap() = json!([]);
+    let (added, _) = add_detected(&mut fresh, &folders);
+    let found: Vec<Model> = serde_json::from_value(fresh["values"]["integrations"]["ai"]["models"].clone()).unwrap();
+    assert_eq!(added, found.len());
+    assert_eq!(found.iter().filter(|m| Kind::of_model(m) == Kind::Inpaint).map(|m| m.family).collect::<Vec<_>>(), [Family::Flux1Fill, Family::QwenInpaint]);
+    // With no inpainting model the InPaint tab says how to get one (and draws).
+    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": [z_image("z")]})).unwrap();
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    assert!(enabled_models(&app).is_empty());
+    draw_panel(&mut app);
 }
