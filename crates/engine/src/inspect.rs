@@ -85,6 +85,10 @@ fn layer_sel(l: &Layer, selected: &[photocraft_doc::LayerId]) -> Value {
         "selected": selected.contains(&l.id),
         "linkGroup": l.link_group,
     });
+    // A generative-AI layer says what it was made from (`ai.generate`'s params).
+    if let Some(g) = &l.generation {
+        v["generation"] = serde_json::to_value(g).unwrap_or(Value::Null);
+    }
     match &l.content {
         LayerContent::Group(g) => {
             v["children"] = Value::Array(g.children.iter().rev().map(|c| layer_sel(c, selected)).collect());

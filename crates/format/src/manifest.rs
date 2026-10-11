@@ -229,6 +229,9 @@ pub struct LayerM {
     pub advanced: photocraft_doc::AdvancedBlending,
     #[serde(default)]
     pub video: Option<VideoDataM>,
+    /// The generative-AI generation the layer came from; omitted for every other layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<photocraft_doc::Generation>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

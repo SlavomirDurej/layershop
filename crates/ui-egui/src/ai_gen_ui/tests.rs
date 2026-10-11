@@ -957,3 +957,138 @@ fn the_mask_tools_mark_what_to_repaint_from_the_panel() {
         } + 2.0 * INPAINT_ROW
     );
 }
+
+/// A document with one generation of each kind, made from the panel: the ids of the Background
+/// and of the Txt2Img, Img2Img and InPaint layers.
+fn generated_layers(app: &mut PhotocraftApp) -> [u64; 4] {
+    add_model(app, z_image("z"));
+    add_model(app, Model { id: "z2".into(), inpaint: Some(true), ..Family::ZImage.preset() });
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let background = app.session.active().unwrap().active_layer.unwrap().0;
+    let made = |app: &mut PhotocraftApp| {
+        let r = generate(app).unwrap();
+        r["layer"].as_u64().unwrap()
+    };
+    app.ui.ai_gen = AiGenUi { model: "z2".into(), prompt: "a green field".into(), alpha: false, ..Default::default() };
+    let txt = made(app);
+    app.ui.ai_gen = AiGenUi { mode: Mode::Img2img, model: "z".into(), prompt: "as a watercolour".into(), img_strength: 0.35, ..Default::default() };
+    app.ui.ai_gen.img_source = Some(SourceRef::Layer(background));
+    let img = made(app);
+    app.run("select.rect", json!({"x": 8, "y": 4, "width": 20, "height": 10})).unwrap();
+    app.ui.ai_gen = AiGenUi { mode: Mode::Inpaint, inpaint_model: "z2".into(), prompt: "a pond".into(), strength: 0.75, context: 0.5, ..Default::default() };
+    let inpaint = made(app);
+    [background, txt, img, inpaint]
+}
+
+#[test]
+fn a_generated_layer_loads_its_settings_back_into_the_panel() {
+    let mut app = app();
+    let [background, txt, img, inpaint] = generated_layers(&mut app);
+    // Something else in the panel, to be replaced.
+    let other = AiGenUi { mode: Mode::Txt2img, model: "z".into(), inpaint_model: "z2".into(), prompt: "something else".into(), ..Default::default() };
+    app.ui.ai_gen = other.clone();
+    // A layer that was not generated, and one that is not there, change nothing.
+    assert!(!load_layer(&mut app, background));
+    assert!(!load_layer(&mut app, u64::MAX));
+    assert_eq!(app.ui.ai_gen, other);
+    // InPaint: the tab, its own model, the prompt, strength and context.
+    app.ui.ai_gen.inpaint_model = String::new();
+    assert!(load_layer(&mut app, inpaint));
+    let ui = app.ui.ai_gen.clone();
+    assert_eq!((ui.mode, ui.inpaint_model.as_str(), ui.prompt.as_str(), ui.strength, ui.context), (Mode::Inpaint, "z2", "a pond", 0.75, 0.5));
+    assert_eq!(ui.model, "z", "the other tabs' model is left alone");
+    // Img2Img: the tab, the model, the prompt, its strength and the picture it was redrawn from.
+    assert!(load_layer(&mut app, img));
+    let ui = app.ui.ai_gen.clone();
+    assert_eq!((ui.mode, ui.model.as_str(), ui.prompt.as_str(), ui.img_strength), (Mode::Img2img, "z", "as a watercolour", 0.35));
+    assert_eq!((ui.img_source, img_source(&app)), (Some(SourceRef::Layer(background)), Some(SourceRef::Layer(background))));
+    assert_eq!((ui.strength, ui.context), (0.75, 0.5), "InPaint's settings are its own");
+    // Txt2Img: the tab, the model, the prompt.
+    assert!(load_layer(&mut app, txt));
+    let ui = app.ui.ai_gen.clone();
+    assert_eq!((ui.mode, ui.model.as_str(), ui.prompt.as_str(), ui.alpha), (Mode::Txt2img, "z2", "a green field", false));
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.model, "z2");
+    // The command does the same, for the active layer when none is named.
+    app.ui.ai_gen = other.clone();
+    assert_eq!(menu(&mut app, LOAD_LAYER, &json!({"layer": inpaint})), Some(Ok(json!({"loaded": true}))));
+    assert_eq!(app.ui.ai_gen.prompt, "a pond");
+    app.run("layer.select", json!({"layer": txt})).unwrap();
+    assert_eq!(menu(&mut app, LOAD_LAYER, &json!({})), Some(Ok(json!({"loaded": true}))));
+    assert_eq!(app.ui.ai_gen.prompt, "a green field");
+    assert_eq!(menu(&mut app, LOAD_LAYER, &json!({"layer": background})), Some(Ok(json!({"loaded": false}))));
+    assert!(menu(&mut app, LOAD_LAYER, &json!({"layer": "x"})).unwrap().is_err());
+}
+
+#[test]
+fn a_model_that_is_gone_keeps_the_panels_choice_and_loads_the_rest() {
+    let mut app = app();
+    let [_, txt, _, inpaint] = generated_layers(&mut app);
+    // "z2" made both layers; it is disabled, then removed.
+    let mut models = app.session.prefs().integrations.ai.models.clone();
+    models.iter_mut().filter(|m| m.id == "z2").for_each(|m| m.enabled = false);
+    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": models})).unwrap();
+    app.ui.ai_gen = AiGenUi { model: "z".into(), prompt: "something else".into(), ..Default::default() };
+    assert!(load_layer(&mut app, txt));
+    assert_eq!((app.ui.ai_gen.model.as_str(), app.ui.ai_gen.prompt.as_str()), ("z", "a green field"));
+    models.retain(|m| m.id != "z2");
+    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": models})).unwrap();
+    assert!(load_layer(&mut app, inpaint));
+    let ui = &app.ui.ai_gen;
+    assert_eq!((ui.mode, ui.inpaint_model.as_str(), ui.prompt.as_str(), ui.strength, ui.context), (Mode::Inpaint, "", "a pond", 0.75, 0.5));
+    draw_panel(&mut app);
+}
+
+mod clicks {
+    use super::*;
+    use crate::layer_row_ui::recorded;
+    use egui::{Modifiers, PointerButton, Pos2, pos2, vec2};
+    use egui_kittest::Harness;
+
+    fn click(h: &mut Harness<'_, PhotocraftApp>, at: Pos2) {
+        h.hover_at(at);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+    }
+
+    #[test]
+    fn clicking_a_generated_layer_loads_it_and_its_eye_does_not() {
+        let mut app = app();
+        let [background, txt, _, inpaint] = generated_layers(&mut app);
+        app.ui.ai_gen = AiGenUi { prompt: "something else".into(), ..Default::default() };
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            app
+        });
+        h.run_steps(8);
+        let row = |h: &Harness<'_, PhotocraftApp>, layer: u64| recorded(&h.ctx).into_iter().find(|r| r.layer == layer).unwrap();
+        let visible = |h: &Harness<'_, PhotocraftApp>, layer: u64| h.state().session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().visible;
+        // The eye toggles the layer and leaves the panel as it is.
+        let r = row(&h, txt);
+        click(&mut h, pos2(r.row.left() + 15.0, r.row.center().y));
+        assert!(!visible(&h, txt), "the eye was hit");
+        assert_eq!(h.state().ui.ai_gen.prompt, "something else");
+        assert_eq!(h.state().ui.ai_gen.mode, Mode::Txt2img);
+        // The name loads the layer's generation.
+        let at = row(&h, inpaint).name.unwrap().center();
+        click(&mut h, at);
+        let ui = h.state().ui.ai_gen.clone();
+        assert_eq!((ui.mode, ui.prompt.as_str(), ui.strength, ui.context), (Mode::Inpaint, "a pond", 0.75, 0.5));
+        assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(inpaint)));
+        // So does the thumbnail, left of the name (and, on this layer, the mask between them).
+        let r = row(&h, inpaint);
+        click(&mut h, pos2(r.name.unwrap().left() - 12.0, r.row.center().y));
+        assert_eq!(h.state().ui.ai_gen.prompt, "a pond");
+        let r = row(&h, txt);
+        click(&mut h, pos2(r.name.unwrap().left() - 12.0, r.row.center().y));
+        assert_eq!(h.state().ui.ai_gen.prompt, "a green field");
+        // A layer that was not generated leaves what is loaded.
+        let at = row(&h, background).name.unwrap().center();
+        click(&mut h, at);
+        assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(background)));
+        assert_eq!(h.state().ui.ai_gen.prompt, "a green field");
+    }
+}

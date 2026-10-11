@@ -26,6 +26,16 @@ back end you set up, and places the answer on a new layer.
    selection), named after the model and the prompt (`[flux_2_klein] a deer eating grass`). The selection becomes the layer's mask, so a lasso or feathered selection shapes
    the result and stays editable. One undo step; Esc or Cancel stops a running generation.
 
+4. A generated layer **remembers what it was made with**: the model, the prompt, the tab
+   (Txt2Img, InPaint or Img2Img) and that tab's settings (strength, context, the source picture,
+   alpha), and the seed. Click the layer in the Layers panel (its name, thumbnail or mask) and
+   the AI Gen panel loads them back, ready to generate again or to change. The eye does not:
+   showing and hiding a layer leaves the panel alone. So do ⌘/Ctrl- and Shift-clicks, which
+   select several layers. If the model has since been removed or disabled (or no longer does
+   what that tab needs), the panel keeps the model it had and loads the rest. Nothing is loaded
+   while a generation is running. The settings are saved in `.pcraft` files and copied with the
+   layer (Duplicate Layer); other formats (PSD, PNG…) don't keep them.
+
 **Size.** The selection decides the shape. Models are trained near one megapixel and need edges
 in multiples of 16, so a model renders at about its **Render size (MP)** in the selection's
 aspect ratio, and the result is scaled to cover the selection and cropped to it. Set it to 0 to
@@ -245,6 +255,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it (and, with `img2img` in place of the rectangle, image to image) against a real server without the app |
 | `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
+| `window.panel.aiGen.loadLayer {"layer"?: id}` → `{loaded}` | a shell command (the running app): load what a generated layer was made with into the panel, like clicking it; the active layer without `layer`. `loaded` is false for a layer that was not generated, and while a generation runs |
 | `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself |
 | `ai.sources` | what img2img can start from now: the active document's layers with pixels, the other open documents, and which is the default |
 | `ai.models` | the models, whether each can run now, generates from a prompt (`generate`) and is offered for inpainting (`inpaint`) |
@@ -255,6 +266,11 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's state is
 `ai_gen` in the UI state that `ui.inspect` returns (`mode`, `model`, `inpaintModel`, `strength`,
 `context`, `maskBrush`, `imgSource`, `imgStrength`, `prompt`, `alpha`).
+
+A generated layer carries its settings as `generation` in the layer tree (`document.inspect`
+and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source}`, named
+as `ai.generate` names its params, so they can be passed straight back to it. In the code it is
+`photocraft_doc::Layer::generation`.
 
 ## Code map
 

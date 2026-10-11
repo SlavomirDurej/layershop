@@ -14,6 +14,7 @@ pub mod analysis;
 pub mod blend_if;
 pub mod comps;
 pub mod effects;
+pub mod generation;
 pub mod mode;
 pub mod pattern;
 pub mod slices;
@@ -35,6 +36,7 @@ pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
     GradientStyle, Satin, Shadow, StrokeFx, StrokePosition,
 };
+pub use generation::{Generation, GenerationMode, GenerationSource};
 pub use mode::{ColorTable, Duotone, DuotoneInk, StackMode};
 pub use pattern::Pattern;
 pub use photocraft_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
@@ -612,6 +614,9 @@ pub struct Layer {
     pub advanced: AdvancedBlending,
     /// Layer › Video Layers frame stack (None for a normal layer).
     pub video: Option<VideoData>,
+    /// The generative-AI generation this layer came from (model, prompt, settings); `None` for
+    /// every other layer. Kept through edits and duplication, so the AI Gen panel can load it back.
+    pub generation: Option<Generation>,
 }
 
 impl Layer {
@@ -638,6 +643,7 @@ impl Layer {
             blend_if: BlendIf::default(),
             advanced: AdvancedBlending::default(),
             video: None,
+            generation: None,
         }
     }
     pub fn raster(name: impl Into<String>, format: PixelFormat) -> Self {

@@ -1,4 +1,5 @@
 use super::*;
+use photocraft_doc::{Generation, GenerationMode, GenerationSource};
 use photocraft_aigen::{Family, Request, Response};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use std::sync::Mutex;
@@ -711,4 +712,61 @@ fn the_inpaint_mask_is_painted_and_becomes_the_selection_and_the_layers_mask() {
         assert!(s.execute("ai.mask", p.clone()).is_err(), "{p}");
     }
     assert!(Session::new().execute("ai.mask", json!({"paint": true})).is_err());
+}
+
+#[test]
+fn a_generated_layer_keeps_what_it_was_made_from() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = session(&fake);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    fn made(s: &Session) -> Option<Generation> {
+        let d = s.active().unwrap();
+        d.doc.layer(d.active_layer.unwrap()).unwrap().generation.clone()
+    }
+    assert_eq!(made(&s), None, "a layer that was not generated has none");
+    let name = Family::ZImage.preset().name;
+    // Text to image: the prompt as it was sent, the model, the seed.
+    s.execute("ai.generate", json!({"prompt": "  a green field ", "seed": 5})).unwrap();
+    let txt = Generation {
+        mode: GenerationMode::Txt2img,
+        model: "z".into(),
+        model_name: name.clone(),
+        prompt: "a green field".into(),
+        strength: 1.0,
+        context: DEFAULT_CONTEXT,
+        alpha: false,
+        seed: 5,
+        source: None,
+    };
+    assert_eq!(made(&s), Some(txt.clone()));
+    // The layer tree reports it, named as `ai.generate` names its params.
+    let d = s.active().unwrap();
+    let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+    let info = crate::inspect::layer(layer);
+    assert_eq!(
+        info["generation"],
+        json!({"mode": "txt2img", "model": "z", "modelName": name, "prompt": "a green field", "strength": 1.0, "context": DEFAULT_CONTEXT, "alpha": false, "seed": 5, "source": null})
+    );
+    assert!(crate::inspect::layer(d.doc.layer(LayerId(background)).unwrap()).get("generation").is_none());
+    // A copy of the layer is as much that generation as the layer is.
+    assert_eq!(layer.duplicate().generation, Some(txt.clone()));
+    // Image to image: the picture it was redrawn from and how closely.
+    s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"layer": background}, "strength": 0.3, "seed": 6})).unwrap();
+    let img = Generation { mode: GenerationMode::Img2img, prompt: "x".into(), strength: 0.3, seed: 6, source: Some(GenerationSource::Layer(background)), ..txt.clone() };
+    assert_eq!(made(&s), Some(img));
+    // Unnamed, the source is the one that was used: the active layer.
+    let active = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "seed": 6})).unwrap();
+    assert_eq!(made(&s).unwrap().source, Some(GenerationSource::Layer(active)));
+    // Inpainting: strength and context.
+    s.execute("select.rect", json!({"x": 24, "y": 16, "width": 16, "height": 16})).unwrap();
+    s.execute("ai.generate", json!({"prompt": "a pond", "mode": "inpaint", "strength": 0.75, "context": 0.5, "seed": 9})).unwrap();
+    let inpaint = Generation { mode: GenerationMode::Inpaint, prompt: "a pond".into(), strength: 0.75, context: 0.5, seed: 9, ..txt };
+    assert_eq!(made(&s), Some(inpaint));
+    // A seed the engine drew is the one kept.
+    let r = s.execute("ai.generate", json!({"prompt": "y"})).unwrap();
+    assert_eq!(Some(made(&s).unwrap().seed), r["seed"].as_u64());
+    // Undo takes the layer, and its generation with it.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(made(&s).unwrap().prompt, "a pond");
 }

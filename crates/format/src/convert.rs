@@ -207,6 +207,27 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
         blend_if: l.blend_if.clone(),
         advanced: l.advanced,
         video: l.video.as_ref().map(|v| video_m(v, sink)),
+        generation: l.generation.clone(),
+    }
+}
+
+/// A generation's source follows its layer through id remapping; one that is gone, and another
+/// document (whose id only lasted for its session), is forgotten.
+fn remap_generation_sources(l: &mut Layer, ids: &std::collections::HashMap<u64, LayerId>, depth: usize) {
+    use photocraft_doc::GenerationSource;
+    if let Some(g) = &mut l.generation {
+        g.source = match g.source {
+            Some(GenerationSource::Layer(raw)) => ids.get(&raw).map(|id| GenerationSource::Layer(id.0)),
+            _ => None,
+        };
+    }
+    // The loader refused anything deeper already.
+    if depth <= MAX_GROUP_DEPTH
+        && let Some(children) = l.children_mut()
+    {
+        for c in children {
+            remap_generation_sources(c, ids, depth + 1);
+        }
     }
 }
 
@@ -506,11 +527,15 @@ impl Loader<'_> {
             blend_if: m.blend_if.clone(),
             advanced: m.advanced,
             video: m.video.as_ref().map(|v| self.video(v)).transpose()?,
+            generation: m.generation.clone(),
         })
     }
 
     pub(crate) fn document(&mut self, m: &DocM) -> Result<Document> {
-        let layers = m.layers.iter().map(|l| self.layer(l, 0)).collect::<Result<Vec<_>>>()?;
+        let mut layers = m.layers.iter().map(|l| self.layer(l, 0)).collect::<Result<Vec<_>>>()?;
+        for l in &mut layers {
+            remap_generation_sources(l, &self.id_map, 0);
+        }
         let mut channels = Vec::with_capacity(m.channels.len());
         for c in &m.channels {
             channels.push(self.channel(c)?);

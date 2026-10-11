@@ -9,6 +9,9 @@
 //!   again a new layer, masked by the selection, so the layer underneath is untouched.
 //!   With `"mode": "img2img"` it redraws a picture, following it as closely as `strength` says:
 //!   a layer of the document (in place), or another open document (fitted to the area).
+//!   The new layer keeps what it was made from (`Layer::generation`: model, prompt, mode,
+//!   strength, context, alpha, seed, source), which the layer tree reports as `generation` and
+//!   the AI Gen panel loads back when the layer is clicked.
 //! - `ai.mask` paints the area an inpainting repaints: it is Quick Mask, started empty and shown
 //!   as a tint over what is selected, so a brush adds to it; `ai.generate` turns it back into
 //!   the selection before it runs.
@@ -28,7 +31,7 @@ use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, Se
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
-use photocraft_doc::{ColorIndicates, Document, Layer, LayerContent, LayerId, LayerMask};
+use photocraft_doc::{ColorIndicates, Document, Generation, GenerationMode, GenerationSource, Layer, LayerContent, LayerId, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
@@ -398,6 +401,24 @@ pub enum SourceRef {
     Document(u64),
 }
 
+impl From<SourceRef> for GenerationSource {
+    fn from(source: SourceRef) -> Self {
+        match source {
+            SourceRef::Layer(id) => GenerationSource::Layer(id),
+            SourceRef::Document(id) => GenerationSource::Document(id),
+        }
+    }
+}
+
+impl From<GenerationSource> for SourceRef {
+    fn from(source: GenerationSource) -> Self {
+        match source {
+            GenerationSource::Layer(id) => SourceRef::Layer(id),
+            GenerationSource::Document(id) => SourceRef::Document(id),
+        }
+    }
+}
+
 /// The pixels behind a [`SourceRef`].
 #[derive(Clone)]
 enum Picture {
@@ -681,9 +702,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         None => None,
     };
     // What an image-to-image reads: a layer of this document, or another open document.
+    // The source is settled here, so the layer can say which picture it was made from.
+    let source = if img2img { source_param(p)?.or_else(|| default_img2img_source(s)) } else { None };
     let plan = if img2img {
         let rect = if p.get("rect").is_some() { Some(target_area(p, None, d.doc.bounds())?) } else { None };
-        Some(img2img_plan(s, source_param(p)?, rect).map_err(EngineError::Other)?)
+        Some(img2img_plan(s, source, rect).map_err(EngineError::Other)?)
     } else {
         None
     };
@@ -720,6 +743,22 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         (true, _) => "inpaint",
         (_, true) => "img2img",
         _ => "txt2img",
+    };
+    // What the new layer keeps of its generation (`Layer::generation`), for the panel to load back.
+    let mut generation = Generation {
+        mode: match (inpaint, img2img) {
+            (true, _) => GenerationMode::Inpaint,
+            (_, true) => GenerationMode::Img2img,
+            _ => GenerationMode::Txt2img,
+        },
+        model: model.id.clone(),
+        model_name: model.name.clone(),
+        prompt: prompt.clone(),
+        strength,
+        context,
+        alpha,
+        seed,
+        source: source.map(Into::into),
     };
     let job_selection = selection.clone().filter(|_| inpaint);
     crate::jobs::run(
@@ -759,6 +798,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             let layer = s.edit(label, |doc, active| {
                 let mut l = Layer::raster(name, surface.format());
                 *crate::pixels_mut(&mut l)? = surface;
+                // The seed the image was rendered with (a random one is only known now).
+                generation.seed = image.seed;
+                l.generation = Some(generation);
                 // Like Generative Fill: the selection becomes the new layer's mask, so a lasso or
                 // feathered selection shapes the result and stays editable.
                 if masked && let Some(sel) = selection {
@@ -909,7 +951,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img: a layer is redrawn in place, over the selection's bounds or else its own pixels; another open document is fitted to the selection's bounds or else the canvas),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img: a layer is redrawn in place, over the selection's bounds or else its own pixels; another open document is fitted to the selection's bounds or else the canvas),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source}"##,
             enabled: can_generate,
             run: generate,
             journal: true,

@@ -25,6 +25,9 @@ use crate::widgets;
 
 /// Window › AI Gen.
 pub const PANEL: &str = "window.panel.aiGen";
+/// Load the settings a generated layer was made with into the panel: `{"layer": id?}` (the
+/// active layer without it). What clicking the layer in the Layers panel does.
+pub const LOAD_LAYER: &str = "window.panel.aiGen.loadLayer";
 /// The tab's position in the Properties dock group (Properties | Adjustments | AI Gen).
 pub const TAB: usize = 2;
 /// The engine command the panel runs.
@@ -186,6 +189,13 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
 /// Window › AI Gen: show the panel (its dock group, expanded, on its tab), or hide the group when
 /// it is already showing. `{"show": bool}` sets it instead of toggling.
 pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    if id == LOAD_LAYER {
+        let layer = match params.get("layer") {
+            Some(v) => v.as_u64().ok_or_else(|| "`layer` must be a layer id".to_string()),
+            None => app.session.active().and_then(|d| d.active_layer).map(|id| id.0).ok_or_else(|| "no active layer".to_string()),
+        };
+        return Some(layer.map(|layer| json!({"loaded": load_layer(app, layer)})));
+    }
     if id != PANEL {
         return None;
     }
@@ -326,6 +336,52 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
 /// A generation ended with `result` (`ai.generate`'s): remember what it cost.
 pub fn finished(app: &mut PhotocraftApp, result: &Value) {
     app.ui.ai_gen.last_cost = result.get("cost").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0);
+}
+
+/// Load what `layer` was generated with (`Layer::generation`) into the panel: its tab, the
+/// prompt, the model when it is still set up and offered on that tab (else the panel's choice
+/// stays), and the tab's own settings (InPaint: strength and context; Img2Img: strength and
+/// source; Txt2Img: alpha). `false`, and nothing changes, for a layer that was not generated and
+/// while a generation runs (the panel shows that one).
+pub fn load_layer(app: &mut PhotocraftApp, layer: u64) -> bool {
+    use photocraft_doc::GenerationMode;
+    if running(app).is_some() {
+        return false;
+    }
+    let found = app.session.active().and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer))).and_then(|l| l.generation.clone());
+    let Some(g) = found else { return false };
+    let inpaint = g.mode == GenerationMode::Inpaint;
+    let fits = |m: &Model| m.enabled && m.id == g.model && if inpaint { m.can_inpaint() } else { m.can_generate() };
+    let available = app.session.prefs().integrations.ai.models.iter().any(fits);
+    let ui = &mut app.ui.ai_gen;
+    ui.prompt = g.prompt;
+    match g.mode {
+        GenerationMode::Inpaint => {
+            ui.mode = Mode::Inpaint;
+            if available {
+                ui.inpaint_model = g.model;
+            }
+            ui.strength = g.strength;
+            ui.context = g.context;
+        }
+        GenerationMode::Img2img => {
+            ui.mode = Mode::Img2img;
+            if available {
+                ui.model = g.model;
+            }
+            ui.img_strength = g.strength;
+            // A source that is gone is not offered: the panel then shows its default.
+            ui.img_source = g.source.map(Into::into);
+        }
+        GenerationMode::Txt2img => {
+            ui.mode = Mode::Txt2img;
+            if available {
+                ui.model = g.model;
+            }
+            ui.alpha = g.alpha;
+        }
+    }
+    true
 }
 
 /// The area a generation would fill, in pixels: the selection's bounds, else the canvas. On
