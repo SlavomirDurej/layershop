@@ -774,7 +774,7 @@ fn load_selection(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Quick Mask channel for the current selection: white where selected; no selection = an empty
 /// mask (nothing masked), as in Photoshop.
-fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> AlphaChannel {
+pub(crate) fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> AlphaChannel {
     let area = doc.bounds();
     let fmt = channel_format(doc);
     let surface = match &doc.selection {
@@ -789,7 +789,7 @@ fn quick_mask_from(doc: &Document, o: &QuickMaskOptions) -> AlphaChannel {
 }
 
 /// The selection a Quick Mask channel turns back into (an untouched or all-white mask = none).
-fn selection_from(doc: &Document, ch: &AlphaChannel) -> Option<Surface> {
+pub(crate) fn selection_from(doc: &Document, ch: &AlphaChannel) -> Option<Surface> {
     let area = doc.bounds();
     let vals = read_plane(&ch.surface, area);
     if vals.iter().all(|v| *v >= 1.0 - 0.5 / 255.0) {

@@ -9,6 +9,9 @@
 //!   again a new layer, masked by the selection, so the layer underneath is untouched.
 //!   With `"mode": "img2img"` it redraws a picture, following it as closely as `strength` says:
 //!   a layer of the document (in place), or another open document (fitted to the area).
+//! - `ai.mask` paints the area an inpainting repaints: it is Quick Mask, started empty and shown
+//!   as a tint over what is selected, so a brush adds to it; `ai.generate` turns it back into
+//!   the selection before it runs.
 //! - `ai.models` lists the models and whether each can run now.
 //! - `ai.comfyModels` asks the ComfyUI server which model files it has (the settings' pickers).
 //! - `ai.setKey` / `ai.keys` hold the cloud API keys for this session.
@@ -25,7 +28,7 @@ use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, Se
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
-use photocraft_doc::{Document, Layer, LayerContent, LayerId, LayerMask};
+use photocraft_doc::{ColorIndicates, Document, Layer, LayerContent, LayerId, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
@@ -179,12 +182,104 @@ pub fn inpaint_area(selection: Rect, canvas: Rect, context: f64) -> Rect {
         .intersect(&canvas)
 }
 
+/// Is the inpainting mask being painted ([`mask`]): Quick Mask, showing its tint over what is
+/// selected?
+pub fn mask_painting(s: &Session) -> bool {
+    s.active().and_then(|d| d.doc.quick_mask.as_ref()).is_some_and(|q| q.indicates == ColorIndicates::SelectedAreas)
+}
+
+/// `ai.mask`: paint the area to inpaint, instead of selecting it.
+///
+/// `{"paint": true}` enters Quick Mask with the current selection as the mask (none: an empty
+/// mask, so the first stroke is all of it) and its tint over the **selected** part, so painting
+/// white adds to the area and black takes away. `{"paint": false}` leaves it: the mask becomes
+/// the selection. `{"clear": true}` empties the mask, or drops the selection outside the mode.
+fn mask(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ai.mask";
+    let flag = |key: &str| match p.get(key) {
+        None => Ok(None),
+        Some(v) => v.as_bool().map(Some).ok_or_else(|| bad(cmd, format!("`{key}` must be true or false"))),
+    };
+    let (paint, clear) = (flag("paint")?, flag("clear")?.unwrap_or(false));
+    if paint.is_none() && !clear {
+        return Err(bad(cmd, "give `paint` (true|false) or `clear` (true)"));
+    }
+    let on = s.active().ok_or(EngineError::NoDocument)?.doc.quick_mask.is_some();
+    if clear {
+        s.edit("Clear Inpaint Mask", |doc, _| {
+            let fmt = crate::channel_cmds::channel_format(doc);
+            match &mut doc.quick_mask {
+                Some(q) => q.surface = Surface::new(fmt),
+                None => doc.selection = None,
+            }
+            Ok(())
+        })?;
+    }
+    match paint {
+        Some(true) => {
+            let opts = crate::channel_cmds::QuickMaskOptions { indicates: ColorIndicates::SelectedAreas, ..s.quick_mask_options };
+            s.edit("Paint Inpaint Mask", |doc, _| {
+                match &mut doc.quick_mask {
+                    // Already in Quick Mask: the mask stays, its tint moves onto the selected part.
+                    Some(q) => q.indicates = ColorIndicates::SelectedAreas,
+                    None => {
+                        let mut q = crate::channel_cmds::quick_mask_from(doc, &opts);
+                        // Quick Mask takes "no selection" for "everything"; here nothing is
+                        // chosen yet.
+                        if doc.selection.is_none() {
+                            q.surface = Surface::new(crate::channel_cmds::channel_format(doc));
+                        }
+                        doc.quick_mask = Some(q);
+                        doc.selection = None;
+                    }
+                }
+                Ok(())
+            })?;
+            if let Some(st) = s.active_mut() {
+                st.channel_view.target = crate::channel_cmds::ChannelTarget::Composite;
+                st.channel_view.quick_mask_hidden = false;
+            }
+        }
+        Some(false) if on => leave_quick_mask(s)?,
+        _ => {}
+    }
+    let d = s.active().ok_or(EngineError::NoDocument)?;
+    Ok(json!({"painting": mask_painting(s), "empty": pending_selection(&d.doc).is_none()}))
+}
+
+/// Leave Quick Mask: the mask becomes the selection (an empty one: none).
+fn leave_quick_mask(s: &mut Session) -> Result<()> {
+    s.edit("Exit Quick Mask", |doc, _| {
+        if let Some(q) = doc.quick_mask.take() {
+            doc.selection = crate::channel_cmds::selection_from(doc, &q).filter(|sel| !sel.content_bounds().is_empty());
+        }
+        Ok(())
+    })
+}
+
+/// The bounds of what is selected, within the canvas: the selection's, or in Quick Mask the
+/// painted mask's (what leaving it would select).
+fn pending_selection(doc: &Document) -> Option<Rect> {
+    let surface = match &doc.quick_mask {
+        Some(q) => Some(&q.surface),
+        None => doc.selection.as_ref(),
+    };
+    surface.map(|sel| sel.content_bounds().intersect(&doc.bounds())).filter(|b| !b.is_empty())
+}
+
+/// Is anything marked for inpainting: a selection, or a painted mask?
+pub fn inpaint_marked(s: &Session) -> bool {
+    s.active().is_some_and(|d| pending_selection(&d.doc).is_some())
+}
+
 /// Why `ai.generate {"mode": "inpaint"}` can't run on the active document, or the selection's
-/// bounds within the canvas. The panel shows the reason under its button.
+/// bounds within the canvas (a mask being painted counts as the selection it will become). The
+/// panel shows the reason under its button.
 pub fn inpaint_blocked(s: &Session) -> std::result::Result<Rect, String> {
     let d = s.active().ok_or("no document open")?;
-    let selected = d.doc.selection.as_ref().map(|sel| sel.content_bounds().intersect(&d.doc.bounds())).filter(|b| !b.is_empty());
-    let selected = selected.ok_or("Inpainting needs a selection: select the part of the layer to repaint (the Marquee or Lasso tool)")?;
+    let selected = pending_selection(&d.doc).ok_or(
+        "Inpainting needs a selection: mark the part of the layer to repaint with the mask tools under the prompt (rectangle, ellipse or brush), or any selection tool",
+    )?;
     let layer = d.active_layer.and_then(|id| d.doc.layer(id)).ok_or("Inpainting needs a layer: choose the pixel layer to repaint")?;
     let LayerContent::Raster(pixels) = &layer.content else {
         return Err(format!(
@@ -569,6 +664,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     if inpaint && !model.can_inpaint() {
         return Err(EngineError::Other(format!("{} is not set up for inpainting (Preferences \u{203a} AI Integrations, its Inpainting box)", model.name)));
     }
+    // A mask painted for it (Quick Mask) becomes the selection first.
+    if inpaint && s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
+        inpaint_blocked(s).map_err(EngineError::Other)?;
+        leave_quick_mask(s)?;
+    }
     // What an inpainting reads: the active pixel layer, and the selection's bounds on it.
     let selected = if inpaint { Some(inpaint_blocked(s).map_err(EngineError::Other)?) } else { None };
     let d = s.active().ok_or(EngineError::NoDocument)?;
@@ -787,6 +887,10 @@ fn always(_: &Session) -> std::result::Result<(), String> {
     Ok(())
 }
 
+fn can_mask(s: &Session) -> std::result::Result<(), String> {
+    s.active().map(|_| ()).ok_or_else(|| "no document open".to_string())
+}
+
 fn can_generate(s: &Session) -> std::result::Result<(), String> {
     s.active().map(|_| ()).ok_or_else(|| "no document open".to_string())?;
     if s.ai.transport.is_none() {
@@ -808,6 +912,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img: a layer is redrawn in place, over the selection's bounds or else its own pixels; another open document is fitted to the selection's bounds or else the canvas),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}"##,
             enabled: can_generate,
             run: generate,
+            journal: true,
+        },
+        CommandSpec {
+            id: "ai.mask",
+            label: "AI Inpaint Mask",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"paint":bool?,"clear":bool?} → {painting,empty}: paint the area to inpaint instead of selecting it. paint:true enters Quick Mask with the selection as the mask (none: empty) and the tint over the selected part, so paint.stroke {"target":"quickMask","color":"#ffffff"} adds to it and "#000000" takes away; paint:false turns the mask into the selection; clear:true empties the mask (outside the mode: deselects). ai.generate {"mode":"inpaint"} leaves the mode itself"##,
+            enabled: can_mask,
+            run: mask,
             journal: true,
         },
         CommandSpec {

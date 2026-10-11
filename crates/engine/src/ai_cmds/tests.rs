@@ -645,3 +645,70 @@ fn the_source_is_cropped_to_the_shape_of_the_area() {
     }
     assert!(cover_crop(Rect::EMPTY, 4, 3).is_empty());
 }
+
+#[test]
+fn the_inpaint_mask_is_painted_and_becomes_the_selection_and_the_layers_mask() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = session(&fake);
+    let before = layer_count(&s);
+    assert!(!mask_painting(&s) && !inpaint_marked(&s));
+    // Nothing selected: the mask starts empty, tinted where it will be painted.
+    assert_eq!(s.execute("ai.mask", json!({"paint": true})).unwrap(), json!({"painting": true, "empty": true}));
+    assert!(mask_painting(&s) && !inpaint_marked(&s));
+    assert!(inpaint_blocked(&s).unwrap_err().contains("needs a selection"));
+    {
+        let q = s.active().unwrap().doc.quick_mask.as_ref().unwrap();
+        assert_eq!((q.indicates, q.surface.content_bounds()), (ColorIndicates::SelectedAreas, Rect::EMPTY));
+    }
+    // A stroke of white paints it in; black paints it out again.
+    let stroke_of = |s: &mut Session, points: Value, color: &str, size: u32| {
+        s.execute("paint.stroke", json!({"points": points, "size": size, "hardness": 1.0, "color": color, "target": "quickMask"})).unwrap();
+    };
+    let stroke = |s: &mut Session, points: Value, color: &str| stroke_of(s, points, color, 12);
+    stroke(&mut s, json!([[20, 20], [40, 20]]), "#ffffff");
+    let painted = inpaint_blocked(&s).unwrap();
+    assert!(painted.x0 <= 16 && painted.x1 >= 44 && painted.y0 <= 16 && painted.y1 >= 24 && painted.height() < 20, "{painted:?}");
+    assert!(inpaint_marked(&s));
+    // (With a wider brush: the same one would leave the soft rim of the stroke behind.)
+    stroke_of(&mut s, json!([[20, 20], [40, 20]]), "#000000", 24);
+    assert!(!inpaint_marked(&s), "painted out again");
+    stroke(&mut s, json!([[20, 20], [40, 20]]), "#ffffff");
+    // Generating leaves the mode: the mask is the selection, and the new layer's mask.
+    let r = s.execute("ai.generate", json!({"prompt": "a boat", "mode": "inpaint", "context": 0})).unwrap();
+    assert_eq!(r["mode"], "inpaint");
+    assert_eq!(layer_count(&s), before + 1);
+    {
+        let d = s.active().unwrap();
+        assert!(d.doc.quick_mask.is_none() && !mask_painting(&s));
+        let selected = d.doc.selection.as_ref().unwrap().content_bounds();
+        assert_eq!(selected, painted);
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), painted);
+        assert_eq!(r["bounds"], json!([painted.x0, painted.y0, painted.width(), painted.height()]));
+    }
+    // Entering again starts from that selection; leaving gives it back; clearing drops it.
+    assert_eq!(s.execute("ai.mask", json!({"paint": true})).unwrap(), json!({"painting": true, "empty": false}));
+    assert_eq!(inpaint_blocked(&s).ok(), Some(painted));
+    assert_eq!(s.execute("ai.mask", json!({"paint": false})).unwrap(), json!({"painting": false, "empty": false}));
+    assert_eq!(s.active().unwrap().doc.selection.as_ref().unwrap().content_bounds(), painted);
+    assert_eq!(s.execute("ai.mask", json!({"clear": true})).unwrap(), json!({"painting": false, "empty": true}));
+    assert!(s.active().unwrap().doc.selection.is_none());
+    // Cleared while painting: the mode stays, the mask is empty; an empty mask selects nothing.
+    s.execute("ai.mask", json!({"paint": true})).unwrap();
+    stroke(&mut s, json!([[10, 10]]), "#ffffff");
+    assert_eq!(s.execute("ai.mask", json!({"clear": true})).unwrap(), json!({"painting": true, "empty": true}));
+    let e = s.execute("ai.generate", json!({"prompt": "x", "mode": "inpaint"})).unwrap_err().to_string();
+    assert!(e.contains("needs a selection") && mask_painting(&s), "{e}");
+    s.execute("ai.mask", json!({"paint": false})).unwrap();
+    assert!(s.active().unwrap().doc.selection.is_none() && s.active().unwrap().doc.quick_mask.is_none());
+    // Quick Mask entered the usual way (its tint over the masked part) is not this mode until asked.
+    s.execute("select.editInQuickMaskMode", json!({"on": true})).unwrap();
+    assert!(!mask_painting(&s));
+    assert_eq!(s.execute("ai.mask", json!({"paint": true})).unwrap()["painting"], true);
+    s.execute("ai.mask", json!({"paint": false})).unwrap();
+    // Params that are not what they say, and no document.
+    for p in [json!({}), json!({"paint": "yes"}), json!({"clear": 1}), json!({"clear": false}), Value::Null, json!([true])] {
+        assert!(s.execute("ai.mask", p.clone()).is_err(), "{p}");
+    }
+    assert!(Session::new().execute("ai.mask", json!({"paint": true})).is_err());
+}

@@ -57,6 +57,22 @@ there, press **Generate**.
 3. The result is a **new layer** above, masked by the selection. The layer you selected on is
    not changed; hide or delete the new one to compare, or paint on its mask to blend the edge.
 
+**The mask tools** under the prompt mark what to repaint without leaving the panel:
+
+| Button | |
+|---|---|
+| Rectangle, Ellipse | the marquee tools: drag on the picture. Shift adds to the selection, Alt takes away |
+| Brush | paint what to repaint. It shows as a red tint over the picture (it is Quick Mask, started empty, with the tint over the selected part), and starts from the selection there is |
+| Eraser | paint out what should stay |
+| − size + | the brush's size, for the brush and the eraser |
+| Bin | clear the mask |
+
+While the panel's brush is on, the Brush and Eraser paint the mask in and out whatever the
+foreground and background colours are. **Generate** turns a painted mask into the selection
+(switching to Rectangle or Ellipse, or pressing Q, does the same), and the selection becomes the
+new layer's mask as before. Any other way of selecting works too: the Lasso, Select › Subject,
+a saved selection.
+
 - **Context** is how much of the layer around the selection the model is shown, as a share of
   the selection's longer edge on every side (25% by default). More helps it match the
   surroundings, but a model frames its subject in the whole picture it is given, so with a lot
@@ -229,6 +245,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it (and, with `img2img` in place of the rectangle, image to image) against a real server without the app |
 | `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
+| `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself |
 | `ai.sources` | what img2img can start from now: the active document's layers with pixels, the other open documents, and which is the default |
 | `ai.models` | the models, whether each can run now, generates from a prompt (`generate`) and is offered for inpainting (`inpaint`) |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
@@ -237,7 +254,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 
 Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's state is
 `ai_gen` in the UI state that `ui.inspect` returns (`mode`, `model`, `inpaintModel`, `strength`,
-`context`, `imgSource`, `imgStrength`, `prompt`, `alpha`).
+`context`, `maskBrush`, `imgSource`, `imgStrength`, `prompt`, `alpha`).
 
 ## Code map
 

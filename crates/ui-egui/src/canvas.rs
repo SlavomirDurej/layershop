@@ -338,6 +338,9 @@ fn stroke_params(app: &PhotocraftApp, tool: Tool, erase: bool, points: &[Vec<f64
     if tool == Tool::Pencil {
         p["autoErase"] = json!(app.ui.tool_options.pencil_auto_erase);
     }
+    // Painting the AI Gen panel's inpaint mask: the brush adds to it, the eraser takes away,
+    // whatever the foreground and background colours are.
+    crate::ai_gen_ui::mask_stroke(app, erase, &mut p);
     p
 }
 

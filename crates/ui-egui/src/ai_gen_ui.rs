@@ -97,6 +97,9 @@ pub struct AiGenUi {
     /// InPaint: how much of the layer around the selection the model is shown, as a fraction of
     /// the selection's longer edge.
     pub context: f64,
+    /// InPaint: the mask is being painted with the panel's brush (see [`mask_bar`]); while it is,
+    /// the Brush adds to the mask and the Eraser takes away, whatever the colours are.
+    pub mask_brush: bool,
     /// Img2Img: the picture to redraw (`None`: the active layer when it has pixels, else the
     /// first that is offered).
     pub img_source: Option<SourceRef>,
@@ -120,6 +123,7 @@ impl Default for AiGenUi {
             inpaint_model: String::new(),
             strength: 1.0,
             context: photocraft_engine::ai_cmds::DEFAULT_CONTEXT,
+            mask_brush: false,
             img_source: None,
             img_strength: photocraft_engine::ai_cmds::DEFAULT_IMG2IMG_STRENGTH,
             prompt: String::new(),
@@ -352,8 +356,11 @@ const PROMPT_HEIGHT: f32 = 84.0;
 const MIN_PROMPT_HEIGHT: f32 = 40.0;
 /// What the rows under the prompt need besides the notes: spacing and the Generate row.
 const BELOW_PROMPT: f32 = 6.0 + 32.0 + 3.0 + 6.0;
-/// InPaint's own row under the prompt (Strength, Context), with its spacing.
+/// One of InPaint's own rows under the prompt (the mask tools; Strength and Context), with its
+/// spacing.
 const INPAINT_ROW: f32 = 24.0 + 6.0;
+/// The brush the mask tools start with when the session's is smaller: a mask is painted broadly.
+const MASK_BRUSH_MIN: f32 = 40.0;
 /// Size of the notes under Generate.
 const NOTE_SIZE: f32 = 11.0;
 
@@ -362,7 +369,106 @@ const NOTE_SIZE: f32 = 11.0;
 /// own row as well.
 pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
-    rows + if app.ui.ai_gen.mode() == Mode::Txt2img { 0.0 } else { INPAINT_ROW }
+    rows + match app.ui.ai_gen.mode() {
+        Mode::Inpaint => 2.0 * INPAINT_ROW,
+        Mode::Img2img => INPAINT_ROW,
+        _ => 0.0,
+    }
+}
+
+/// Is the inpaint mask being painted with the panel's brush?
+fn mask_brushing(app: &PhotocraftApp) -> bool {
+    app.ui.ai_gen.mask_brush && photocraft_engine::ai_cmds::mask_painting(&app.session)
+}
+
+/// A Brush or Eraser stroke about to be painted (`paint.stroke` params): while the inpaint mask
+/// is being painted with the panel's brush, the Brush paints it in (white) and the Eraser out
+/// (black), whatever the foreground and background colours are.
+pub fn mask_stroke(app: &PhotocraftApp, erase: bool, params: &mut Value) {
+    if mask_brushing(app) {
+        params["erase"] = json!(false);
+        params["color"] = json!(if erase { "#000000" } else { "#ffffff" });
+    }
+}
+
+/// Run a mask command for the panel; a failure is a notice.
+fn mask_run(app: &mut PhotocraftApp, id: &str, params: Value) -> bool {
+    match app.run(id, params) {
+        Ok(_) => true,
+        Err(e) => {
+            crate::notices::error(app, format!("{}: {e}", tr("Inpaint mask")));
+            false
+        }
+    }
+}
+
+/// The mask tools under the prompt of the InPaint tab: how to mark what to repaint without
+/// leaving the panel. Rectangle and ellipse are the marquee tools (drag on the canvas; Shift adds,
+/// Alt takes away); the brush paints the mask as a tint over the picture (Quick Mask, started
+/// empty), with the eraser to take away and − / + for its size; the bin clears it. Generate turns
+/// a painted mask into the selection, which becomes the new layer's mask.
+fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
+    use crate::state::Tool;
+    let t = Tokens::get(ui.ctx());
+    let has_doc = app.session.active().is_some();
+    let painting = mask_brushing(app);
+    ui.add_enabled_ui(!busy && has_doc, |ui| {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            // (tool, icon, tooltip, paints the mask)
+            let tools = [
+                (Tool::RectMarquee, "square-dashed", "Mark a rectangle to repaint: drag on the picture. Shift adds to it, Alt takes away", false),
+                (Tool::EllipseMarquee, "circle-dashed", "Mark an ellipse to repaint: drag on the picture. Shift adds to it, Alt takes away", false),
+                (Tool::Brush, "brush", "Paint what to repaint: it shows as a tint over the picture", true),
+                (Tool::Eraser, "eraser", "Paint out what should stay", true),
+            ];
+            for (tool, icon, tip, paints) in tools {
+                let on = app.ui.tool == tool && painting == paints;
+                if !crate::icons::button(ui, icon, 24.0, on, tr(tip)).clicked() {
+                    continue;
+                }
+                // The brush works on the mask (Quick Mask, its tint over what is selected); the
+                // marquees on the selection, which a painted mask becomes.
+                if paints != photocraft_engine::ai_cmds::mask_painting(&app.session) && !mask_run(app, "ai.mask", json!({"paint": paints})) {
+                    continue;
+                }
+                app.ui.ai_gen.mask_brush = paints;
+                app.ui.tool = tool;
+                if paints && app.session.tools.brush.size < MASK_BRUSH_MIN {
+                    mask_run(app, "tools.setBrush", json!({"brush": {"size": MASK_BRUSH_MIN}}));
+                }
+            }
+            ui.add_space(6.0);
+            // The brush's size, for the two tools that paint.
+            ui.add_enabled_ui(painting, |ui| {
+                let size = app.session.tools.brush.size;
+                let mut next = None;
+                if crate::icons::button(ui, "minus", 22.0, false, tr("Smaller brush")).clicked() {
+                    next = Some(size / 1.25);
+                }
+                let mut v = size;
+                if widgets::value_field(ui, &mut v, 1.0..=2000.0, "px", 58.0).on_hover_text(tr("Brush size")).changed() {
+                    next = Some(v);
+                }
+                if crate::icons::button(ui, "plus", 22.0, false, tr("Larger brush")).clicked() {
+                    next = Some(size * 1.25);
+                }
+                if let Some(n) = next.filter(|n| n.is_finite()) {
+                    mask_run(app, "tools.setBrush", json!({"brush": {"size": n.round().clamp(1.0, 2000.0)}}));
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let marked = photocraft_engine::ai_cmds::inpaint_marked(&app.session);
+                let clear = ui.add_enabled_ui(marked, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Clear the mask"))).inner;
+                if clear.clicked() {
+                    mask_run(app, "ai.mask", json!({"clear": true}));
+                }
+                if !marked {
+                    ui.label(RichText::new(tr("Mask")).color(t.text_faint).size(NOTE_SIZE));
+                }
+            });
+        });
+    });
 }
 
 /// The picture Img2Img would redraw: the one chosen while it is still on offer, else the
@@ -396,6 +502,10 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     mode_tabs(ui, &mut mode, !busy);
     app.ui.ai_gen.mode = mode;
     let inpaint = mode == Mode::Inpaint;
+    // The panel's brush paints the mask only while the mask is there to paint.
+    if !photocraft_engine::ai_cmds::mask_painting(&app.session) {
+        app.ui.ai_gen.mask_brush = false;
+    }
     ui.add_space(6.0);
     let models = enabled_models(app);
     if models.is_empty() {
@@ -507,7 +617,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     // Prompt. ⌘/Ctrl+Return generates.
     let mut submit = false;
     ui.add_enabled_ui(!busy, |ui| {
-        let below = BELOW_PROMPT + if inpaint { INPAINT_ROW + line_gap } else { 0.0 };
+        let below = BELOW_PROMPT + if inpaint { 2.0 * (INPAINT_ROW + line_gap) } else { 0.0 };
         let height = match room {
             Some(room) => (room - (ui.cursor().top() - top) - below - notes_height).clamp(MIN_PROMPT_HEIGHT, 1200.0),
             None => PROMPT_HEIGHT,
@@ -528,6 +638,11 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     });
     ui.add_space(6.0);
 
+    // InPaint: what to repaint, marked from here.
+    if inpaint {
+        mask_bar(app, ui, busy);
+        ui.add_space(6.0);
+    }
     // InPaint's own controls, as percentages.
     if inpaint {
         ui.add_enabled_ui(!busy, |ui| {

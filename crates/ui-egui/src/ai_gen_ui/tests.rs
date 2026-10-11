@@ -769,7 +769,7 @@ fn the_dock_gives_the_panel_room_for_its_generate_button() {
     assert_eq!(roomy.iter().map(|(_, h)| h).sum::<f32>(), plain.iter().map(|(_, h)| h).sum::<f32>());
     // InPaint has a row more.
     app.ui.ai_gen.mode = Mode::Inpaint;
-    assert_eq!(wanted_height(&app), want - 28.0 + INPAINT_ROW);
+    assert_eq!(wanted_height(&app), want - 28.0 + 2.0 * INPAINT_ROW);
     // A column with nothing to spare gives nothing; a height the user dragged is theirs.
     let tight = layout.heights_for(&shown, 420.0, 28.0);
     assert_eq!(layout.with_room(tight.clone(), Group::Properties, want), tight);
@@ -894,5 +894,66 @@ fn image_to_image_from_the_panel_picks_a_layer_or_another_document() {
             app.ui.ai_gen.mode = Mode::Txt2img;
             wanted_height(&app)
         } + INPAINT_ROW
+    );
+}
+
+#[test]
+fn the_mask_tools_mark_what_to_repaint_from_the_panel() {
+    use crate::state::Tool;
+    let mut app = app();
+    add_model(&mut app, Model { inpaint: Some(true), ..z_image("z") });
+    app.ui.ai_gen.mode = Mode::Inpaint;
+    app.ui.ai_gen.prompt = "a boat".into();
+    // No document: the bar draws, disabled.
+    draw_panel(&mut app);
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    draw_panel(&mut app);
+    let z = Model { inpaint: Some(true), ..z_image("z") };
+    assert!(generate_blocked(&app, &z).unwrap().contains("mask tools under the prompt"));
+    // Outside the brush mode a stroke is the user's own: their colours, their eraser.
+    let mut stroke = json!({"points": [[1, 1]], "erase": true});
+    mask_stroke(&app, true, &mut stroke);
+    assert_eq!(stroke, json!({"points": [[1, 1]], "erase": true}));
+    // The brush: what the bar's button does.
+    app.run("ai.mask", json!({"paint": true})).unwrap();
+    app.ui.ai_gen.mask_brush = true;
+    app.ui.tool = Tool::Brush;
+    assert!(mask_brushing(&app));
+    draw_panel(&mut app);
+    assert!(app.ui.ai_gen.mask_brush, "the mode survives drawing");
+    // Now the Brush paints the mask in and the Eraser paints it out, whatever the colours are.
+    let mut add = json!({"points": [[20, 20], [40, 20]], "erase": false, "target": "quickMask", "size": 12});
+    mask_stroke(&app, false, &mut add);
+    assert_eq!((add["color"].as_str(), add["erase"].as_bool()), (Some("#ffffff"), Some(false)));
+    let mut take = json!({"points": [[20, 20]], "erase": true});
+    mask_stroke(&app, true, &mut take);
+    assert_eq!((take["color"].as_str(), take["erase"].as_bool()), (Some("#000000"), Some(false)));
+    app.run("paint.stroke", add).unwrap();
+    assert!(photocraft_engine::ai_cmds::inpaint_marked(&app.session));
+    assert_eq!(generate_blocked(&app, &z), None);
+    draw_panel(&mut app);
+    // The note sizes what will be rendered from the painted mask.
+    let (w, h, selection) = target_size(&app).unwrap();
+    assert!(w >= 28 && h >= 8 && !selection, "{w}x{h}");
+    // Generate turns the mask into the selection and the new layer's mask, and ends the mode.
+    let before = app.session.active().unwrap().doc.layers.len();
+    let r = generate(&mut app).unwrap();
+    assert_eq!(r["mode"], "inpaint");
+    let d = app.session.active().unwrap();
+    assert_eq!(d.doc.layers.len(), before + 1);
+    assert!(d.doc.quick_mask.is_none() && d.doc.selection.is_some() && d.doc.layer(d.active_layer.unwrap()).unwrap().mask.is_some());
+    draw_panel(&mut app);
+    assert!(!app.ui.ai_gen.mask_brush && !mask_brushing(&app));
+    // Quick Mask the user entered themselves is theirs: the panel's brush mode is not on.
+    app.run("select.editInQuickMaskMode", json!({"on": true})).unwrap();
+    app.ui.ai_gen.mask_brush = true;
+    assert!(!mask_brushing(&app));
+    // The dock makes room for the bar.
+    assert_eq!(
+        wanted_height(&app),
+        {
+            app.ui.ai_gen.mode = Mode::Txt2img;
+            wanted_height(&app)
+        } + 2.0 * INPAINT_ROW
     );
 }
