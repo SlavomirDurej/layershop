@@ -71,6 +71,9 @@ pub enum Family {
     /// Qwen Image steered by InstantX's inpainting ControlNet, which is given the picture and
     /// the mask. Inpainting only.
     QwenInpaint,
+    /// Qwen Image Edit (2509, 2511): an edit model. It is given a picture, up to two more for
+    /// reference, and an instruction; it can't generate from a prompt alone.
+    QwenEdit,
     /// An all-in-one checkpoint (Stable Diffusion, SDXL, …).
     Checkpoint,
     /// The user's own workflow (API format) with `%prompt%`-style placeholders.
@@ -78,7 +81,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 14] = [
+    pub const ALL: [Family; 15] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux2,
@@ -91,6 +94,7 @@ impl Family {
         Family::QwenImage21,
         Family::Flux1Fill,
         Family::QwenInpaint,
+        Family::QwenEdit,
         Family::Checkpoint,
         Family::Custom,
     ];
@@ -109,6 +113,7 @@ impl Family {
             Family::QwenImage21 => "qwenImage21",
             Family::Flux1Fill => "flux1Fill",
             Family::QwenInpaint => "qwenInpaint",
+            Family::QwenEdit => "qwenEdit",
             Family::Checkpoint => "checkpoint",
             Family::Custom => "custom",
         }
@@ -132,6 +137,7 @@ impl Family {
             Family::QwenImage21 => "Qwen Image 2.1",
             Family::Flux1Fill => "FLUX.1 Fill (inpainting)",
             Family::QwenInpaint => "Qwen Image + InstantX ControlNet (inpainting)",
+            Family::QwenEdit => "Qwen Image Edit (editing)",
             Family::Checkpoint => "Checkpoint (SD / SDXL)",
             Family::Custom => "Custom workflow",
         }
@@ -154,7 +160,7 @@ impl Family {
 
     /// Has a "shift" (model sampling) control.
     pub fn has_shift(self) -> bool {
-        matches!(self, Family::ZImage | Family::HidreamI1 | Family::Ideogram4 | Family::QwenImage | Family::QwenInpaint | Family::HidreamO1)
+        matches!(self, Family::ZImage | Family::HidreamI1 | Family::Ideogram4 | Family::QwenImage | Family::QwenInpaint | Family::QwenEdit | Family::HidreamO1)
     }
 
     /// The multiple each edge of the rendered image must be.
@@ -183,6 +189,25 @@ impl Family {
     /// against ComfyUI 0.39 they paint a picture of their own inside it, or leave seams.
     pub fn inpaints(self) -> bool {
         self.inpaint_only() || self == Family::Flux2
+    }
+
+    /// A dedicated edit model: it changes a picture it is given, following an instruction, and
+    /// can't generate from a prompt alone. The panel offers it on the ImgEdit tab only.
+    pub fn edit_only(self) -> bool {
+        self == Family::QwenEdit
+    }
+
+    /// Edits a picture following an instruction (the panel's ImgEdit tab): the edit models, and
+    /// the models that generate and edit with the same weights (Qwen Image 2.1, FLUX.2). They are
+    /// shown the picture whole, as a reference, and render a new one from it.
+    pub fn edits(self) -> bool {
+        matches!(self, Family::QwenImage21 | Family::QwenEdit | Family::Flux2)
+    }
+
+    /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
+    /// three image inputs in all; the others take more than the panel offers.
+    pub fn max_references(self) -> usize {
+        if self == Family::QwenEdit { 2 } else { MAX_REFERENCES }
     }
 
     /// A model of this family with the settings its reference workflow uses. File names are the
@@ -318,11 +343,25 @@ impl Family {
                 shift: 3.1,
                 ..base
             },
+            Family::QwenEdit => Model {
+                name: "Qwen Image Edit 2511".into(),
+                unet: "qwen_image_edit_2511_bf16.safetensors".into(),
+                clip: "qwen_2.5_vl_7b_fp8_scaled.safetensors".into(),
+                vae: "qwen_image_vae.safetensors".into(),
+                steps: 20,
+                cfg: 2.5,
+                shift: 3.0,
+                ..base
+            },
             Family::Checkpoint => Model { steps: 25, cfg: 7.0, scheduler: "normal".into(), ..base },
             Family::Custom => base,
         }
     }
 }
+
+/// The most reference pictures an edit is given besides the one it edits (`ai.generate`'s
+/// `references`, the ImgEdit tab's rows).
+pub const MAX_REFERENCES: usize = 3;
 
 /// One image generator and its rendering parameters. Every field is stored for every model so
 /// the settings stay a flat record; a family or provider reads only the ones it needs.
@@ -450,9 +489,23 @@ impl Model {
     }
 
     /// Generates from a prompt alone (the panel's Txt2Img tab): everything but the dedicated
-    /// inpainting models.
+    /// inpainting and edit models.
     pub fn can_generate(&self) -> bool {
-        !(self.provider.is_local() && self.family.inpaint_only())
+        !(self.provider.is_local() && (self.family.inpaint_only() || self.family.edit_only()))
+    }
+
+    /// Edits a picture following an instruction (the panel's ImgEdit tab). Local:
+    /// [`Family::edits`]. Cloud models are sent the picture and the instruction.
+    pub fn can_edit(&self) -> bool {
+        match self.provider {
+            Provider::Comfy => self.family.edits(),
+            Provider::Openai | Provider::Gemini => true,
+        }
+    }
+
+    /// How many reference pictures an edit with this model takes ([`MAX_REFERENCES`] at most).
+    pub fn max_references(&self) -> usize {
+        if self.provider.is_local() { self.family.max_references() } else { MAX_REFERENCES }
     }
 
     /// The cloud models offered by "Add Cloud Model".
@@ -557,7 +610,7 @@ mod tests {
             let want = matches!(f, Family::Flux2 | Family::Flux1Fill | Family::QwenInpaint);
             assert_eq!(f.preset().can_inpaint(), want, "{f:?}");
             // A dedicated inpainting model does nothing else.
-            assert_eq!(f.preset().can_generate(), !matches!(f, Family::Flux1Fill | Family::QwenInpaint), "{f:?}");
+            assert_eq!(f.preset().can_generate(), !matches!(f, Family::Flux1Fill | Family::QwenInpaint | Family::QwenEdit), "{f:?}");
         }
         assert!(Model { inpaint: Some(true), ..Family::HidreamO1.preset() }.can_inpaint());
         assert!(!Model { inpaint: Some(false), ..Family::Flux2.preset() }.can_inpaint());
@@ -569,6 +622,20 @@ mod tests {
         // Models saved before the setting existed have none: they get their architecture's.
         let old: Model = serde_json::from_str(r#"{"id":"a","family":"flux2"}"#).unwrap();
         assert_eq!((old.inpaint, old.can_inpaint()), (None, true));
+    }
+
+    #[test]
+    fn editing_follows_the_architecture() {
+        for f in Family::ALL {
+            let want = matches!(f, Family::QwenImage21 | Family::QwenEdit | Family::Flux2);
+            assert_eq!((f.preset().can_edit(), f.edits()), (want, want), "{f:?}");
+            assert!(f.max_references() <= MAX_REFERENCES && (!f.edit_only() || f.edits()), "{f:?}");
+        }
+        // An edit model does nothing else; Qwen Image Edit has room for two references.
+        let edit = Family::QwenEdit.preset();
+        assert!(edit.can_edit() && !edit.can_generate() && !edit.can_inpaint() && edit.max_references() == 2);
+        // Cloud models are sent the picture and the instruction.
+        assert!(Model::cloud_presets().iter().all(|m| m.can_edit() && m.max_references() == MAX_REFERENCES));
     }
 
     #[test]

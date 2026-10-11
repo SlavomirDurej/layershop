@@ -1,5 +1,5 @@
 use photocraft_color::{ColorMode, SampleType};
-use photocraft_doc::{Document, Generation, GenerationMode, GenerationSource, Layer, Size};
+use photocraft_doc::{Document, Generation, GenerationMode, GenerationQuality, GenerationSource, Layer, Size};
 use photocraft_format::LoadOptions;
 
 fn generated(source: Option<GenerationSource>) -> Generation {
@@ -13,6 +13,8 @@ fn generated(source: Option<GenerationSource>) -> Generation {
         alpha: true,
         seed: u64::MAX >> 16,
         source,
+        references: Vec::new(),
+        quality: GenerationQuality::Detail,
     }
 }
 
@@ -55,4 +57,24 @@ fn a_generations_source_follows_its_layer_through_fresh_ids() {
     // forgotten; the rest of the generation stays.
     assert_eq!(of(&loaded.layers[2]), generated(None));
     assert_eq!(of(&loaded.layers[3]), generated(None));
+}
+
+#[test]
+fn an_edits_references_follow_their_layers_too() {
+    let mut doc = Document::new("Edited", Size::new(2, 2), ColorMode::Rgb, SampleType::U8);
+    let shirt = Layer::raster("Shirt", doc.pixel_format());
+    let mut edited = Layer::raster("Edited", doc.pixel_format());
+    let references = vec![GenerationSource::Document(7), GenerationSource::Layer(shirt.id.0), GenerationSource::Layer(u64::MAX)];
+    edited.generation = Some(Generation { mode: GenerationMode::ImgEdit, references, ..generated(None) });
+    doc.layers.extend([shirt, edited]);
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    // A document id only lasted for its session and a layer that is not in the file is gone:
+    // both are forgotten, the layer that is there is kept.
+    let same = photocraft_format::load_from_bytes(&bytes).unwrap();
+    assert_eq!(same.layers[1].generation.clone().unwrap().references, vec![GenerationSource::Layer(doc.layers[0].id.0)]);
+    // With fresh ids that layer is followed to its new id.
+    let loaded = photocraft_format::load_from_bytes_with(&bytes, &LoadOptions { preserve_ids: false, ..Default::default() }).unwrap();
+    let g = loaded.layers[1].generation.clone().unwrap();
+    assert_eq!((g.mode, g.quality), (GenerationMode::ImgEdit, GenerationQuality::Detail));
+    assert_eq!(g.references, vec![GenerationSource::Layer(loaded.layers[0].id.0)]);
 }

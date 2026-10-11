@@ -102,7 +102,14 @@ fn run() -> Result<(), String> {
         let edge = |at: usize| image.get(at..at + 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes).ok_or("the image is not a PNG");
         let (width, height) = (edge(16)?, edge(20)?);
         let strength = args.get(7).and_then(|v| v.parse().ok()).unwrap_or(1.0);
-        Job { prompt, width, height, seed: random_seed(), alpha: false, source: Some(Source { image, mask, width, height, strength }) }
+        Job {
+            prompt,
+            width,
+            height,
+            seed: random_seed(),
+            alpha: false,
+            source: Some(Source { image, mask, width, height, strength, edit: false, references: Vec::new() }),
+        }
     } else {
         Job { prompt, width: size(4), height: size(5), seed: random_seed(), alpha: false, source: None }
     };

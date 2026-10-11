@@ -1,7 +1,7 @@
 use super::*;
-use photocraft_doc::{Generation, GenerationMode, GenerationSource};
 use photocraft_aigen::{Family, Request, Response};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
+use photocraft_doc::{Generation, GenerationMode, GenerationQuality, GenerationSource};
 use std::sync::Mutex;
 
 /// A ComfyUI that answers every workflow with one `w`×`h` image of `rgba`, and records what it
@@ -390,7 +390,8 @@ fn inpainting_says_what_it_needs() {
     ] {
         assert!(s.execute("ai.generate", p.clone()).is_err(), "{p}");
     }
-    assert!(fails(&mut s, json!({"prompt": "x", "mode": "imgEdit"})).contains("not available yet"));
+    // Z-Image generates; it does not edit.
+    assert!(fails(&mut s, json!({"prompt": "x", "mode": "imgEdit"})).contains("can't edit a picture"));
     // A model switched off for inpainting, and one whose architecture can't.
     let models = [Model { id: "off".into(), inpaint: Some(false), ..Family::ZImage.preset() }, Model { id: "o1".into(), ..Family::HidreamO1.preset() }];
     s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": serde_json::to_value(&models).unwrap()})).unwrap();
@@ -737,6 +738,8 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
         alpha: false,
         seed: 5,
         source: None,
+        references: Vec::new(),
+        quality: GenerationQuality::Standard,
     };
     assert_eq!(made(&s), Some(txt.clone()));
     // The layer tree reports it, named as `ai.generate` names its params.
@@ -745,14 +748,21 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
     let info = crate::inspect::layer(layer);
     assert_eq!(
         info["generation"],
-        json!({"mode": "txt2img", "model": "z", "modelName": name, "prompt": "a green field", "strength": 1.0, "context": DEFAULT_CONTEXT, "alpha": false, "seed": 5, "source": null})
+        json!({"mode": "txt2img", "model": "z", "modelName": name, "prompt": "a green field", "strength": 1.0, "context": DEFAULT_CONTEXT, "alpha": false, "seed": 5, "source": null, "references": [], "quality": "standard"})
     );
     assert!(crate::inspect::layer(d.doc.layer(LayerId(background)).unwrap()).get("generation").is_none());
     // A copy of the layer is as much that generation as the layer is.
     assert_eq!(layer.duplicate().generation, Some(txt.clone()));
     // Image to image: the picture it was redrawn from and how closely.
     s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"layer": background}, "strength": 0.3, "seed": 6})).unwrap();
-    let img = Generation { mode: GenerationMode::Img2img, prompt: "x".into(), strength: 0.3, seed: 6, source: Some(GenerationSource::Layer(background)), ..txt.clone() };
+    let img = Generation {
+        mode: GenerationMode::Img2img,
+        prompt: "x".into(),
+        strength: 0.3,
+        seed: 6,
+        source: Some(GenerationSource::Layer(background)),
+        ..txt.clone()
+    };
     assert_eq!(made(&s), Some(img));
     // Unnamed, the source is the one that was used: the active layer.
     let active = s.active().unwrap().active_layer.unwrap().0;
@@ -769,4 +779,210 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
     // Undo takes the layer, and its generation with it.
     s.execute("edit.undo", json!({})).unwrap();
     assert_eq!(made(&s).unwrap().prompt, "a pond");
+}
+
+/// [`session`] with the models an edit is tried with: Qwen Image 2.1 (the default), Qwen Image
+/// Edit, and Z-Image, which can't edit.
+fn edit_session(fake: &Arc<FakeComfy>) -> Session {
+    let mut s = session(fake);
+    let models = [
+        Model { id: "q21".into(), ..Family::QwenImage21.preset() },
+        Model { id: "edit".into(), ..Family::QwenEdit.preset() },
+        Model { id: "z".into(), ..Family::ZImage.preset() },
+    ];
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": serde_json::to_value(&models).unwrap()})).unwrap();
+    s
+}
+
+#[test]
+fn an_edit_with_a_selection_is_cropped_edited_and_composited() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    let before = layer_count(&s);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "make it green", "mode": "imgEdit", "seed": 3})).unwrap();
+    // The model is sent the selection with a quarter of its edge around it, not the whole layer.
+    assert_eq!((r["mode"].as_str(), r["model"].as_str(), &r["bounds"]), (Some("imgEdit"), Some("q21"), &json!([12, 8, 24, 24])));
+    // Qwen Image 2.1 renders in multiples of 32, in the area's shape.
+    assert_eq!(r["renderSize"], json!([992, 992]));
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    assert_eq!((image.width(), image.height()), (992, 992));
+    let uploads = fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/upload/image")).count();
+    assert_eq!(uploads, 1, "the picture, and no mask");
+    let queued = fake.queued().to_string();
+    assert!(queued.contains("TextEncodeQwenImage21") && queued.contains("make it green") && !queued.contains("SetLatentNoiseMask"), "{queued}");
+    // A new layer over that area, masked by the selection: green inside it, untouched outside.
+    assert_eq!(layer_count(&s), before + 1);
+    {
+        let d = s.active().unwrap();
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(12, 8, 36, 32));
+        assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), Rect::new(16, 12, 32, 28));
+        let g = layer.generation.clone().unwrap();
+        assert_eq!((g.mode, g.source, g.quality, g.seed), (GenerationMode::ImgEdit, Some(GenerationSource::Layer(background)), GenerationQuality::Standard, 3));
+        assert_eq!(d.doc.layer(LayerId(background)).unwrap().surface().unwrap().content_bounds(), Rect::new(0, 0, 64, 48), "the source is untouched");
+    }
+    let inside = px(&mut s, 20, 20);
+    assert!(inside[0] < 0.05 && inside[1] > 0.95, "{inside:?}");
+    // In the context, outside the selection: the answer is there, and hidden.
+    for (x, y) in [(13, 9), (40, 40)] {
+        let outside = px(&mut s, x, y);
+        assert!(outside.iter().take(3).all(|c| *c > 0.95), "({x},{y}) {outside:?}");
+    }
+    // One undo step removes the layer.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&s), before);
+    assert_eq!(edit_plan(&s, None, DEFAULT_CONTEXT, None).unwrap().area, Rect::new(12, 8, 36, 32));
+    // No context: the selection's bounds. A rect names the area outright.
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "source": {"layer": background}, "context": 0})).unwrap();
+    assert_eq!(r["bounds"], json!([16, 12, 16, 16]));
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "source": {"layer": background}, "rect": [0, 0, 32, 16]})).unwrap();
+    assert_eq!((&r["bounds"], &r["renderSize"]), (&json!([0, 0, 32, 16]), &json!([1408, 704])));
+}
+
+#[test]
+fn an_edit_without_a_selection_takes_the_whole_picture() {
+    let fake = FakeComfy::new(32, 32, [0, 0, 255, 255]);
+    let mut s = edit_session(&fake);
+    let doc = s.active().unwrap().doc.id.0;
+    // The layer's own pixels (here the canvas), no mask; the answer is stretched back onto them.
+    let r = s.execute("ai.generate", json!({"prompt": "at night", "mode": "imgEdit"})).unwrap();
+    assert_eq!(r["bounds"], json!([0, 0, 64, 48]));
+    {
+        let d = s.active().unwrap();
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert!(layer.mask.is_none());
+        assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(0, 0, 64, 48));
+    }
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    assert!(image.width().is_multiple_of(32) && image.height().is_multiple_of(32) && image.width() > image.height(), "{}x{}", image.width(), image.height());
+    for (x, y) in [(0, 0), (63, 47)] {
+        let p = px(&mut s, x, y);
+        assert!(p[2] > 0.95 && p[0] < 0.05, "({x},{y}) {p:?}");
+    }
+    // The document as it shows is a source too, taken where it is: first on the list for an edit,
+    // while the active layer stays the default.
+    let listed = s.execute("ai.sources", json!({"mode": "imgEdit"})).unwrap();
+    assert_eq!((&listed["sources"][0]["source"], listed["sources"][0]["name"].as_str()), (&json!({"document": doc}), Some("This document (all layers)")));
+    assert_eq!(listed["sources"].as_array().unwrap().iter().filter(|x| x["default"] == true).count(), 1);
+    assert_eq!(s.execute("ai.sources", json!({})).unwrap()["sources"].as_array().unwrap().len(), listed["sources"].as_array().unwrap().len() - 1);
+    assert!(s.execute("ai.sources", json!({"mode": "txt2img"})).is_err());
+    s.execute("select.rect", json!({"x": 40, "y": 20, "width": 8, "height": 8})).unwrap();
+    let plan = edit_plan(&s, Some(SourceRef::Document(doc)), 0.5, None).unwrap();
+    assert_eq!((plan.area, plan.source_rect), (Rect::new(36, 16, 52, 32), Rect::new(36, 16, 52, 32)));
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "source": {"document": doc}, "context": 0.5})).unwrap();
+    assert_eq!(r["bounds"], json!([36, 16, 16, 16]));
+    {
+        let d = s.active().unwrap();
+        assert_eq!(d.doc.layer(d.active_layer.unwrap()).unwrap().generation.clone().unwrap().source, Some(GenerationSource::Document(doc)));
+    }
+    // Another document is fitted to the selection as it is: there is no "around it" to show.
+    s.execute("file.new", json!({"width": 30, "height": 60})).unwrap();
+    s.execute("select.rect", json!({"x": 10, "y": 10, "width": 10, "height": 10})).unwrap();
+    let plan = edit_plan(&s, Some(SourceRef::Document(doc)), 0.5, None).unwrap();
+    assert_eq!((plan.area, plan.source_rect), (Rect::new(10, 10, 20, 20), Rect::new(8, 0, 56, 48)));
+}
+
+#[test]
+fn an_edit_is_given_its_references_and_its_quality() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    // A small red layer to refer to, and a second, large document.
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 10})).unwrap();
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    let red = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("file.new", json!({"width": 3000, "height": 1500})).unwrap();
+    let big = s.active().unwrap().doc.id.0;
+    assert!(s.set_active(0));
+    let params = json!({
+        "prompt": "put the red patch of image 2 on it", "mode": "imgEdit", "source": {"layer": background},
+        "references": [{"layer": red}, {"document": big}], "quality": "draft", "seed": 1,
+    });
+    s.execute("ai.generate", params).unwrap();
+    // Each reference is uploaded after the picture, under its own name: a small one brought up
+    // to a quarter of a megapixel, a large one down to one, both in their own shape.
+    let one = fake.uploaded("photocraft_edit_reference_1.png");
+    assert_eq!((one.width(), one.height()), (724, 362));
+    let two = fake.uploaded("photocraft_edit_reference_2.png");
+    assert_eq!((two.width(), two.height()), (1448, 724));
+    let queued = fake.queued();
+    let text = queued.to_string();
+    assert!(text.contains("images.image_3") && !text.contains("images.image_4"), "{text}");
+    // A draft runs a quarter of Qwen Image 2.1's 25 steps.
+    let sampler = queued["prompt"].as_object().unwrap().values().find(|n| n["class_type"] == "KSampler").unwrap().clone();
+    assert_eq!(sampler["inputs"]["steps"], 6);
+    let d = s.active().unwrap();
+    let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+    let g = layer.generation.clone().unwrap();
+    assert_eq!(g.references, vec![GenerationSource::Layer(red), GenerationSource::Document(big)]);
+    assert_eq!(g.quality, GenerationQuality::Draft);
+    assert_eq!(crate::inspect::layer(layer)["generation"]["references"], json!([{"layer": red}, {"document": big}]));
+    assert_eq!(crate::inspect::layer(layer)["generation"]["quality"], "draft");
+}
+
+#[test]
+fn an_edit_says_what_it_needs() {
+    let fake = FakeComfy::new(8, 8, [1, 2, 3, 255]);
+    let mut s = edit_session(&fake);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    let fails = |s: &mut Session, p: Value| s.execute("ai.generate", p).unwrap_err().to_string();
+    let edit = |extra: Value| {
+        let mut p = json!({"prompt": "x", "mode": "imgEdit"});
+        p.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+        p
+    };
+    // A model that generates but does not edit, and an edit model asked to do anything else.
+    assert!(fails(&mut s, edit(json!({"model": "z"}))).contains("can't edit a picture"));
+    for mode in ["txt2img", "img2img"] {
+        let e = fails(&mut s, json!({"prompt": "x", "mode": mode, "model": "edit"}));
+        assert!(e.contains("is an edit model"), "{mode}: {e}");
+    }
+    assert!(fails(&mut s, json!({"prompt": "x", "mode": "inpaint", "model": "edit"})).contains("not set up for inpainting"));
+    let listed = s.execute("ai.models", json!({})).unwrap();
+    let flags: Vec<(bool, bool, u64)> =
+        listed["models"].as_array().unwrap().iter().map(|m| (m["edit"] == true, m["generate"] == true, m["references"].as_u64().unwrap())).collect();
+    assert_eq!(flags, [(true, true, 3), (true, false, 2), (false, true, 3)]);
+    // References that are not there, are not references, or are too many for the model.
+    let four = json!([{"layer": background}, {"layer": background}, {"layer": background}, {"layer": background}]);
+    for (references, want) in [
+        (json!([{"layer": 999_999}]), "is not in this document"),
+        (json!([{"document": 999_999}]), "is not open"),
+        (json!({"layer": background}), "`references` must be"),
+        (json!([{"file": "a.png"}]), "`references` must be"),
+        (json!([7]), "`references` must be"),
+        (json!(null), "`references` must be"),
+        (four, "3 pictures at most"),
+    ] {
+        let e = fails(&mut s, edit(json!({"references": references})));
+        assert!(e.contains(want), "{references}: {e}");
+    }
+    let three = json!([{"layer": background}, {"layer": background}, {"layer": background}]);
+    assert!(fails(&mut s, edit(json!({"references": three, "model": "edit"}))).contains("2 reference pictures at most"));
+    assert!(s.execute("ai.generate", edit(json!({"references": three, "source": {"layer": background}}))).is_ok());
+    // Nothing was sent for any of the refusals above: one generation, one workflow.
+    assert_eq!(fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/prompt")).count(), 1);
+    // An empty layer is neither a source nor a reference.
+    s.execute("layer.new.layer", json!({})).unwrap();
+    let empty = s.active().unwrap().active_layer.unwrap().0;
+    assert!(fails(&mut s, edit(json!({"source": {"layer": empty}}))).contains("is empty"));
+    assert!(fails(&mut s, edit(json!({"source": {"layer": background}, "references": [{"layer": empty}]}))).contains("is empty"));
+    for (key, value) in
+        [("quality", json!("best")), ("quality", json!(3)), ("context", json!(99)), ("source", json!("layer")), ("rect", json!([500, 500, 4, 4]))]
+    {
+        let mut p = edit(json!({"source": {"layer": background}}));
+        p[key] = value.clone();
+        assert!(s.execute("ai.generate", p).is_err(), "{key}: {value}");
+    }
+    // With nothing to edit at all.
+    let mut bare = Session::new();
+    bare.ai.transport = Some(fake.clone());
+    let model = serde_json::to_value(Model { id: "q21".into(), ..Family::QwenImage21.preset() }).unwrap();
+    bare.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
+    bare.execute("file.new", json!({"width": 40, "height": 40, "background": "transparent"})).unwrap();
+    assert!(edit_sources(&bare).is_empty());
+    assert!(fails(&mut bare, edit(json!({}))).contains("Editing needs a picture"));
 }

@@ -39,6 +39,12 @@ pub struct Source {
     /// How far the repainted part may depart from what is there, 0..=1: 1 paints it afresh,
     /// less keeps more of its shapes and colours. Local models; cloud models have no such control.
     pub strength: f64,
+    /// Edit: the prompt is an instruction about the image, which an edit model
+    /// ([`Model::can_edit`]) is shown whole. There is no mask, and the strength does not apply.
+    pub edit: bool,
+    /// Edit: further pictures the instruction may refer to (PNG, any size), in the order the
+    /// model numbers them after the image ([`Model::max_references`] at most).
+    pub references: Vec<Vec<u8>>,
 }
 
 impl std::fmt::Debug for Source {
@@ -49,6 +55,8 @@ impl std::fmt::Debug for Source {
             .field("width", &self.width)
             .field("height", &self.height)
             .field("strength", &self.strength)
+            .field("edit", &self.edit)
+            .field("references", &self.references.len())
             .finish()
     }
 }
@@ -160,6 +168,25 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
     };
     let render = Job { width, height, source: None, ..job.clone() };
     let workflow = match &job.source {
+        Some(source) if source.edit => {
+            comfy::check_edit(model)?;
+            if source.references.len() > model.max_references() {
+                return Err(Error::Config(format!("{} takes {} reference pictures at most", model.name, model.max_references())));
+            }
+            (control.progress)(0.01, "Sending the picture to ComfyUI…");
+            let mut names = Vec::with_capacity(1 + source.references.len());
+            let uploads = std::iter::once((comfy::UPLOAD_IMAGE.to_string(), &source.image))
+                .chain(source.references.iter().enumerate().map(|(i, bytes)| (comfy::upload_reference(i), bytes)));
+            for (name, bytes) in uploads {
+                let r = transport.send(&comfy::upload_request(&base, &name, bytes)).map_err(unreachable)?;
+                names.push(comfy::parse_uploaded(r.status, &r.body)?);
+                if (control.cancelled)() {
+                    return Err(Error::Cancelled);
+                }
+            }
+            let Some((image, references)) = names.split_first() else { return Err(Error::BadResponse("ComfyUI did not take the picture".into())) };
+            comfy::edit_workflow(model, &render, &comfy::Edit { image, references })?
+        }
         Some(source) => {
             // The set-up is checked before anything is uploaded.
             let masked = !source.mask.is_empty();
@@ -333,7 +360,75 @@ mod tests {
     }
 
     fn source() -> Source {
-        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7 }
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7, edit: false, references: Vec::new() }
+    }
+
+    #[test]
+    fn editing_uploads_the_picture_and_its_references_then_queues_an_edit_workflow() {
+        let fake = Fake::new(|r, n| match r.url.as_str() {
+            u if u.ends_with("/upload/image") => {
+                let body = String::from_utf8_lossy(&r.body).into_owned();
+                // The picture first, then the references in order, each under its own name.
+                let want = ["photocraft_inpaint_image.png", "photocraft_edit_reference_1.png", "photocraft_edit_reference_2.png"][n];
+                assert!(body.contains(want) && body.contains(["IMAGEPNG", "SHIRT", "HAT"][n]), "{n}: {body}");
+                ok(&format!(r#"{{"name":"stored {n}.png","subfolder":""}}"#))
+            }
+            u if u.ends_with("/prompt") => {
+                let text = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].to_string();
+                for want in ["TextEncodeQwenImage21", "stored 0.png", "stored 1.png", "stored 2.png", "a frog"] {
+                    assert!(text.contains(want), "{want} missing in {text}");
+                }
+                assert!(!text.contains("SetLatentNoiseMask") && !text.contains("MASKPNG"), "{text}");
+                ok(r#"{"prompt_id":"abc"}"#)
+            }
+            u if u.ends_with("/history/abc") => ok(DONE),
+            u if u.contains("/view?") => ok("PNGDATA"),
+            u => panic!("unexpected request {u}"),
+        });
+        let edit = Source { mask: Vec::new(), edit: true, references: vec![b"SHIRT".to_vec(), b"HAT".to_vec()], ..source() };
+        let job = Job { source: Some(edit.clone()), ..job() };
+        let g = generate(&fake, &settings(), &Family::QwenImage21.preset(), "", &job, &control(&|| false)).unwrap();
+        // Rendered at the size of the picture it was given.
+        assert_eq!((g.bytes.as_slice(), g.width, g.height), (&b"PNGDATA"[..], 768, 512));
+        assert_eq!(fake.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 3);
+        // A model that can't edit, and one given more references than it takes: refused before
+        // anything is sent.
+        let idle = Fake::new(|_, _| panic!("no request expected"));
+        let e = generate(&idle, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap_err();
+        assert!(matches!(&e, Error::Config(s) if s.contains("can't edit")), "{e}");
+        let many = Job { source: Some(Source { references: vec![Vec::new(); 3], ..edit.clone() }), ..job.clone() };
+        assert!(matches!(generate(&idle, &settings(), &Family::QwenEdit.preset(), "", &many, &control(&|| false)), Err(Error::Config(_))));
+        // Cancelled between the uploads: nothing is queued.
+        let n = AtomicU32::new(0);
+        let uploads = Fake::new(|_, _| ok(r#"{"name":"a.png"}"#));
+        let e = generate(&uploads, &settings(), &Family::Flux2.preset(), "", &job, &control(&|| n.fetch_add(1, Ordering::Relaxed) >= 2)).unwrap_err();
+        assert_eq!(e, Error::Cancelled);
+        assert!(!uploads.urls().iter().any(|u| u.ends_with("/prompt")));
+    }
+
+    #[test]
+    fn cloud_editing_sends_the_references_after_the_picture() {
+        let edit = Source { mask: Vec::new(), edit: true, references: vec![b"SHIRT".to_vec()], ..source() };
+        let job = Job { source: Some(edit), alpha: true, ..job() };
+        let fake = Fake::new(|r, _| {
+            assert_eq!(r.url, "https://api.openai.com/v1/images/edits");
+            let body = String::from_utf8_lossy(&r.body).into_owned();
+            let (picture, reference) = (body.find("IMAGEPNG").unwrap(), body.find("SHIRT").unwrap());
+            assert!(picture < reference && body.matches("name=\"image[]\"").count() == 2 && !body.contains("name=\"mask\""), "{body}");
+            assert!(body.contains("name=\"background\"\r\n\r\ntransparent"), "{body}");
+            ok(r#"{"data":[{"b64_json":"aGVsbG8="}]}"#)
+        });
+        let m = Model::cloud(Provider::Openai, "GPT Image 2.5", "gpt-image-2.5-sunburst", true);
+        assert_eq!(generate(&fake, &settings(), &m, "sk-x", &job, &control(&|| false)).unwrap().bytes, b"hello");
+        let gem = Fake::new(|r, _| {
+            let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            let parts = body["contents"][0]["parts"].as_array().unwrap();
+            assert_eq!((parts.len(), parts[0]["text"].as_str()), (3, Some("a frog")));
+            assert!(parts[1]["inlineData"]["data"] != parts[2]["inlineData"]["data"]);
+            ok(r#"{"candidates":[{"content":{"parts":[{"inlineData":{"data":"aGVsbG8="}}]}}]}"#)
+        });
+        let m = Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false);
+        assert_eq!(generate(&gem, &settings(), &m, "k", &job, &control(&|| false)).unwrap().bytes, b"hello");
     }
 
     #[test]

@@ -43,8 +43,7 @@ render at the selection's own size. The panel shows what will be asked (`Selecti
 → 976 × 1072 px`).
 
 The tabs across the top of the panel choose what the model works from: **Txt2Img** (the prompt
-alone, as above), **InPaint** and **Img2Img** (below). **ImgEdit** is shown but not available
-yet.
+alone, as above), **InPaint**, **Img2Img** and **ImgEdit** (below).
 
 **Alpha Channel** asks the model for a transparent background. It is available for models marked
 *Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
@@ -158,6 +157,44 @@ Tried against ComfyUI 0.39 on one picture ("a watercolour painting of …"): Z-I
 keeps the picture and changes its surface, at 60% redraws it in the same layout; Krea 2 Turbo at
 60% gives a watercolour of the same scene; FLUX.2 Klein (four steps) changes little at 60%.
 
+## Editing by instruction (the ImgEdit tab)
+
+Changes a picture the way you say: "make the jacket red leather", "replace the apples with
+oranges", "put the scarf from image 2 around her neck". An edit model is shown the picture whole
+and renders a new one from it; the result is a new layer, and the source is not changed.
+
+- **Source** is the picture to change ("image 1" to the model): a **layer** with pixels (the
+  active one unasked), **This document (all layers)**, or another **open document** (fitted to
+  the selection or the canvas, as for Img2Img).
+- **A selection scopes the edit** (crop, edit, composite). Only the selection's bounds, with a
+  quarter of their longer edge around them for context, are sent to the model, and its answer
+  goes back there on a layer masked by the selection. So everything outside the selection stays
+  exactly as it was (edit models redraw the whole picture they are given, and it drifts a
+  little), and a large picture is edited near its own resolution instead of being rendered at a
+  megapixel and scaled back up. Feather the selection for a soft join. Without a selection the
+  whole source is sent and the result has no mask.
+- **Image 2, Image 3, …** are pictures the instruction may refer to, chosen from the same list
+  (open a file to refer to it). Name them in the instruction as the rows do. Up to three; Qwen
+  Image Edit takes two. They are sent at their own size, brought to between a quarter of a
+  megapixel and one.
+- **Quality** is how much of a local model's schedule to run: **Draft** about a quarter of its
+  steps (four at least), to try an idea in seconds; **Standard** the steps it is set up with;
+  **Detail** a fifth more, for hands and fine detail. A cloud model's quality is in its settings.
+- **Alpha Channel** as on Txt2Img (cloud models that support it).
+- The models offered are the ones that edit: **Qwen Image 2.1** and **FLUX.2** (which also
+  generate), **Qwen Image Edit** 2509 / 2511 (which do nothing else; Scan Server adds them, with
+  their four-step Lightning LoRA when the server has it), and cloud models (OpenAI's image edit
+  endpoint, Gemini with the pictures attached).
+
+Tried against ComfyUI 0.39 on one 1232 x 816 picture (RTX 4090): Qwen Image 2.1 recolours a
+blouse in 16 s and replaces the fruit in a selected bowl in 11 s, with nothing outside the
+selection changed; with a reference ("the scarf from image 2") a Draft takes 9 s. FLUX.2 Klein
+(four steps) does the selected replacement in 11 s. Qwen Image Edit 2509 recolours the blouse in
+19 s but shifts the whole picture a little, which is what the selection is for. Qwen Image Edit
+2511 (the 38 GB bf16 file) does the selected replacement in 41 s, loading included; it shifts
+the picture too, and with a hard-edged selection that shows as a seam along the selection's
+edge where the picture has detail. Feather the selection with those two models.
+
 ## Starting ComfyUI for you
 
 On the **Local Server** page, switch on **Start ComfyUI when a local model needs it and it isn't
@@ -257,18 +294,20 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
 | `window.panel.aiGen.loadLayer {"layer"?: id}` → `{loaded}` | a shell command (the running app): load what a generated layer was made with into the panel, like clicking it; the active layer without `layer`. `loaded` is false for a layer that was not generated, and while a generation runs |
 | `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself |
-| `ai.sources` | what img2img can start from now: the active document's layers with pixels, the other open documents, and which is the default |
-| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`) and is offered for inpainting (`inpaint`) |
+| `ai.generate {"prompt", "mode": "imgEdit", "source"?, "references"?: [{"layer": id} or {"document": id}, …], "quality"?: "draft"/"standard"/"detail", "context"?, …}` | change a picture following the prompt as an instruction, onto a new layer; with a selection only the part around it is sent, and the layer is masked by it. `--example ai_inpaint` runs it with `edit` or `edit:x,y,w,h` in place of the rectangle |
+| `ai.sources {"mode"?: "img2img"/"imgEdit"}` | what img2img (or an edit, and its references) can start from now: the active document's layers with pixels, the other open documents, for an edit also the active document itself, and which is the default |
+| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`), is offered for inpainting (`inpaint`), edits (`edit`) and how many `references` an edit with it takes |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
 
 Settings live at `integrations.ai` (`prefs.get` / `prefs.set`). The panel's state is
 `ai_gen` in the UI state that `ui.inspect` returns (`mode`, `model`, `inpaintModel`, `strength`,
-`context`, `maskBrush`, `imgSource`, `imgStrength`, `prompt`, `alpha`).
+`context`, `maskBrush`, `imgSource`, `imgStrength`, `editModel`, `editSource`, `editReferences`,
+`editQuality`, `prompt`, `alpha`).
 
 A generated layer carries its settings as `generation` in the layer tree (`document.inspect`
-and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source}`, named
+and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source, references, quality}`, named
 as `ai.generate` names its params, so they can be passed straight back to it. In the code it is
 `photocraft_doc::Layer::generation`.
 

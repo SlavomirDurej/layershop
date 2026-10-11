@@ -216,10 +216,12 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
 fn remap_generation_sources(l: &mut Layer, ids: &std::collections::HashMap<u64, LayerId>, depth: usize) {
     use photocraft_doc::GenerationSource;
     if let Some(g) = &mut l.generation {
-        g.source = match g.source {
-            Some(GenerationSource::Layer(raw)) => ids.get(&raw).map(|id| GenerationSource::Layer(id.0)),
-            _ => None,
+        let remap = |source: GenerationSource| match source {
+            GenerationSource::Layer(raw) => ids.get(&raw).map(|id| GenerationSource::Layer(id.0)),
+            GenerationSource::Document(_) => None,
         };
+        g.source = g.source.and_then(remap);
+        g.references = g.references.iter().copied().filter_map(remap).collect();
     }
     // The loader refused anything deeper already.
     if depth <= MAX_GROUP_DEPTH

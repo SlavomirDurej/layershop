@@ -53,7 +53,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::Krea2 => "krea2",
         Family::Flux2 | Family::Ernie => "flux2",
         Family::Ideogram4 => "ideogram4",
-        Family::QwenImage | Family::QwenImage21 | Family::QwenInpaint => "qwen_image",
+        Family::QwenImage | Family::QwenImage21 | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
         _ => "stable_diffusion",
     }
 }
@@ -77,10 +77,25 @@ pub struct Inpaint<'a> {
     pub denoise: f64,
 }
 
+/// What an edit workflow works on: the picture to edit and the pictures it may refer to, as
+/// ComfyUI's input folder names them once uploaded ([`upload_request`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Edit<'a> {
+    pub image: &'a str,
+    /// Further pictures, which the instruction calls image 2, image 3, … ([`Family::max_references`]
+    /// at most).
+    pub references: &'a [String],
+}
+
 /// The names the image and mask of an inpainting are uploaded under. They are overwritten by
 /// the next one, so ComfyUI's input folder holds two files of ours, not one pair per generation.
 pub const UPLOAD_IMAGE: &str = "photocraft_inpaint_image.png";
 pub const UPLOAD_MASK: &str = "photocraft_inpaint_mask.png";
+/// The name the `index`th reference picture of an edit is uploaded under (overwritten likewise).
+pub fn upload_reference(index: usize) -> String {
+    format!("photocraft_edit_reference_{}.png", index.saturating_add(1))
+}
+
 /// The workflow that renders `job` with `model`, ending in a preview image (kept in ComfyUI's
 /// temp folder, not its output folder).
 pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
@@ -97,6 +112,25 @@ pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
 /// (its light, its scale) instead of composing a picture of its own inside the mask.
 pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Result<Value> {
     build(model, job, Some(inpaint))
+}
+
+/// The workflow that edits an uploaded picture with `model`, following `job`'s prompt as an
+/// instruction. The model is shown the picture whole (and the references), as its own reference
+/// workflow does, and renders a new one at `job`'s size, which is the picture's:
+///
+/// - Qwen Image 2.1: its encoder takes the pictures with the prompt and gives the latent to
+///   sample (ComfyUI's Image Edit template), at the pictures' own sizes.
+/// - Qwen Image Edit: its encoder takes the pictures with the prompt, for both sides of the
+///   guidance; 2511 reads them by index (ComfyUI's templates).
+/// - FLUX.2: each picture is a reference latent on the conditioning.
+pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
+    build_edit(model, job, edit)
+}
+
+/// Can `model` edit a picture? The error says what to fix.
+pub fn check_edit(model: &Model) -> Result<()> {
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
+    build_edit(model, &job, &Edit { image: "image", references: &[] }).map(|_| ())
 }
 
 /// Can `model` run at all (and, with `inpainting`, repaint an image)? The error says what to fix.
@@ -125,43 +159,12 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
         return Err(Error::Config(format!("{name} is an inpainting model: it repaints a selection (the InPaint tab) and can't generate from a prompt alone")));
     }
+    if f.edit_only() {
+        let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
+        return Err(Error::Config(format!("{name} is an edit model: it changes a picture following an instruction (the ImgEdit tab) and does nothing else")));
+    }
     let mut g = Graph::default();
-    let (mut unet, clip, vae) = if f.uses_checkpoint() {
-        let id = g.add("CheckpointLoaderSimple", json!({"ckpt_name": file(&model.checkpoint, "a checkpoint file", model)?}));
-        (json!([id, 0]), json!([id, 1]), json!([id, 2]))
-    } else {
-        let unet = g.node("UNETLoader", json!({"unet_name": file(&model.unet, "a diffusion model file", model)?, "weight_dtype": "default"}));
-        let enc = "a text encoder file";
-        let clip = match f.text_encoders() {
-            2 => g.node(
-                "DualCLIPLoader",
-                json!({"clip_name1": file(&model.clip, enc, model)?, "clip_name2": file(&model.clip2, "a second text encoder file", model)?, "type": "flux", "device": "default"}),
-            ),
-            4 => g.node(
-                "QuadrupleCLIPLoader",
-                json!({
-                    "clip_name1": file(&model.clip, enc, model)?,
-                    "clip_name2": file(&model.clip2, "a second text encoder file", model)?,
-                    "clip_name3": file(&model.clip3, "a third text encoder file", model)?,
-                    "clip_name4": file(&model.clip4, "a fourth text encoder file", model)?,
-                }),
-            ),
-            _ => g.node("CLIPLoader", json!({"clip_name": file(&model.clip, enc, model)?, "type": clip_type(f), "device": "default"})),
-        };
-        let vae = g.node("VAELoader", json!({"vae_name": file(&model.vae, "a VAE file", model)?}));
-        (unet, clip, vae)
-    };
-    if !model.lora.trim().is_empty() {
-        unet = g.node("LoraLoaderModelOnly", json!({"model": unet, "lora_name": model.lora.trim(), "strength_model": finite(model.lora_strength, 1.0)}));
-    }
-    let shift = finite(model.shift, 0.0);
-    if f.has_shift() && shift > 0.0 {
-        unet = match f {
-            Family::HidreamI1 => g.node("ModelSamplingSD3", json!({"model": unet, "shift": shift})),
-            Family::HidreamO1 => g.node("ModelNoiseScale", json!({"model": unet, "noise_scale": shift})),
-            _ => g.node("ModelSamplingAuraFlow", json!({"model": unet, "shift": shift})),
-        };
-    }
+    let (mut unet, clip, vae) = loaders(&mut g, model)?;
     let cfg = finite(model.cfg, 1.0);
     let (mut positive, mut negative) = if f == Family::QwenImage21 {
         // Its own node encodes both prompts (and reference images, of which there are none here).
@@ -233,10 +236,75 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         }
         None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
     };
+    let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise });
+    let image = g.node("VAEDecode", json!({"samples": samples, "vae": vae}));
+    g.add("PreviewImage", json!({"images": image}));
+    Ok(Value::Object(g.nodes))
+}
+
+/// The nodes that load `model`'s files: the diffusion model (through its LoRA and its sampling
+/// shift), the text encoder and the VAE.
+fn loaders(g: &mut Graph, model: &Model) -> Result<(Link, Link, Link)> {
+    let f = model.family;
+    let (mut unet, clip, vae) = if f.uses_checkpoint() {
+        let id = g.add("CheckpointLoaderSimple", json!({"ckpt_name": file(&model.checkpoint, "a checkpoint file", model)?}));
+        (json!([id, 0]), json!([id, 1]), json!([id, 2]))
+    } else {
+        let unet = g.node("UNETLoader", json!({"unet_name": file(&model.unet, "a diffusion model file", model)?, "weight_dtype": "default"}));
+        let enc = "a text encoder file";
+        let clip = match f.text_encoders() {
+            2 => g.node(
+                "DualCLIPLoader",
+                json!({"clip_name1": file(&model.clip, enc, model)?, "clip_name2": file(&model.clip2, "a second text encoder file", model)?, "type": "flux", "device": "default"}),
+            ),
+            4 => g.node(
+                "QuadrupleCLIPLoader",
+                json!({
+                    "clip_name1": file(&model.clip, enc, model)?,
+                    "clip_name2": file(&model.clip2, "a second text encoder file", model)?,
+                    "clip_name3": file(&model.clip3, "a third text encoder file", model)?,
+                    "clip_name4": file(&model.clip4, "a fourth text encoder file", model)?,
+                }),
+            ),
+            _ => g.node("CLIPLoader", json!({"clip_name": file(&model.clip, enc, model)?, "type": clip_type(f), "device": "default"})),
+        };
+        let vae = g.node("VAELoader", json!({"vae_name": file(&model.vae, "a VAE file", model)?}));
+        (unet, clip, vae)
+    };
+    if !model.lora.trim().is_empty() {
+        unet = g.node("LoraLoaderModelOnly", json!({"model": unet, "lora_name": model.lora.trim(), "strength_model": finite(model.lora_strength, 1.0)}));
+    }
+    let shift = finite(model.shift, 0.0);
+    if f.has_shift() && shift > 0.0 {
+        unet = match f {
+            Family::HidreamI1 => g.node("ModelSamplingSD3", json!({"model": unet, "shift": shift})),
+            Family::HidreamO1 => g.node("ModelNoiseScale", json!({"model": unet, "noise_scale": shift})),
+            _ => g.node("ModelSamplingAuraFlow", json!({"model": unet, "shift": shift})),
+        };
+    }
+    Ok((unet, clip, vae))
+}
+
+/// What a sampler is given.
+struct Sampling {
+    unet: Link,
+    positive: Link,
+    negative: Link,
+    latent: Link,
+    denoise: f64,
+}
+
+/// The nodes that sample `model` (its family's sampler, with the model's steps, CFG, sampler and
+/// scheduler), and the latent they give.
+fn sample(g: &mut Graph, model: &Model, job: &Job, with: &Sampling) -> Link {
+    let f = model.family;
+    let Sampling { unet, positive, negative, latent, denoise } = with;
+    let denoise = *denoise;
+    let cfg = finite(model.cfg, 1.0);
     let steps = model.steps.clamp(1, 1000);
     let sampler = if model.sampler.trim().is_empty() { "euler" } else { model.sampler.trim() };
     let scheduler = if model.scheduler.trim().is_empty() { "simple" } else { model.scheduler.trim() };
-    let samples = match f {
+    match f {
         Family::Flux2 | Family::Ideogram4 => {
             let noise = g.node("RandomNoise", json!({"noise_seed": job.seed}));
             let select = g.node("KSamplerSelect", json!({"sampler_name": sampler}));
@@ -264,7 +332,82 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
                 "positive": positive, "negative": negative, "latent_image": latent, "denoise": denoise,
             }),
         ),
+    }
+}
+
+/// [`edit_workflow`].
+fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
+    let f = model.family;
+    let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
+    if !f.edits() {
+        return Err(Error::Config(format!(
+            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Qwen Image Edit or FLUX.2) on the ImgEdit tab"
+        )));
+    }
+    if let Some(why) = crate::detect::problem(model) {
+        return Err(Error::Config(why));
+    }
+    if edit.references.len() > f.max_references() {
+        return Err(Error::Config(format!("{name} takes {} reference pictures at most, not {}", f.max_references(), edit.references.len())));
+    }
+    let mut g = Graph::default();
+    let (mut unet, clip, vae) = loaders(&mut g, model)?;
+    let cfg = finite(model.cfg, 1.0);
+    // The picture to edit first: it is "image 1" to the model, the references follow.
+    let pictures: Vec<Link> =
+        std::iter::once(edit.image).chain(edit.references.iter().map(String::as_str)).map(|name| g.node("LoadImage", json!({"image": name}))).collect();
+    let (positive, negative, latent) = match f {
+        Family::QwenImage21 => {
+            // The pictures are the same at every step: their part of the sequence is cached.
+            unet = g.node("QwenImage21Cache", json!({"model": unet, "device": "auto", "dtype": "default"}));
+            // Resolution 0: the pictures are taken at the size they were sent, so the latent the
+            // node gives (the first picture's size) is the size asked for.
+            let mut inputs = json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "resolution": 0, "vae": vae});
+            for (i, picture) in pictures.iter().enumerate() {
+                inputs[format!("images.image_{}", i + 1)] = picture.clone();
+            }
+            let id = g.add("TextEncodeQwenImage21", inputs);
+            (json!([id, 0]), json!([id, 1]), json!([id, 2]))
+        }
+        Family::QwenEdit => {
+            unet = g.node("CFGNorm", json!({"model": unet, "strength": 1.0}));
+            let encode = |g: &mut Graph, prompt: &str| {
+                let mut inputs = json!({"clip": clip, "vae": vae, "prompt": prompt});
+                for (i, picture) in pictures.iter().enumerate() {
+                    inputs[format!("image{}", i + 1)] = picture.clone();
+                }
+                let cond = g.node("TextEncodeQwenImageEditPlus", inputs);
+                // 2511 was trained to tell its pictures apart by index.
+                if model.unet.contains("2511") {
+                    g.node("FluxKontextMultiReferenceLatentMethod", json!({"conditioning": cond, "reference_latents_method": "index_timestep_zero"}))
+                } else {
+                    cond
+                }
+            };
+            let positive = encode(&mut g, &job.prompt);
+            let negative = encode(&mut g, &model.negative_prompt);
+            (positive, negative, g.node("EmptySD3LatentImage", json!({"width": job.width, "height": job.height, "batch_size": 1})))
+        }
+        _ => {
+            let mut positive = g.node("CLIPTextEncode", json!({"text": job.prompt, "clip": clip}));
+            let mut negative = if cfg <= 1.0 {
+                g.node("ConditioningZeroOut", json!({"conditioning": positive}))
+            } else {
+                g.node("CLIPTextEncode", json!({"text": model.negative_prompt, "clip": clip}))
+            };
+            let guidance = finite(model.guidance, 0.0);
+            if guidance > 0.0 {
+                positive = g.node("FluxGuidance", json!({"conditioning": positive, "guidance": guidance}));
+            }
+            for picture in &pictures {
+                let encoded = g.node("VAEEncode", json!({"pixels": picture, "vae": vae}));
+                positive = g.node("ReferenceLatent", json!({"conditioning": positive, "latent": encoded}));
+                negative = g.node("ReferenceLatent", json!({"conditioning": negative, "latent": encoded}));
+            }
+            (positive, negative, g.node("EmptyFlux2LatentImage", json!({"width": job.width, "height": job.height, "batch_size": 1})))
+        }
     };
+    let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise: 1.0 });
     let image = g.node("VAEDecode", json!({"samples": samples, "vae": vae}));
     g.add("PreviewImage", json!({"images": image}));
     Ok(Value::Object(g.nodes))
@@ -536,6 +679,12 @@ mod tests {
             if f == Family::Checkpoint {
                 m.checkpoint = "sdxl.safetensors".into();
             }
+            if f.edit_only() {
+                // An edit model has no text-to-image workflow either.
+                let e = workflow(&m, &job()).unwrap_err().to_string();
+                assert!(e.contains("edit model") && check(&m, false).is_err() && check(&m, true).is_err() && check_edit(&m).is_ok(), "{f:?}: {e}");
+                continue;
+            }
             if f.inpaint_only() {
                 // A dedicated inpainting model has no text-to-image workflow, and says so.
                 let e = workflow(&m, &job()).unwrap_err().to_string();
@@ -684,6 +833,10 @@ mod tests {
             if f == Family::Checkpoint {
                 m.checkpoint = "sdxl.safetensors".into();
             }
+            if f.edit_only() {
+                assert!(inpaint_workflow(&m, &job(), &IMG2IMG).unwrap_err().to_string().contains("edit model") && check_img2img(&m).is_err(), "{f:?}");
+                continue;
+            }
             if f.inpaint_only() {
                 // A model made for inpainting needs a mask.
                 assert!(inpaint_workflow(&m, &job(), &IMG2IMG).unwrap_err().to_string().contains("inpainting model") && check_img2img(&m).is_err(), "{f:?}");
@@ -733,6 +886,10 @@ mod tests {
             let mut m = f.preset();
             if f == Family::Checkpoint {
                 m.checkpoint = "sdxl.safetensors".into();
+            }
+            if f.edit_only() {
+                assert!(inpaint_workflow(&m, &job(), &INPAINT).unwrap_err().to_string().contains("edit model"), "{f:?}");
+                continue;
             }
             let w = inpaint_workflow(&m, &job(), &INPAINT).unwrap_or_else(|e| panic!("{f:?}: {e}"));
             assert_well_formed(&w);
@@ -823,6 +980,87 @@ mod tests {
         let mut m = Family::QwenInpaint.preset();
         m.controlnet.clear();
         assert!(inpaint_workflow(&m, &job(), &INPAINT).unwrap_err().to_string().contains("ControlNet"));
+    }
+
+    #[test]
+    fn editing_shows_the_model_the_picture_and_its_references() {
+        let references = ["shirt.png".to_string(), "hat.png".to_string()];
+        let edit = Edit { image: "src.png", references: &references };
+        let loaded = |w: &Value, link: &Value| w[link[0].as_str().unwrap()]["inputs"]["image"].as_str().unwrap().to_string();
+
+        // Qwen Image 2.1, as ComfyUI's Image Edit template: its encoder takes the pictures and
+        // gives both conditionings and the latent; the model's picture prefix is cached.
+        let w = edit_workflow(&Family::QwenImage21.preset(), &job(), &edit).unwrap();
+        assert_well_formed(&w);
+        let nodes = w.as_object().unwrap();
+        let (id, encode) = nodes.iter().find(|(_, n)| n["class_type"] == "TextEncodeQwenImage21").unwrap();
+        assert_eq!((encode["inputs"]["prompt"].as_str(), encode["inputs"]["resolution"].as_u64()), (Some("a red frog"), Some(0)));
+        let pictures: Vec<String> = (1..=3).map(|i| loaded(&w, &encode["inputs"][format!("images.image_{i}")])).collect();
+        assert_eq!(pictures, ["src.png", "shirt.png", "hat.png"]);
+        assert!(encode["inputs"].get("images.image_4").is_none());
+        let sampler = node(&w, "KSampler");
+        assert_eq!(
+            (&sampler["inputs"]["positive"], &sampler["inputs"]["negative"], &sampler["inputs"]["latent_image"], sampler["inputs"]["denoise"].as_f64()),
+            (&json!([id, 0]), &json!([id, 1]), &json!([id, 2]), Some(1.0))
+        );
+        assert_eq!(nodes[sampler["inputs"]["model"][0].as_str().unwrap()]["class_type"], "QwenImage21Cache");
+        assert!(!classes(&w).iter().any(|c| c.starts_with("Empty") || c == "VAEEncode"));
+
+        // Qwen Image Edit: the pictures go to its encoder on both sides of the guidance, and the
+        // picture is rendered afresh at the size asked for.
+        let w = edit_workflow(&Family::QwenEdit.preset(), &job(), &edit).unwrap();
+        assert_well_formed(&w);
+        let encoders: Vec<&Value> = w.as_object().unwrap().values().filter(|n| n["class_type"] == "TextEncodeQwenImageEditPlus").collect();
+        assert_eq!(encoders.len(), 2);
+        for e in &encoders {
+            assert_eq!((1..=3).map(|i| loaded(&w, &e["inputs"][format!("image{i}")])).collect::<Vec<_>>(), ["src.png", "shirt.png", "hat.png"]);
+        }
+        assert!(encoders.iter().any(|e| e["inputs"]["prompt"] == "a red frog"));
+        let c = classes(&w);
+        // The preset is 2511, which reads its pictures by index.
+        for want in ["CFGNorm", "ModelSamplingAuraFlow", "EmptySD3LatentImage", "KSampler"] {
+            assert!(c.iter().any(|x| x == want), "missing {want}: {c:?}");
+        }
+        assert_eq!(c.iter().filter(|x| *x == "FluxKontextMultiReferenceLatentMethod").count(), 2);
+        let older = Model { unet: "qwen_image_edit_2509_fp8_e4m3fn.safetensors".into(), ..Family::QwenEdit.preset() };
+        assert!(!classes(&edit_workflow(&older, &job(), &edit).unwrap()).iter().any(|x| x == "FluxKontextMultiReferenceLatentMethod"));
+        let latent = node(&w, "EmptySD3LatentImage");
+        assert_eq!((latent["inputs"]["width"].as_u64(), latent["inputs"]["height"].as_u64()), (Some(1024), Some(768)));
+        // It has three picture inputs in all: a third reference is refused in words.
+        let many = ["a.png".to_string(), "b.png".to_string(), "c.png".to_string()];
+        let e = edit_workflow(&Family::QwenEdit.preset(), &job(), &Edit { image: "src.png", references: &many }).unwrap_err().to_string();
+        assert!(e.contains("2 reference pictures"), "{e}");
+        assert!(edit_workflow(&Family::QwenImage21.preset(), &job(), &Edit { image: "src.png", references: &many }).is_ok());
+
+        // FLUX.2: every picture is a reference latent on both sides, over an empty latent.
+        let w = edit_workflow(&Family::Flux2.preset(), &job(), &edit).unwrap();
+        assert_well_formed(&w);
+        let c = classes(&w);
+        assert_eq!((c.iter().filter(|x| *x == "ReferenceLatent").count(), c.iter().filter(|x| *x == "VAEEncode").count()), (6, 3));
+        assert!(c.iter().any(|x| x == "EmptyFlux2LatentImage") && !c.iter().any(|x| x == "SplitSigmasDenoise" || x == "SetLatentNoiseMask"));
+        let guider = node(&w, "CFGGuider");
+        for side in ["positive", "negative"] {
+            assert_eq!(w[guider["inputs"][side][0].as_str().unwrap()]["class_type"], "ReferenceLatent", "{side}");
+        }
+
+        // Every family either edits or says in words that it can't; hostile numbers stay out.
+        for f in Family::ALL {
+            let mut m = f.preset();
+            (m.cfg, m.guidance, m.steps) = (f64::NAN, f64::INFINITY, u32::MAX);
+            match edit_workflow(&m, &job(), &Edit { image: "src.png", references: &[] }) {
+                Ok(w) => {
+                    assert!(f.edits() && check_edit(&f.preset()).is_ok() && !w.to_string().contains("null"), "{f:?}");
+                    assert_eq!(classes(&w).iter().filter(|x| *x == "LoadImage").count(), 1, "{f:?}");
+                }
+                Err(e) => assert!(!f.edits() && e.to_string().contains("can't edit") && check_edit(&f.preset()).is_err(), "{f:?}: {e}"),
+            }
+        }
+        // A missing file is named.
+        let mut m = Family::QwenImage21.preset();
+        m.vae.clear();
+        assert!(check_edit(&m).unwrap_err().to_string().contains("VAE"));
+        assert_eq!(upload_reference(0), "photocraft_edit_reference_1.png");
+        assert_eq!(upload_reference(usize::MAX), format!("photocraft_edit_reference_{}.png", usize::MAX));
     }
 
     #[test]

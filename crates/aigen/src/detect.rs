@@ -29,10 +29,13 @@ fn title(file: &str) -> String {
     stem.replace(['_', '-'], " ").split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// The family a diffusion model file belongs to, by name. Edit, video and other non
-/// text-to-image models are not recognised.
+/// The family a diffusion model file belongs to, by name. Video models, and edit models other
+/// than Qwen Image Edit, are not recognised.
 fn family_of(file: &str) -> Option<Family> {
     let n = file.to_ascii_lowercase();
+    if n.contains("qwen_image_edit") || n.contains("qwen-image-edit") {
+        return Some(Family::QwenEdit);
+    }
     if ["edit", "video", "i2v", "t2v", "ltx", "wan", "unconditional", "anima", "controlnet", "inpaint", "kontext"].iter().any(|x| n.contains(x)) {
         return None;
     }
@@ -118,7 +121,7 @@ pub fn repaired(existing: &Model, detected: &Model) -> Model {
     }
 }
 
-/// Models for the text-to-image files in `folders` (as [`crate::comfy_models`] returns them),
+/// Models for the text-to-image, inpainting and edit files in `folders` (as [`crate::comfy_models`] returns them),
 /// each with its family's reference settings and the encoder / VAE files the server has.
 pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
     let empty = Vec::new();
@@ -146,6 +149,17 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
                 m.clip = "mistral_3_small_flux2_bf16.safetensors".into();
             }
             Family::Flux1 if turbo => (m.steps, m.guidance) = (4, 0.0),
+            Family::QwenEdit => {
+                // With its release's four-step LoRA on the server, the model renders in four steps.
+                let release = ["2509", "2511"].into_iter().find(|r| n.contains(r));
+                let lightning = |l: &&String| {
+                    let l = l.to_ascii_lowercase();
+                    l.contains("qwen") && l.contains("edit") && l.contains("lightning") && l.contains("4step") && release.is_some_and(|r| l.contains(r))
+                };
+                if let Some(lora) = get("loras").iter().find(lightning) {
+                    (m.lora, m.steps, m.cfg) = (lora.clone(), 4, 1.0);
+                }
+            }
             _ => {}
         }
         let clip_needles: &[&str] = match family {
@@ -156,7 +170,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::Flux1 | Family::Flux1Fill | Family::HidreamI1 => &["clip_l"],
             Family::Ernie => &["ministral"],
             Family::Ideogram4 => &["qwen3vl_8b"],
-            Family::QwenImage => &["qwen_2.5_vl"],
+            Family::QwenImage | Family::QwenEdit => &["qwen_2.5_vl"],
             Family::QwenImage21 => &["qwen3vl_8b"],
             _ => &[],
         };
@@ -174,7 +188,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         let vae_needles: &[&str] = match family {
             Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
             Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
-            Family::Krea2 | Family::QwenImage => &["qwen_image_vae"],
+            Family::Krea2 | Family::QwenImage | Family::QwenEdit => &["qwen_image_vae"],
             _ => &["ae.safetensors"],
         };
         m.vae = choose(vaes, &m.vae, vae_needles);
@@ -263,11 +277,11 @@ mod tests {
     }
 
     #[test]
-    fn recognises_text_to_image_models_only() {
+    fn recognises_image_models_only() {
         let found = detect(&folders());
         let names: Vec<&str> = found.iter().map(|m| m.unet.as_str()).filter(|u| !u.is_empty()).collect();
-        assert_eq!(names.len(), 12, "{names:?}");
-        for skipped in ["edit", "ltx", "hunyuan", "mystery", "unconditional"] {
+        assert_eq!(names.len(), 13, "{names:?}");
+        for skipped in ["kontext", "ltx", "hunyuan", "mystery", "unconditional"] {
             assert!(!names.iter().any(|n| n.contains(skipped)), "{skipped} in {names:?}");
         }
         assert_eq!(found.iter().filter(|m| !m.checkpoint.is_empty()).count(), 2);
@@ -299,6 +313,40 @@ mod tests {
         assert_eq!(found.iter().find(|m| m.family == Family::QwenInpaint).map(|m| m.unet.as_str()), Some("qwen_image_2512_fp8_e4m3fn.safetensors"));
         f.get_mut("diffusion_models").unwrap().retain(|u| !u.starts_with("qwen_image_2512"));
         assert!(!detect(&f).iter().any(|m| m.family == Family::QwenInpaint));
+    }
+
+    #[test]
+    fn qwen_image_edit_is_an_edit_model_with_its_releases_fast_lora() {
+        let mut f = folders();
+        f.get_mut("diffusion_models").unwrap().push("qwen_image_edit_2509_fp8_e4m3fn.safetensors".into());
+        let by = |found: &[Model], file: &str| found.iter().find(|m| m.unet == file).cloned().unwrap();
+        let found = detect(&f);
+        let edit = by(&found, "qwen_image_edit_2511_bf16.safetensors");
+        assert_eq!(
+            (edit.family, edit.clip.as_str(), edit.vae.as_str()),
+            (Family::QwenEdit, "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors")
+        );
+        assert!(edit.can_edit() && !edit.can_generate() && !edit.can_inpaint() && problem(&edit).is_none());
+        // Without a LoRA: the full schedule, with guidance.
+        assert_eq!((edit.lora.as_str(), edit.steps, edit.cfg), ("", 20, 2.5));
+        // Each release takes its own four-step LoRA, not the other's and not Qwen Image's.
+        f.insert(
+            "loras".into(),
+            [
+                "Qwen-Image-Lightning-4steps-V1.0.safetensors",
+                "Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors",
+                "Qwen-Image-Edit-2511-Lightning-8steps.safetensors",
+            ]
+            .map(String::from)
+            .to_vec(),
+        );
+        let found = detect(&f);
+        let older = by(&found, "qwen_image_edit_2509_fp8_e4m3fn.safetensors");
+        assert_eq!((older.lora.as_str(), older.steps, older.cfg), ("Qwen-Image-Edit-2509-Lightning-4steps-V1.0-bf16.safetensors", 4, 1.0));
+        assert_eq!(by(&found, "qwen_image_edit_2511_bf16.safetensors").lora, "");
+        // The models that generate edit too, with the settings they generate with.
+        assert!(by(&found, "qwen_image_2.1_int8_convrot.safetensors").can_edit() && by(&found, "flux-2-klein-9b-fp8.safetensors").can_edit());
+        assert!(!by(&found, "z_image_turbo_bf16.safetensors").can_edit());
     }
 
     #[test]

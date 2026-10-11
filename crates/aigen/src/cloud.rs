@@ -83,14 +83,18 @@ pub fn openai_edit_request(model: &Model, job: &Job, source: &Source, key: &str,
         return Err(Error::Config(format!("{}: `{id}` can't inpaint; OpenAI's GPT Image models can", model.name)));
     }
     let size = format!("{}x{}", source.width, source.height);
-    let mut parts = vec![
-        Part::text("model", id),
-        Part::text("prompt", &job.prompt),
-        Part::text("n", "1"),
-        Part::text("size", &size),
-        Part::text("output_format", "png"),
-        Part::png("image", "image.png", &source.image),
-    ];
+    let mut parts =
+        vec![Part::text("model", id), Part::text("prompt", &job.prompt), Part::text("n", "1"), Part::text("size", &size), Part::text("output_format", "png")];
+    // An edit with references sends several pictures: the one to edit first.
+    if source.references.is_empty() {
+        parts.push(Part::png("image", "image.png", &source.image));
+    } else {
+        parts.push(Part::png("image[]", "image.png", &source.image));
+        parts.extend(source.references.iter().map(|bytes| Part::png("image[]", "reference.png", bytes)));
+    }
+    if source.edit && job.alpha && model.alpha {
+        parts.push(Part::text("background", "transparent"));
+    }
     // Without a mask the whole picture is the model's to redraw (image to image).
     if !source.mask.is_empty() {
         parts.push(Part::png("mask", "mask.png", &source.mask));
@@ -126,8 +130,11 @@ pub fn gemini_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
         // changed outside anyway.
         // Image to image: the picture, and what to make of it.
         Some(source) if source.mask.is_empty() => {
-            let b64 = base64::engine::general_purpose::STANDARD.encode(&source.image);
-            json!([{"text": job.prompt}, {"inlineData": {"mimeType": "image/png", "data": b64}}])
+            let picture = |bytes: &Vec<u8>| json!({"inlineData": {"mimeType": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(bytes)}});
+            // An edit's references follow the picture, in the order the instruction numbers them.
+            let mut parts = vec![json!({"text": job.prompt})];
+            parts.extend(std::iter::once(&source.image).chain(&source.references).map(picture));
+            Value::Array(parts)
         }
         Some(source) => {
             let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
@@ -312,7 +319,7 @@ mod tests {
     }
 
     fn source() -> Source {
-        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 1024, height: 1536, strength: 0.5 }
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 1024, height: 1536, strength: 0.5, edit: false, references: Vec::new() }
     }
 
     #[test]

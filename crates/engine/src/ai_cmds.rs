@@ -9,8 +9,12 @@
 //!   again a new layer, masked by the selection, so the layer underneath is untouched.
 //!   With `"mode": "img2img"` it redraws a picture, following it as closely as `strength` says:
 //!   a layer of the document (in place), or another open document (fitted to the area).
+//!   With `"mode": "imgEdit"` an edit model changes a picture following the prompt as an
+//!   instruction, with up to three more pictures to refer to. With a selection only the part of
+//!   the picture around it is sent (crop, edit, composite): the result is masked by the selection,
+//!   so the rest of the picture is untouched and a large picture is edited near its own resolution.
 //!   The new layer keeps what it was made from (`Layer::generation`: model, prompt, mode,
-//!   strength, context, alpha, seed, source), which the layer tree reports as `generation` and
+//!   strength, context, alpha, seed, source, references, quality), which the layer tree reports as `generation` and
 //!   the AI Gen panel loads back when the layer is clicked.
 //! - `ai.mask` paints the area an inpainting repaints: it is Quick Mask, started empty and shown
 //!   as a tint over what is selected, so a brush adds to it; `ai.generate` turns it back into
@@ -31,7 +35,7 @@ use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, Se
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
-use photocraft_doc::{ColorIndicates, Document, Generation, GenerationMode, GenerationSource, Layer, LayerContent, LayerId, LayerMask};
+use photocraft_doc::{ColorIndicates, Document, Generation, GenerationMode, GenerationQuality, GenerationSource, Layer, LayerContent, LayerId, LayerMask};
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
 use serde_json::{Value, json};
@@ -45,6 +49,10 @@ pub const LABEL: &str = "AI Generate";
 pub const INPAINT_LABEL: &str = "AI Inpaint";
 /// History label of an image-to-image generation.
 pub const IMG2IMG_LABEL: &str = "AI Image to Image";
+/// History label of an edit.
+pub const EDIT_LABEL: &str = "AI Image Edit";
+/// What [`img2img_plan`] says when there is no picture at all.
+const NO_PICTURE: &str = "Image to image needs a picture to start from: a layer with pixels, or another open document";
 /// How far an image-to-image may depart from its picture when `strength` is not given: enough to
 /// redraw it in the prompt's terms, little enough to keep its composition.
 pub const DEFAULT_IMG2IMG_STRENGTH: f64 = 0.6;
@@ -391,13 +399,14 @@ fn picture_png(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec<u8
     png(width, height, ChannelLayout::Rgb, rgb)
 }
 
-/// The picture an image-to-image starts from.
+/// The picture an image-to-image or an edit starts from, or one an edit refers to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SourceRef {
     /// A layer of the active document that has pixels, by id.
     Layer(u64),
-    /// An open document, by id: its image as it shows, all layers together.
+    /// An open document, by id: its image as it shows, all layers together. The active document
+    /// itself is taken where it is; another one is fitted to the area.
     Document(u64),
 }
 
@@ -424,6 +433,67 @@ impl From<GenerationSource> for SourceRef {
 enum Picture {
     Layer(Surface),
     Document(Arc<Document>),
+}
+
+impl Picture {
+    /// The part of the picture inside `rect` at `size`, as an opaque PNG.
+    fn png(&self, rect: Rect, size: (u32, u32)) -> Result<Vec<u8>> {
+        match self {
+            Picture::Layer(pixels) => picture_png(pixels, rect, size),
+            Picture::Document(doc) => {
+                let fmt = doc.pixel_format();
+                let flat = crate::file_cmds::flattened(doc, PixelFormat::new(fmt.mode, fmt.sample, true));
+                picture_png(&flat, rect, size)
+            }
+        }
+    }
+}
+
+/// A picture an edit refers to, read when the edit runs.
+#[derive(Clone)]
+struct Reference {
+    picture: Picture,
+    rect: Rect,
+}
+
+impl Reference {
+    /// The size the picture is sent at: its own, brought to between a quarter of a megapixel and
+    /// one, which is what the edit models read a reference at.
+    fn size(&self) -> (u32, u32) {
+        let (w, h) = (f64::from(self.rect.width().max(1)), f64::from(self.rect.height().max(1)));
+        let scale = ((w * h).clamp(512.0 * 512.0, 1024.0 * 1024.0) / (w * h)).sqrt();
+        let edge = |v: f64| (v * scale).round().clamp(16.0, 8192.0) as u32;
+        (edge(w), edge(h))
+    }
+
+    fn png(&self) -> Result<Vec<u8>> {
+        self.picture.png(self.rect, self.size())
+    }
+}
+
+/// The picture behind a reference of an edit: a layer's pixels on the canvas, or a document as
+/// it shows. `Err` says why it can't be one.
+fn reference(s: &Session, source: SourceRef) -> std::result::Result<Reference, String> {
+    let d = s.active().ok_or("no document open")?;
+    match source {
+        SourceRef::Layer(id) => {
+            let layer = d.doc.layer(LayerId(id)).ok_or_else(|| format!("the reference layer {id} is not in this document"))?;
+            let pixels =
+                layer.surface().ok_or_else(|| format!("\u{201c}{}\u{201d} has no pixels to refer to: choose a layer that has, or rasterize it", layer.name))?;
+            let rect = pixels.content_bounds().intersect(&d.doc.bounds());
+            if rect.is_empty() {
+                return Err(format!("\u{201c}{}\u{201d} is empty: choose a reference that has pixels", layer.name));
+            }
+            Ok(Reference { picture: Picture::Layer(pixels.clone()), rect })
+        }
+        SourceRef::Document(id) => {
+            let other = s.documents().iter().find(|o| o.doc.id.0 == id).ok_or_else(|| format!("the reference document {id} is not open"))?;
+            if !has_image(&other.doc) {
+                return Err(format!("\u{201c}{}\u{201d} is empty: there is no image in it to refer to", other.doc.name));
+            }
+            Ok(Reference { picture: Picture::Document(other.doc.clone()), rect: other.doc.bounds() })
+        }
+    }
 }
 
 /// What an image-to-image will do, worked out before it runs.
@@ -472,6 +542,18 @@ pub fn img2img_sources(s: &Session) -> Vec<(SourceRef, String)> {
     out
 }
 
+/// The pictures an edit can start from, or refer to: the active document as it shows (all its
+/// layers together), then [`img2img_sources`].
+pub fn edit_sources(s: &Session) -> Vec<(SourceRef, String)> {
+    let Some(d) = s.active() else { return Vec::new() };
+    let mut out = Vec::new();
+    if has_image(&d.doc) {
+        out.push((SourceRef::Document(d.doc.id.0), "This document (all layers)".to_string()));
+    }
+    out.extend(img2img_sources(s));
+    out
+}
+
 /// The source an image-to-image uses when none is named: the active layer when it has pixels,
 /// else the first of [`img2img_sources`].
 pub fn default_img2img_source(s: &Session) -> Option<SourceRef> {
@@ -489,8 +571,7 @@ pub fn default_img2img_source(s: &Session) -> Option<SourceRef> {
 pub fn img2img_plan(s: &Session, source: Option<SourceRef>, rect: Option<Rect>) -> std::result::Result<Img2ImgPlan, String> {
     let d = s.active().ok_or("no document open")?;
     let canvas = d.doc.bounds();
-    let nothing = "Image to image needs a picture to start from: a layer with pixels, or another open document";
-    let source = source.or_else(|| default_img2img_source(s)).ok_or(nothing)?;
+    let source = source.or_else(|| default_img2img_source(s)).ok_or(NO_PICTURE)?;
     let selected = d.doc.selection.as_ref().map(|sel| sel.content_bounds().intersect(&canvas)).filter(|b| !b.is_empty());
     let inside = |area: Rect| Some(area.intersect(&canvas)).filter(|a| !a.is_empty()).ok_or("the area to generate into is empty or outside the canvas");
     match source {
@@ -519,24 +600,47 @@ pub fn img2img_plan(s: &Session, source: Option<SourceRef>, rect: Option<Rect>) 
                 return Err(format!("\u{201c}{}\u{201d} is empty: there is no image in it to start from", other.doc.name));
             }
             let area = inside(rect.or(selected).unwrap_or(canvas))?;
-            Ok(Img2ImgPlan { area, source_rect: cover_crop(whole, area.width(), area.height()), picture: Picture::Document(other.doc.clone()) })
+            // The document itself is taken where it is; another one is fitted to the area.
+            let source_rect = if id == d.doc.id.0 { area } else { cover_crop(whole, area.width(), area.height()) };
+            Ok(Img2ImgPlan { area, source_rect, picture: Picture::Document(other.doc.clone()) })
         }
     }
+}
+
+/// Plan an edit of `source` (`None`: [`default_img2img_source`]), or say why it can't run.
+///
+/// Like [`img2img_plan`], but a selection scopes the edit of a picture of this document: the
+/// model is sent the selection's bounds with `context` around them ([`inpaint_area`]), not the
+/// whole picture, and its answer goes back there under the selection as a mask. So what is not
+/// selected stays as it was, and a large picture is edited near its own resolution.
+pub fn edit_plan(s: &Session, source: Option<SourceRef>, context: f64, rect: Option<Rect>) -> std::result::Result<Img2ImgPlan, String> {
+    let d = s.active().ok_or("no document open")?;
+    let canvas = d.doc.bounds();
+    let source = source.or_else(|| default_img2img_source(s));
+    let here = !matches!(source, Some(SourceRef::Document(id)) if id != d.doc.id.0);
+    let selected = d.doc.selection.as_ref().map(|sel| sel.content_bounds().intersect(&canvas)).filter(|b| !b.is_empty());
+    let rect = rect.or_else(|| selected.filter(|_| here).map(|b| inpaint_area(b, canvas, context)));
+    img2img_plan(s, source, rect)
+        .map_err(|why| if why == NO_PICTURE { "Editing needs a picture: a layer with pixels, or an open document with an image".to_string() } else { why })
 }
 
 impl Img2ImgPlan {
     /// What the model is sent: the source's pixels at `size`, with no mask (all of it is redrawn).
     fn source(&self, size: (u32, u32), strength: f64) -> Result<Source> {
-        let image = match &self.picture {
-            Picture::Layer(pixels) => picture_png(pixels, self.source_rect, size)?,
-            Picture::Document(doc) => {
-                let fmt = doc.pixel_format();
-                let flat = crate::file_cmds::flattened(doc, PixelFormat::new(fmt.mode, fmt.sample, true));
-                picture_png(&flat, self.source_rect, size)?
-            }
-        };
-        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength })
+        let image = self.picture.png(self.source_rect, size)?;
+        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength, edit: false, references: Vec::new() })
     }
+}
+
+/// The `references` param of `ai.generate`: up to [`photocraft_aigen::MAX_REFERENCES`] sources.
+fn references_param(p: &Value) -> Result<Vec<SourceRef>> {
+    let malformed = || bad("ai.generate", "`references` must be a list of {\"layer\": id} or {\"document\": id}");
+    let Some(v) = p.get("references") else { return Ok(Vec::new()) };
+    let list = v.as_array().ok_or_else(malformed)?;
+    if list.len() > photocraft_aigen::MAX_REFERENCES {
+        return Err(bad("ai.generate", format!("`references` takes {} pictures at most", photocraft_aigen::MAX_REFERENCES)));
+    }
+    list.iter().map(|r| serde_json::from_value(r.clone()).map_err(|_| malformed())).collect()
 }
 
 /// The `source` param of `ai.generate`: `{"layer": id}` or `{"document": id}`.
@@ -572,7 +676,7 @@ fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Re
     if mask.len() != pixels * 4 {
         return Err(EngineError::Other("could not read the area to inpaint".into()));
     }
-    Ok(Source { image, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength })
+    Ok(Source { image, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength, edit: false, references: Vec::new() })
 }
 
 /// Decode a generated image and fit it to `area`, in the document's format with alpha: scaled
@@ -652,7 +756,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     }
     let settings = settings(s);
     let id = p.get("model").and_then(Value::as_str).unwrap_or("");
-    let model = settings.model(id).cloned().ok_or_else(|| {
+    let mut model = settings.model(id).cloned().ok_or_else(|| {
         if id.is_empty() {
             EngineError::Other("no AI model is set up: add one in Preferences › Integrations".into())
         } else {
@@ -663,12 +767,17 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let server = s.ai.server.clone().filter(|_| model.provider.is_local());
     let key = s.ai.key(model.provider);
     s.ai.ready(&model).map_err(EngineError::Other)?;
-    let (inpaint, img2img) = match p.get("mode").map(|m| m.as_str().unwrap_or("?")) {
-        None | Some("txt2img") => (false, false),
-        Some("inpaint") => (true, false),
-        Some("img2img") => (false, true),
-        Some("imgEdit") => return Err(EngineError::Other("`imgEdit` is not available yet; use txt2img, inpaint or img2img".into())),
-        Some(_) => return Err(bad(cmd, "`mode` must be txt2img|inpaint|img2img")),
+    let kind = match p.get("mode").map(|m| m.as_str().unwrap_or("?")) {
+        None | Some("txt2img") => GenerationMode::Txt2img,
+        Some("inpaint") => GenerationMode::Inpaint,
+        Some("img2img") => GenerationMode::Img2img,
+        Some("imgEdit") => GenerationMode::ImgEdit,
+        Some(_) => return Err(bad(cmd, "`mode` must be txt2img|inpaint|img2img|imgEdit")),
+    };
+    let (inpaint, img2img, edit) = (kind == GenerationMode::Inpaint, kind == GenerationMode::Img2img, kind == GenerationMode::ImgEdit);
+    let quality = match p.get("quality") {
+        None => GenerationQuality::Standard,
+        Some(v) => v.as_str().and_then(GenerationQuality::from_key).ok_or_else(|| bad(cmd, "`quality` must be draft|standard|detail"))?,
     };
     let number = |key: &str, default: f64, max: f64| match p.get(key) {
         None => Ok(default),
@@ -676,11 +785,28 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let strength = number("strength", if img2img { DEFAULT_IMG2IMG_STRENGTH } else { 1.0 }, 1.0)?;
     let context = number("context", DEFAULT_CONTEXT, 4.0)?;
-    if !inpaint && !model.can_generate() {
+    if edit && !model.can_edit() {
         return Err(EngineError::Other(format!(
-            "{} is an inpainting model: it repaints a selection (`\"mode\": \"inpaint\"`, the panel's InPaint tab) and can't generate from a prompt alone",
+            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Qwen Image Edit, FLUX.2 or a cloud model; the panel's ImgEdit tab lists them)",
             model.name
         )));
+    }
+    if !inpaint && !edit && !model.can_generate() {
+        return Err(EngineError::Other(if model.family.edit_only() {
+            format!(
+                "{} is an edit model: it changes a picture following an instruction (`\"mode\": \"imgEdit\"`, the panel's ImgEdit tab) and does nothing else",
+                model.name
+            )
+        } else {
+            format!(
+                "{} is an inpainting model: it repaints a selection (`\"mode\": \"inpaint\"`, the panel's InPaint tab) and can't generate from a prompt alone",
+                model.name
+            )
+        }));
+    }
+    let references = if edit { references_param(p)? } else { Vec::new() };
+    if references.len() > model.max_references() {
+        return Err(EngineError::Other(format!("{} takes {} reference pictures at most, not {}", model.name, model.max_references(), references.len())));
     }
     if inpaint && !model.can_inpaint() {
         return Err(EngineError::Other(format!("{} is not set up for inpainting (Preferences \u{203a} AI Integrations, its Inpainting box)", model.name)));
@@ -701,15 +827,18 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         }),
         None => None,
     };
-    // What an image-to-image reads: a layer of this document, or another open document.
+    // What an image-to-image or an edit reads: a layer of this document, or an open document.
     // The source is settled here, so the layer can say which picture it was made from.
-    let source = if img2img { source_param(p)?.or_else(|| default_img2img_source(s)) } else { None };
-    let plan = if img2img {
+    let source = if img2img || edit { source_param(p)?.or_else(|| default_img2img_source(s)) } else { None };
+    let plan = if img2img || edit {
         let rect = if p.get("rect").is_some() { Some(target_area(p, None, d.doc.bounds())?) } else { None };
-        Some(img2img_plan(s, source, rect).map_err(EngineError::Other)?)
+        let plan = if edit { edit_plan(s, source, context, rect) } else { img2img_plan(s, source, rect) };
+        Some(plan.map_err(EngineError::Other)?)
     } else {
         None
     };
+    // The pictures an edit refers to, as they are now.
+    let reference_pictures = references.iter().map(|r| reference(s, *r)).collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::Other)?;
     let area = match (selected, &plan) {
         (_, Some(plan)) => plan.area,
         // The model is shown the layer around the selection, and its answer covers that area.
@@ -734,23 +863,16 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let mut job = Job { prompt: prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
     let name = layer_name(&model, &prompt);
     let model_id = model.id.clone();
-    let label = match (inpaint, img2img) {
-        (true, _) => INPAINT_LABEL,
-        (_, true) => IMG2IMG_LABEL,
-        _ => LABEL,
+    let label = match kind {
+        GenerationMode::Inpaint => INPAINT_LABEL,
+        GenerationMode::Img2img => IMG2IMG_LABEL,
+        GenerationMode::ImgEdit => EDIT_LABEL,
+        GenerationMode::Txt2img => LABEL,
     };
-    let mode = match (inpaint, img2img) {
-        (true, _) => "inpaint",
-        (_, true) => "img2img",
-        _ => "txt2img",
-    };
+    let mode = kind.key();
     // What the new layer keeps of its generation (`Layer::generation`), for the panel to load back.
     let mut generation = Generation {
-        mode: match (inpaint, img2img) {
-            (true, _) => GenerationMode::Inpaint,
-            (_, true) => GenerationMode::Img2img,
-            _ => GenerationMode::Txt2img,
-        },
+        mode: kind,
         model: model.id.clone(),
         model_name: model.name.clone(),
         prompt: prompt.clone(),
@@ -759,7 +881,13 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         alpha,
         seed,
         source: source.map(Into::into),
+        references: references.iter().copied().map(Into::into).collect(),
+        quality,
     };
+    // A draft runs part of a local model's schedule, detail a little more of it.
+    if model.provider.is_local() {
+        model.steps = quality.steps(model.steps);
+    }
     let job_selection = selection.clone().filter(|_| inpaint);
     crate::jobs::run(
         s,
@@ -780,8 +908,16 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if let Some(plan) = &plan {
                 ctx.progress(0.0, "Reading the picture\u{2026}");
-                job.source = Some(plan.source(photocraft_aigen::source_size(&model, area.width(), area.height()), strength)?);
+                let mut source = plan.source(photocraft_aigen::source_size(&model, area.width(), area.height()), strength)?;
                 ctx.check()?;
+                if edit {
+                    source.edit = true;
+                    for picture in &reference_pictures {
+                        source.references.push(picture.png()?);
+                        ctx.check()?;
+                    }
+                }
+                job.source = Some(source);
             }
             // A local model needs its server: use the one running, or start it.
             if let Some(server) = &server {
@@ -791,7 +927,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             ctx.check()?;
             ctx.progress(0.98, "Placing the image…");
             // What was given a picture answers in its shape: it goes back where that came from.
-            let surface = fit(&image.bytes, fmt, area, inpaint || img2img)?;
+            let surface = fit(&image.bytes, fmt, area, kind != GenerationMode::Txt2img)?;
             Ok((surface, image))
         },
         move |s, (surface, image): (Surface, Generated)| {
@@ -824,11 +960,15 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     )
 }
 
-/// `ai.sources`: what an image-to-image can start from now.
-fn sources(s: &mut Session, _: &Value) -> Result<Value> {
+/// `ai.sources`: what an image-to-image (or, with `"mode": "imgEdit"`, an edit) can start from now.
+fn sources(s: &mut Session, p: &Value) -> Result<Value> {
+    let offered = match p.get("mode").map(|m| m.as_str().unwrap_or("?")) {
+        None | Some("img2img") => img2img_sources(s),
+        Some("imgEdit") => edit_sources(s),
+        Some(_) => return Err(bad("ai.sources", "`mode` must be img2img|imgEdit")),
+    };
     let default = default_img2img_source(s);
-    let list: Vec<Value> =
-        img2img_sources(s).into_iter().map(|(source, name)| json!({"source": source, "name": name, "default": Some(source) == default})).collect();
+    let list: Vec<Value> = offered.into_iter().map(|(source, name)| json!({"source": source, "name": name, "default": Some(source) == default})).collect();
     Ok(json!({"sources": list}))
 }
 
@@ -841,7 +981,8 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
             let ready = s.ai.ready(m);
             json!({
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
-                "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "ready": ready.is_ok(), "why": ready.err(),
+                "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "references": m.max_references(),
+                "ready": ready.is_ok(), "why": ready.err(),
             })
         })
         .collect();
@@ -951,7 +1092,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img: a layer is redrawn in place, over the selection's bounds or else its own pixels; another open document is fitted to the selection's bounds or else the canvas),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint: how much of the layer around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id},…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, …; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -971,7 +1112,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Image Sources",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {sources:[{source:{"layer":id}|{"document":id},name,default}]}: what ai.generate {"mode":"img2img"} can start from: the active document's layers that have pixels, and the other open documents"##,
+            params: r##"{"mode":"img2img|imgEdit"="img2img"} → {sources:[{source:{"layer":id}|{"document":id},name,default}]}: what ai.generate can start from in that mode: the active document's layers that have pixels and the other open documents; for imgEdit (whose references are chosen from the same list) the active document itself, all layers together, comes first"##,
             enabled: always,
             run: sources,
             journal: false,
@@ -981,7 +1122,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Models",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,generate (text to image),inpaint,ready,why}],comfyUrl,available}"##,
+            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),ready,why}],comfyUrl,available}"##,
             enabled: always,
             run: models,
             journal: false,

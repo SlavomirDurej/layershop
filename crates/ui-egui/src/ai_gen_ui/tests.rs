@@ -512,7 +512,7 @@ fn a_background_connect_reports_through_the_dialog() {
     }
     assert!(f.get(JOB).is_none(), "the connect never finished");
     assert_eq!(f[STATUS]["error"], false, "{}", f[STATUS]);
-    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 2);
+    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 3);
 }
 
 #[test]
@@ -528,14 +528,15 @@ fn connect_reads_the_servers_files_and_detect_adds_its_models() {
     f.insert(ACTION.into(), json!("detect"));
     after_body(&mut app, &mut f);
     let models = f["values"]["integrations"]["ai"]["models"].as_array().unwrap().clone();
-    // The edit model is not a text-to-image model.
-    assert_eq!(models.len(), 2, "{models:?}");
+    assert_eq!(models.len(), 3, "{models:?}");
     assert_eq!(models[0]["unet"], "z_image_turbo_bf16.safetensors");
     assert_eq!(models[0]["clip"], "qwen_3_4b.safetensors");
+    // The edit model is detected as one, not as a text-to-image model.
+    assert_eq!((&models[2]["unet"], &models[2]["family"]), (&json!("qwen_image_edit_2511_bf16.safetensors"), &json!("qwenEdit")));
     // Detecting again adds nothing twice.
     f.insert(ACTION.into(), json!("detect"));
     after_body(&mut app, &mut f);
-    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 2);
+    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 3);
     draw_section(&mut f);
     // A server that isn't there is reported in the dialog, not thrown.
     app.session.ai.transport = None;
@@ -679,11 +680,11 @@ fn the_inpaint_tab_lists_the_models_that_can_inpaint_and_keeps_its_own_choice() 
     app.ui.ai_gen.mode = Mode::Inpaint;
     assert!(ids(&app).is_empty());
     draw_panel(&mut app);
-    // A tab the engine can't run yet (set from outside: the panel doesn't offer it) is Txt2Img.
+    // Ernie doesn't edit either: the ImgEdit tab says so, too.
     app.ui.ai_gen.mode = Mode::ImgEdit;
-    assert!(!Mode::ImgEdit.available() && app.ui.ai_gen.mode() == Mode::Txt2img);
+    assert!(ids(&app).is_empty());
     draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.mode, Mode::Txt2img);
+    assert_eq!(app.ui.ai_gen.mode, Mode::ImgEdit);
     // The state reads and writes like the engine names the modes.
     assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["txt2img", "inpaint", "img2img", "imgEdit"]));
     assert_eq!(Mode::ALL.map(Mode::key), ["txt2img", "inpaint", "img2img", "imgEdit"]);
@@ -960,6 +961,98 @@ fn the_mask_tools_mark_what_to_repaint_from_the_panel() {
 
 /// A document with one generation of each kind, made from the panel: the ids of the Background
 /// and of the Txt2Img, Img2Img and InPaint layers.
+#[test]
+fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
+    add_model(&mut app, Model { id: "edit".into(), ..Family::QwenEdit.preset() });
+    add_model(&mut app, Model { id: "gpt-image-2".into(), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) });
+    app.ui.ai_gen.mode = Mode::ImgEdit;
+    app.ui.ai_gen.prompt = "make the sky stormy".into();
+    // The models that edit are offered, local and cloud; one that only generates is not, and an
+    // edit model is offered nowhere else.
+    let ids = |app: &PhotocraftApp| enabled_models(app).into_iter().map(|m| m.id).collect::<Vec<_>>();
+    assert_eq!(ids(&app), ["q21", "edit", "gpt-image-2"]);
+    for mode in [Mode::Txt2img, Mode::Img2img] {
+        app.ui.ai_gen.mode = mode;
+        assert_eq!(ids(&app), ["z", "q21", "gpt-image-2"], "{mode:?}");
+    }
+    app.ui.ai_gen.mode = Mode::ImgEdit;
+    let q21 = Model { id: "q21".into(), ..Family::QwenImage21.preset() };
+    // No document, then one with nothing in it: Generate is off and says what is missing.
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.edit_model, "q21", "the tab keeps its own choice of model");
+    app.run("file.new", json!({"width": 40, "height": 30, "background": "transparent"})).unwrap();
+    assert!(generate_blocked(&app, &q21).unwrap().contains("Editing needs a picture"));
+    assert_eq!((edit_source(&app), target_size(&app)), (None, None));
+    draw_panel(&mut app);
+    // A model that can't edit says so (a state set from outside may name one).
+    assert!(generate_blocked(&app, &z_image("z")).is_some());
+    // A document with an image: its active layer is the source, the document itself is offered.
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let doc = app.session.active().unwrap().doc.id.0;
+    let background = app.session.active().unwrap().active_layer.unwrap().0;
+    assert_eq!(edit_source(&app), Some(SourceRef::Layer(background)));
+    assert_eq!((generate_blocked(&app, &q21), target_size(&app)), (None, Some((64, 48, false))));
+    let offered: Vec<SourceRef> = photocraft_engine::ai_cmds::edit_sources(&app.session).into_iter().map(|(s, _)| s).collect();
+    assert_eq!(offered, [SourceRef::Document(doc), SourceRef::Layer(background)]);
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.edit_source, Some(SourceRef::Layer(background)));
+    // A selection scopes the edit: the model is sent it with a quarter of its edge around it.
+    app.run("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
+    assert_eq!(target_size(&app), Some((24, 24, true)));
+    // References: the ones still on offer, as many as the model takes, in order.
+    app.ui.ai_gen.edit_references = vec![SourceRef::Document(doc), SourceRef::Layer(999_999), SourceRef::Layer(background), SourceRef::Document(doc)];
+    assert_eq!(edit_references(&app, 3), [SourceRef::Document(doc), SourceRef::Layer(background), SourceRef::Document(doc)]);
+    assert_eq!(edit_references(&app, 2).len(), 2);
+    assert_eq!((reference_rows(0, 3), reference_rows(1, 3), reference_rows(3, 3), reference_rows(2, 2), reference_rows(usize::MAX, 3)), (1, 2, 3, 2, 3));
+    // Drawing keeps what is valid, and Qwen Image Edit (two references) drops the third.
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.edit_references.len(), 3);
+    app.ui.ai_gen.edit_model = "edit".into();
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.edit_references, [SourceRef::Document(doc), SourceRef::Layer(background)]);
+    app.ui.ai_gen.edit_model = "q21".into();
+    app.ui.ai_gen.edit_quality = GenerationQuality::Draft;
+    let before = app.session.active().unwrap().doc.layers.len();
+    let r = generate(&mut app).unwrap();
+    assert_eq!((r["mode"].as_str(), r["model"].as_str(), r["bounds"].clone()), (Some("imgEdit"), Some("q21"), json!([12, 8, 24, 24])));
+    assert_eq!(app.session.active().unwrap().doc.layers.len(), before + 1);
+    let made = {
+        let d = app.session.active().unwrap();
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert!(layer.mask.is_some(), "the selection becomes the layer's mask");
+        layer.generation.clone().unwrap()
+    };
+    assert_eq!(made.references, [photocraft_doc::GenerationSource::Document(doc), photocraft_doc::GenerationSource::Layer(background)]);
+    assert_eq!((made.quality, made.prompt.as_str()), (GenerationQuality::Draft, "make the sky stormy"));
+    // Clicking that layer loads the edit back: tab, model, prompt, source, references, quality.
+    let layer = r["layer"].as_u64().unwrap();
+    app.ui.ai_gen = AiGenUi { prompt: "something else".into(), ..Default::default() };
+    assert!(load_layer(&mut app, layer));
+    let ui = app.ui.ai_gen.clone();
+    assert_eq!((ui.mode, ui.edit_model.as_str(), ui.prompt.as_str(), ui.edit_quality), (Mode::ImgEdit, "q21", "make the sky stormy", GenerationQuality::Draft));
+    assert_eq!((ui.edit_source, ui.edit_references.len(), ui.model.as_str()), (Some(SourceRef::Layer(background)), 2, ""));
+    draw_panel(&mut app);
+    // A cloud model edits too (its quality is its own setting); so does every tab's draw.
+    app.ui.ai_gen.edit_model = "gpt-image-2".into();
+    draw_panel(&mut app);
+    // The state reads and writes like the engine names things; an old state has none of it.
+    let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
+    assert_eq!(
+        (&state["editSource"], &state["editQuality"], &state["editReferences"][0]),
+        (&json!({"layer": background}), &json!("draft"), &json!({"document": doc}))
+    );
+    let old: AiGenUi = serde_json::from_value(json!({"prompt": "x", "mode": "imgEdit"})).unwrap();
+    assert_eq!((old.mode, old.edit_source, old.edit_references.len(), old.edit_quality), (Mode::ImgEdit, None, 0, GenerationQuality::Standard));
+    // The dock gives the tab its rows: source, the references and one to add, the options.
+    app.ui.ai_gen.edit_references.truncate(1);
+    let tall = wanted_height(&app);
+    app.ui.ai_gen.mode = Mode::Txt2img;
+    assert_eq!(tall, wanted_height(&app) + 4.0 * INPAINT_ROW);
+}
+
 fn generated_layers(app: &mut PhotocraftApp) -> [u64; 4] {
     add_model(app, z_image("z"));
     add_model(app, Model { id: "z2".into(), inpaint: Some(true), ..Family::ZImage.preset() });
@@ -1065,7 +1158,8 @@ mod clicks {
         });
         h.run_steps(8);
         let row = |h: &Harness<'_, PhotocraftApp>, layer: u64| recorded(&h.ctx).into_iter().find(|r| r.layer == layer).unwrap();
-        let visible = |h: &Harness<'_, PhotocraftApp>, layer: u64| h.state().session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().visible;
+        let visible =
+            |h: &Harness<'_, PhotocraftApp>, layer: u64| h.state().session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().visible;
         // The eye toggles the layer and leaves the panel as it is.
         let r = row(&h, txt);
         click(&mut h, pos2(r.row.left() + 15.0, r.row.center().y));
