@@ -616,6 +616,8 @@ impl Ex {
             let id = self.layer_ids.get(&l.id).copied().unwrap_or(0);
             crate::comps_map::set_cmls(&mut raw, crate::comps_map::write_cmls(comps, last.as_ref(), l, id));
         }
+        // What a generated layer was made from, in the same `shmd` block.
+        crate::generation_map::put(&mut raw, l, &self.layer_ids);
         regenerated.into_iter().chain(raw).map(|(k, d)| TaggedBlock::new(k, d)).collect()
     }
 

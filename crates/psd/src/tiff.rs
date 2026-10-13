@@ -1301,6 +1301,9 @@ pub mod transcode {
                     b"cmls" | b"mlst" | b"cust" | b"tmln" | b"sgrp" | b"cinf" => t.versioned_descriptor(),
                     // mdyn (dynamic metadata) is one u32.
                     b"mdyn" => t.u32s_to_end(),
+                    // pcGn (PhotoCraft: what a generated layer was made from) is JSON text: bytes,
+                    // the same in either order.
+                    b"pcGn" => t.rest(),
                     _ if same => Ok(()),
                     _ if t.descriptor_shaped() => Ok(()),
                     _ => Err(PsdError::Unsupported(format!("metadata item {:?}", String::from_utf8_lossy(&key)))),
@@ -2046,6 +2049,8 @@ mod tests {
             crate::metadata::MetadataItem::new(*b"zzzz", vec![1, 2, 3, 4, 5, 6, 7, 8]),
             crate::metadata::MetadataItem::new(*b"mdyn", vec![0, 0, 0, 1]),
             crate::metadata::MetadataItem::new(*b"cmls", VersionedDescriptor::new(Descriptor::new("null")).to_bytes()),
+            // Text: kept byte for byte in either order.
+            crate::metadata::MetadataItem::new(*b"pcGn", br#"{"prompt":"a pond"}"#.to_vec()),
         ];
         let d = ImageSourceData { global_blocks: vec![TaggedBlock::new(*b"shmd", crate::metadata::write_shmd(&items))], ..Default::default() };
         let (little, w) = d.to_bytes(ByteOrder::Little).unwrap();

@@ -41,7 +41,7 @@ fn file<'a>(name: &'a str, what: &str, model: &Model) -> Result<&'a str> {
     let name = name.trim();
     if name.is_empty() {
         let label = if model.name.is_empty() { model.family.label() } else { model.name.as_str() };
-        return Err(Error::Config(format!("{label}: choose {what} in Preferences › Integrations")));
+        return Err(Error::Config(format!("{label}: choose {what} in Preferences › Generative AI")));
     }
     Ok(name)
 }
@@ -53,7 +53,8 @@ fn clip_type(family: Family) -> &'static str {
         Family::Krea2 => "krea2",
         Family::Flux2 | Family::Ernie => "flux2",
         Family::Ideogram4 => "ideogram4",
-        Family::QwenImage | Family::QwenImage21 | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
+        // Ming Image's encoder is recognised by its weights; its templates load it as this type.
+        Family::QwenImage | Family::QwenImage21 | Family::MingImage | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
         _ => "stable_diffusion",
     }
 }
@@ -96,6 +97,49 @@ pub fn upload_reference(index: usize) -> String {
     format!("photocraft_edit_reference_{}.png", index.saturating_add(1))
 }
 
+/// The phrases Ming Image was trained to answer with a transparent background (its authors'
+/// list). One of them goes first in the prompt; they don't combine. None is dependable: the
+/// background came out transparent in 14 of 20 tries above one megapixel, by prompt and seed,
+/// and no phrase did better than the first.
+const MING_TRANSPARENT: [&str; 10] = [
+    "RGBA, 4-channel, transparent background",
+    "isolated subject, alpha matte, no background",
+    "cutout PNG, alpha=0 outside the object",
+    "transparent canvas, not white, not checkerboard",
+    "production RGBA layer for compositing",
+    "带透明通道，4通道RGBA图像",
+    "透明背景，alpha通道，无底图",
+    "抠图素材，背景alpha=0",
+    "孤立主体，透明PNG图层",
+    "不要白底，不要棋盘格，只要透明通道",
+];
+
+/// Is `job` a transparent background that `model`'s workflow can ask for? Ming Image generating
+/// from the prompt alone: given a picture it answers opaque whatever the prompt says (measured
+/// with an edit at 1024 and 1536 px).
+fn transparent(model: &Model, job: &Job, from_picture: bool) -> bool {
+    model.family == Family::MingImage && job.alpha && !from_picture
+}
+
+/// `job`'s prompt as a text-to-image with `model` is given it: for a transparent background
+/// from Ming Image, behind the phrase that asks for one, unless the prompt starts with one itself.
+fn prompt_for(model: &Model, job: &Job) -> String {
+    let prompt = job.prompt.trim_start();
+    let lower = prompt.to_lowercase();
+    if !transparent(model, job, false) || MING_TRANSPARENT.iter().any(|phrase| lower.starts_with(&phrase.to_lowercase())) {
+        return job.prompt.clone();
+    }
+    format!("{}, {prompt}", MING_TRANSPARENT[0])
+}
+
+/// The nodes that decode `samples` into the image to show. Ming Image's VAE decodes four
+/// channels, and an image that was not asked to be transparent still comes back with pixels
+/// short of opaque (alpha down to two thirds, measured): its alpha is dropped unless `alpha`.
+fn decode(g: &mut Graph, model: &Model, samples: &Link, vae: &Link, alpha: bool) -> Link {
+    let image = g.node("VAEDecode", json!({"samples": samples, "vae": vae}));
+    if model.family == Family::MingImage && !alpha { g.node("SplitImageWithAlpha", json!({"image": image})) } else { image }
+}
+
 /// The workflow that renders `job` with `model`, ending in a preview image (kept in ComfyUI's
 /// temp folder, not its output folder).
 pub fn workflow(model: &Model, job: &Job) -> Result<Value> {
@@ -122,6 +166,8 @@ pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Resu
 ///   sample (ComfyUI's Image Edit template), at the pictures' own sizes.
 /// - Qwen Image Edit: its encoder takes the pictures with the prompt, for both sides of the
 ///   guidance; 2511 reads them by index (ComfyUI's templates).
+/// - Ming Image: its encoder takes the pictures with the prompt, and the model is sampled with
+///   the LCM sampler of ComfyUI's Image Edit template.
 /// - FLUX.2: each picture is a reference latent on the conditioning.
 pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     build_edit(model, job, edit)
@@ -157,15 +203,18 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
     let f = model.family;
     if f.inpaint_only() && inpaint.is_none_or(|i| i.mask.is_none()) {
         let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
-        return Err(Error::Config(format!("{name} is an inpainting model: it repaints a selection (the InPaint tab) and can't generate from a prompt alone")));
+        return Err(Error::Config(format!("{name} is an inpainting model: it repaints a selection (the Edit tab) and can't generate from a prompt alone")));
     }
     if f.edit_only() {
         let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
-        return Err(Error::Config(format!("{name} is an edit model: it changes a picture following an instruction (the ImgEdit tab) and does nothing else")));
+        return Err(Error::Config(format!("{name} is an edit model: it changes a picture following an instruction (the Edit tab) and does nothing else")));
     }
     let mut g = Graph::default();
     let (mut unet, clip, vae) = loaders(&mut g, model)?;
     let cfg = finite(model.cfg, 1.0);
+    // HiDream O1's prompt writer and refining pass are for a picture made from a prompt alone.
+    let polished = f == Family::HidreamO1 && inpaint.is_none();
+    let mut text = json!(job.prompt);
     let (mut positive, mut negative) = if f == Family::QwenImage21 {
         // Its own node encodes both prompts (and reference images, of which there are none here).
         let id = g.add(
@@ -174,10 +223,15 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         );
         (json!([id, 0]), json!([id, 1]))
     } else {
-        let positive = g.node("CLIPTextEncode", json!({"text": job.prompt, "clip": clip}));
+        let prompt = if inpaint.is_none() { prompt_for(model, job) } else { job.prompt.clone() };
+        text = if polished { enhanced(&mut g, model, job, &prompt) } else { json!(prompt) };
+        let positive = g.node("CLIPTextEncode", json!({"text": text, "clip": clip}));
         // Without classifier-free guidance the negative prompt is never evaluated: a zeroed
         // conditioning saves encoding it. Ideogram 4's negative model takes one, too.
-        let negative = if cfg <= 1.0 || f == Family::Ideogram4 {
+        let negative = if f == Family::MingImage && cfg <= 1.0 {
+            // Its guider then takes the prompt alone ([`sample`]): there is nothing to zero.
+            positive.clone()
+        } else if cfg <= 1.0 || f == Family::Ideogram4 {
             g.node("ConditioningZeroOut", json!({"conditioning": positive}))
         } else {
             g.node("CLIPTextEncode", json!({"text": model.negative_prompt, "clip": clip}))
@@ -236,10 +290,59 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         }
         None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
     };
-    let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise });
-    let image = g.node("VAEDecode", json!({"samples": samples, "vae": vae}));
+    let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise, from_picture: inpaint.is_some() });
+    let mut image = decode(&mut g, model, &samples, &vae, transparent(model, job, inpaint.is_some()));
+    if polished && !model.refiner.trim().is_empty() {
+        image = refined(&mut g, model, job, &image, &text)?;
+    }
     g.add("PreviewImage", json!({"images": image}));
     Ok(Value::Object(g.nodes))
+}
+
+/// What HiDream O1's prompt writer is told. The model was trained on one descriptive paragraph
+/// per picture (its authors' subject, composition, action, location, style, specs, text order):
+/// given a list of instructions with an "avoid" section it draws waxy, posed people, and given
+/// the same request as a description, candid ones (2026-10-13).
+const ENHANCER_SYSTEM: &str = "You write prompts for a text-to-image model. Rewrite the user's request as one paragraph of plain, fluent English, 80 to 220 words, that describes the finished picture as if it already exists. Cover, in this order: the subject (who or what, their appearance, clothing and expression), the composition (shot size, viewpoint, where each thing is), the action, the location and its details, the image style, and the camera or rendering specifics (lens, depth of field, light, texture). If the request asks for text in the picture, give the exact words in double quotes and say where they are. Describe only what is seen: no instructions such as \"create\", \"should\" or \"make\", no lists, no headings, and no mention of what to avoid; turn anything to avoid into its positive opposite. For a photograph, ask for natural, unretouched skin texture and candid, unposed expressions. Keep every concrete detail the user gave and invent none that contradict it. Answer with the paragraph alone.";
+
+/// `prompt` as `model`'s prompt writer rewrites it ([`Model::enhancer`], ComfyUI's Generate Text
+/// node), or as it is without one. The seed makes the rewriting repeat with the picture's.
+fn enhanced(g: &mut Graph, model: &Model, job: &Job, prompt: &str) -> Link {
+    let file = model.enhancer.trim();
+    if file.is_empty() {
+        return json!(prompt);
+    }
+    let writer = g.node("CLIPLoader", json!({"clip_name": file, "type": "stable_diffusion", "device": "default"}));
+    let system = g.node("PrimitiveStringMultiline", json!({"value": ENHANCER_SYSTEM}));
+    g.node(
+        "TextGenerate",
+        json!({
+            "clip": writer, "prompt": prompt, "system_prompt": system, "max_length": 512, "sampling_mode": "on",
+            "sampling_mode.temperature": 0.7, "sampling_mode.top_k": 64, "sampling_mode.top_p": 0.95, "sampling_mode.min_p": 0.05,
+            "sampling_mode.repetition_penalty": 1.05, "sampling_mode.seed": job.seed, "thinking": false, "use_default_template": true,
+        }),
+    )
+}
+
+/// `image` gone over by `model`'s refiner ([`Model::refiner`]): Z-Image Turbo, sampled as its
+/// template samples it, from the picture and only as far from it as the strength says. `text`
+/// is the prompt the picture was rendered from.
+fn refined(g: &mut Graph, model: &Model, job: &Job, image: &Link, text: &Value) -> Result<Link> {
+    let unet = g.node("UNETLoader", json!({"unet_name": model.refiner.trim(), "weight_dtype": "default"}));
+    let unet = g.node("ModelSamplingAuraFlow", json!({"model": unet, "shift": 3.0}));
+    let clip = g.node("CLIPLoader", json!({"clip_name": file(&model.refiner_clip, "the refiner's text encoder file", model)?, "type": "lumina2", "device": "default"}));
+    let vae = g.node("VAELoader", json!({"vae_name": file(&model.refiner_vae, "the refiner's VAE file", model)?}));
+    let positive = g.node("CLIPTextEncode", json!({"text": text, "clip": clip}));
+    let negative = g.node("ConditioningZeroOut", json!({"conditioning": positive}));
+    let latent = g.node("VAEEncode", json!({"pixels": image, "vae": vae}));
+    let samples = g.node(
+        "KSampler",
+        json!({
+            "model": unet, "seed": job.seed, "steps": 8, "cfg": 1.0, "sampler_name": "res_multistep", "scheduler": "simple",
+            "positive": positive, "negative": negative, "latent_image": latent, "denoise": finite(model.refine_strength, 0.35).clamp(0.05, 1.0),
+        }),
+    );
+    Ok(g.node("VAEDecode", json!({"samples": samples, "vae": vae})))
 }
 
 /// The nodes that load `model`'s files: the diffusion model (through its LoRA and its sampling
@@ -282,6 +385,15 @@ fn loaders(g: &mut Graph, model: &Model) -> Result<(Link, Link, Link)> {
             _ => g.node("ModelSamplingAuraFlow", json!({"model": unet, "shift": shift})),
         };
     }
+    // ComfyUI's HiDream O1 template: the model works on pixels in patches, and this blends
+    // shifted passes over the last fifth of the schedule so their edges don't show. Its Dev
+    // template has none.
+    if f == Family::HidreamO1 && !crate::detect::hidream_o1_dev(&model.checkpoint) {
+        unet = g.node(
+            "HiDreamO1PatchSeamSmoothing",
+            json!({"model": unet, "start_percent": 0.8, "end_percent": 1.0, "pattern": "single_shift", "passes": "ramp_2_4", "blend": "median", "strength": 1.0}),
+        );
+    }
     Ok((unet, clip, vae))
 }
 
@@ -292,13 +404,15 @@ struct Sampling {
     negative: Link,
     latent: Link,
     denoise: f64,
+    /// The model is given a picture: to start from (inpainting, image to image) or to edit.
+    from_picture: bool,
 }
 
 /// The nodes that sample `model` (its family's sampler, with the model's steps, CFG, sampler and
 /// scheduler), and the latent they give.
 fn sample(g: &mut Graph, model: &Model, job: &Job, with: &Sampling) -> Link {
     let f = model.family;
-    let Sampling { unet, positive, negative, latent, denoise } = with;
+    let Sampling { unet, positive, negative, latent, denoise, from_picture } = with;
     let denoise = *denoise;
     let cfg = finite(model.cfg, 1.0);
     let steps = model.steps.clamp(1, 1000);
@@ -325,6 +439,41 @@ fn sample(g: &mut Graph, model: &Model, job: &Job, with: &Sampling) -> Link {
             };
             g.node("SamplerCustomAdvanced", json!({"noise": noise, "guider": guider, "sampler": select, "sigmas": sigmas, "latent_image": latent}))
         }
+        // ComfyUI's Ming Image templates: FLUX's shift, which follows the size, and a guider
+        // that takes the prompt alone (the model is distilled; CFG above 1 brings the negative
+        // prompt back).
+        Family::MingImage => {
+            let unet = g.node("ModelSamplingFlux", json!({"model": unet, "max_shift": 1.15, "base_shift": 0.5, "width": job.width, "height": job.height}));
+            let noise = g.node("RandomNoise", json!({"noise_seed": job.seed}));
+            // Given a picture it needs the sampler of its Image Edit template. With the
+            // text-to-image one (euler) an edit, an image to image and an inpainting at less
+            // than full strength all came out speckled (measured against ComfyUI 0.39).
+            let select = if *from_picture {
+                g.node("SamplerLCM", json!({"s_noise": 1.02, "s_noise_end": 1.0, "noise_clip_std": 0.0}))
+            } else {
+                g.node("KSamplerSelect", json!({"sampler_name": sampler}))
+            };
+            let sigmas = g.node("BasicScheduler", json!({"model": unet, "scheduler": scheduler, "steps": steps, "denoise": denoise}));
+            let guider = if cfg > 1.0 {
+                g.node("CFGGuider", json!({"model": unet, "positive": positive, "negative": negative, "cfg": cfg}))
+            } else {
+                g.node("BasicGuider", json!({"model": unet, "conditioning": positive}))
+            };
+            g.node("SamplerCustomAdvanced", json!({"noise": noise, "guider": guider, "sampler": select, "sigmas": sigmas, "latent_image": latent}))
+        }
+        // ComfyUI's HiDream O1 Dev template: the LCM sampler with its noise clipped, which the
+        // sampler of that name in KSampler does not do.
+        Family::HidreamO1 if sampler == "lcm" => {
+            let select = g.node("SamplerLCM", json!({"s_noise": 1.0, "s_noise_end": 1.0, "noise_clip_std": 2.5}));
+            let sigmas = g.node("BasicScheduler", json!({"model": unet, "scheduler": scheduler, "steps": steps, "denoise": denoise}));
+            g.node(
+                "SamplerCustom",
+                json!({
+                    "model": unet, "add_noise": true, "noise_seed": job.seed, "cfg": cfg, "positive": positive, "negative": negative,
+                    "sampler": select, "sigmas": sigmas, "latent_image": latent,
+                }),
+            )
+        }
         _ => g.node(
             "KSampler",
             json!({
@@ -341,7 +490,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
     if !f.edits() {
         return Err(Error::Config(format!(
-            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Qwen Image Edit or FLUX.2) on the ImgEdit tab"
+            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
         )));
     }
     if let Some(why) = crate::detect::problem(model) {
@@ -388,6 +537,22 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
             let negative = encode(&mut g, &model.negative_prompt);
             (positive, negative, g.node("EmptySD3LatentImage", json!({"width": job.width, "height": job.height, "batch_size": 1})))
         }
+        Family::MingImage => {
+            // Its encoder shows the pictures to the text encoder and hands them to the model as
+            // reference latents (ComfyUI's Image Edit template). The latent to sample is the
+            // first picture's size, which is the size asked for.
+            let encode = |g: &mut Graph, prompt: &str| {
+                let mut inputs = json!({"clip": clip, "vae": vae, "prompt": prompt});
+                for (i, picture) in pictures.iter().enumerate() {
+                    inputs[format!("images.image_{}", i + 1)] = picture.clone();
+                }
+                g.node("TextEncodeMingImageEdit", inputs)
+            };
+            let positive = encode(&mut g, &job.prompt);
+            // Only CFG above 1 evaluates a negative side ([`sample`]).
+            let negative = if cfg > 1.0 { encode(&mut g, &model.negative_prompt) } else { positive.clone() };
+            (positive, negative, g.node("EmptyLatentImage", json!({"width": job.width, "height": job.height, "batch_size": 1})))
+        }
         _ => {
             let mut positive = g.node("CLIPTextEncode", json!({"text": job.prompt, "clip": clip}));
             let mut negative = if cfg <= 1.0 {
@@ -407,8 +572,8 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
             (positive, negative, g.node("EmptyFlux2LatentImage", json!({"width": job.width, "height": job.height, "batch_size": 1})))
         }
     };
-    let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise: 1.0 });
-    let image = g.node("VAEDecode", json!({"samples": samples, "vae": vae}));
+    let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise: 1.0, from_picture: true });
+    let image = decode(&mut g, model, &samples, &vae, transparent(model, job, true));
     g.add("PreviewImage", json!({"images": image}));
     Ok(Value::Object(g.nodes))
 }
@@ -422,7 +587,7 @@ fn finite(v: f64, fallback: f64) -> f64 {
 fn custom_workflow(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Value> {
     let text = model.workflow.trim();
     if text.is_empty() {
-        return Err(Error::Config(format!("{}: paste a workflow (ComfyUI › Workflow › Export (API)) in Preferences › Integrations", model.name)));
+        return Err(Error::Config(format!("{}: paste a workflow (ComfyUI › Workflow › Export (API)) in Preferences › Generative AI", model.name)));
     }
     let mut v: Value = serde_json::from_str(text).map_err(|e| Error::Config(format!("{}: the workflow is not valid JSON: {e}", model.name)))?;
     let is_api = v.as_object().is_some_and(|o| !o.is_empty() && o.values().all(|n| n.get("class_type").is_some_and(Value::is_string)));
@@ -491,7 +656,7 @@ fn substitute(v: &mut Value, numbers: &[(&str, Value)], texts: &[(&str, &str)], 
 pub fn base_url(url: &str) -> Result<String> {
     let url = url.trim().trim_end_matches('/');
     if !(url.starts_with("http://") || url.starts_with("https://")) || url.len() < 9 {
-        return Err(Error::Config(format!("the ComfyUI address `{url}` is not an http:// URL (Preferences › Integrations)")));
+        return Err(Error::Config(format!("the ComfyUI address `{url}` is not an http:// URL (Preferences › Generative AI)")));
     }
     Ok(url.to_string())
 }
@@ -700,15 +865,109 @@ mod tests {
 
     #[test]
     fn z_image_uses_its_reference_nodes() {
-        let w = workflow(&Family::ZImage.preset(), &job()).unwrap();
+        // The template's graph, at its CFG of 1: the negative prompt is zeroed out, not encoded.
+        let w = workflow(&Model { cfg: 1.0, ..Family::ZImage.preset() }, &job()).unwrap();
         let c = classes(&w);
         for want in ["UNETLoader", "CLIPLoader", "VAELoader", "ModelSamplingAuraFlow", "ConditioningZeroOut", "EmptySD3LatentImage", "KSampler", "VAEDecode"] {
             assert!(c.iter().any(|x| x == want), "missing {want}: {c:?}");
         }
+        // The preset's CFG of 2 gives the sampler a negative prompt to steer away from.
+        let preset = workflow(&Family::ZImage.preset(), &job()).unwrap();
+        assert!(!classes(&preset).iter().any(|x| x == "ConditioningZeroOut"));
+        assert_eq!(preset.as_object().unwrap().values().find(|n| n["class_type"] == "KSampler").unwrap()["inputs"]["cfg"], 2.0);
         let sampler = w.as_object().unwrap().values().find(|n| n["class_type"] == "KSampler").unwrap();
         assert_eq!(sampler["inputs"]["seed"], 42);
         assert_eq!(sampler["inputs"]["steps"], 8);
         assert_eq!(sampler["inputs"]["sampler_name"], "res_multistep");
+    }
+
+    fn nodes_with(w: &Value, class: &str) -> Vec<Value> {
+        w.as_object().unwrap().values().filter(|n| n["class_type"] == class).cloned().collect()
+    }
+
+    /// The id of the refining sampler: the KSampler that starts from an encoded picture.
+    fn refine_id(w: &Value) -> Value {
+        let nodes = w.as_object().unwrap();
+        let (id, _) = nodes
+            .iter()
+            .find(|(_, n)| n["class_type"] == "KSampler" && nodes[n["inputs"]["latent_image"][0].as_str().unwrap()]["class_type"] == "VAEEncode")
+            .unwrap();
+        json!(id)
+    }
+
+    #[test]
+    fn hidream_o1_follows_its_templates() {
+        let has = |w: &Value, class: &str| classes(w).iter().any(|x| x == class);
+        let node = |w: &Value, class: &str| w.as_object().unwrap().values().find(|n| n["class_type"] == class).cloned().unwrap();
+
+        // The full model: noise scale 8, seams smoothed, KSampler at the template's settings.
+        let full = Family::HidreamO1.preset();
+        let w = workflow(&full, &job()).unwrap();
+        assert_well_formed(&w);
+        let sampler = &node(&w, "KSampler")["inputs"];
+        assert_eq!(
+            (&sampler["steps"], &sampler["cfg"], &sampler["sampler_name"], &sampler["scheduler"]),
+            (&json!(40), &json!(5.0), &json!("dpmpp_2m_sde_gpu"), &json!("normal"))
+        );
+        let smoothing = &w[sampler["model"][0].as_str().unwrap()];
+        assert_eq!((&smoothing["class_type"], &smoothing["inputs"]["passes"]), (&json!("HiDreamO1PatchSeamSmoothing"), &json!("ramp_2_4")));
+        let scale = &w[smoothing["inputs"]["model"][0].as_str().unwrap()];
+        assert_eq!((&scale["class_type"], &scale["inputs"]["noise_scale"]), (&json!("ModelNoiseScale"), &json!(8.0)));
+        assert!(has(&w, "EmptyHiDreamO1LatentImage"));
+        // Rendered at the trained size closest in shape, whatever render size a saved model has.
+        let o1 = Family::HidreamO1;
+        assert_eq!((o1.render_size(500, 500, full.megapixels), o1.render_size(1920, 1080, 1.0)), ((2048, 2048), (2560, 1440)));
+        assert_eq!((o1.render_size(600, 900, 1.0), o1.render_size(4000, 500, 2.0)), ((1664, 2496), (3104, 1312)));
+        // 0 is the selection's own size, and no other family is touched.
+        assert_eq!((o1.render_size(1030, 770, 0.0), Family::ZImage.render_size(500, 500, 1.0)), ((1024, 768), (1008, 1008)));
+        assert_eq!(o1.render_size(0, 0, f64::NAN), (256, 256));
+
+        // Dev: its template's LCM sampler with clipped noise, and no smoothing.
+        let dev =
+            Model { checkpoint: "hidream_o1_image_dev_fp8_scaled.safetensors".into(), steps: 28, cfg: 1.0, shift: 7.6, sampler: "lcm".into(), ..full.clone() };
+        let w = workflow(&dev, &job()).unwrap();
+        assert_well_formed(&w);
+        assert!(!has(&w, "HiDreamO1PatchSeamSmoothing") && !has(&w, "KSampler") && has(&w, "ConditioningZeroOut"), "{:?}", classes(&w));
+        assert_eq!(node(&w, "SamplerLCM")["inputs"]["noise_clip_std"], json!(2.5));
+        let custom = &node(&w, "SamplerCustom")["inputs"];
+        assert_eq!((&custom["cfg"], &custom["noise_seed"], &custom["add_noise"]), (&json!(1.0), &json!(42), &json!(true)));
+        assert_eq!((&node(&w, "BasicScheduler")["inputs"]["steps"], &node(&w, "ModelNoiseScale")["inputs"]["noise_scale"]), (&json!(28), &json!(7.6)));
+        // A prompt writer rewrites the prompt for both models that read it, with the picture's
+        // seed; a refiner goes over the decoded picture, and it is the refined one that is shown.
+        let polished = Model {
+            enhancer: "gemma4_e4b_it_fp8_scaled.safetensors".into(),
+            refiner: "z_image_turbo_bf16.safetensors".into(),
+            refiner_clip: "qwen_3_4b.safetensors".into(),
+            refiner_vae: "ae.safetensors".into(),
+            ..full.clone()
+        };
+        let w = workflow(&polished, &job()).unwrap();
+        assert_well_formed(&w);
+        let nodes = w.as_object().unwrap();
+        let (writer, generate) = nodes.iter().find(|(_, n)| n["class_type"] == "TextGenerate").unwrap();
+        assert_eq!((&generate["inputs"]["prompt"], &generate["inputs"]["sampling_mode.seed"]), (&json!("a red frog"), &json!(42)));
+        assert!(w[generate["inputs"]["system_prompt"][0].as_str().unwrap()]["inputs"]["value"].as_str().unwrap().contains("one paragraph"));
+        let encodes: Vec<&Value> = nodes.values().filter(|n| n["class_type"] == "CLIPTextEncode").collect();
+        assert_eq!(encodes.iter().filter(|n| n["inputs"]["text"] == json!([writer, 0])).count(), 2, "{encodes:?}");
+        let refine = nodes.values().find(|n| n["class_type"] == "KSampler" && n["inputs"]["denoise"] == json!(0.35)).unwrap();
+        assert_eq!((&refine["inputs"]["steps"], &refine["inputs"]["sampler_name"]), (&json!(8), &json!("res_multistep")));
+        let encoded = &w[refine["inputs"]["latent_image"][0].as_str().unwrap()];
+        assert_eq!((&encoded["class_type"], &w[encoded["inputs"]["pixels"][0].as_str().unwrap()]["class_type"]), (&json!("VAEEncode"), &json!("VAEDecode")));
+        assert_eq!(w[node(&w, "PreviewImage")["inputs"]["images"][0].as_str().unwrap()]["inputs"]["samples"][0], refine_id(&w));
+        // A refiner without its text encoder is refused in words; neither is used on a picture.
+        let e = workflow(&Model { refiner_clip: String::new(), ..polished.clone() }, &job()).unwrap_err().to_string();
+        assert!(e.contains("refiner's text encoder"), "{e}");
+        let w = inpaint_workflow(&polished, &job(), &INPAINT).unwrap();
+        assert!(!has(&w, "TextGenerate") && !has(&w, "UNETLoader"), "{:?}", classes(&w));
+        // An absurd strength is brought into range.
+        let w = workflow(&Model { refine_strength: f64::NAN, ..polished.clone() }, &job()).unwrap();
+        assert!(nodes_with(&w, "KSampler").iter().any(|n| n["inputs"]["denoise"] == json!(0.35)));
+        let w = workflow(&Model { refine_strength: 9.0, ..polished }, &job()).unwrap();
+        assert!(nodes_with(&w, "KSampler").iter().all(|n| n["inputs"]["denoise"] == json!(1.0)));
+
+        // Another sampler chosen for Dev is sampled as any other model is.
+        let w = workflow(&Model { sampler: "euler".into(), ..dev }, &job()).unwrap();
+        assert!(has(&w, "KSampler") && !has(&w, "SamplerCustom"));
     }
 
     #[test]
@@ -758,6 +1017,96 @@ mod tests {
         let guider = w.as_object().unwrap().values().find(|n| n["class_type"] == "DualModelGuider").unwrap();
         assert!(guider["inputs"]["model_negative"].is_array());
         assert_eq!(classes(&w).iter().filter(|x| *x == "UNETLoader").count(), 2);
+    }
+
+    #[test]
+    fn ming_image_follows_its_templates() {
+        let ming = Family::MingImage.preset();
+        let has = |w: &Value, class: &str| classes(w).iter().any(|x| x == class);
+        let count = |w: &Value, class: &str| classes(w).iter().filter(|x| *x == class).count();
+
+        // Text to image: FLUX's shift at the size asked for, a guider with the prompt alone, euler.
+        let w = workflow(&ming, &job()).unwrap();
+        assert_well_formed(&w);
+        for want in [
+            "ModelSamplingFlux",
+            "CLIPTextEncode",
+            "EmptyLatentImage",
+            "RandomNoise",
+            "KSamplerSelect",
+            "BasicScheduler",
+            "BasicGuider",
+            "SamplerCustomAdvanced",
+        ] {
+            assert!(has(&w, want), "missing {want}: {:?}", classes(&w));
+        }
+        for absent in ["ConditioningZeroOut", "CFGGuider", "SamplerLCM", "KSampler", "LoadImage"] {
+            assert!(!has(&w, absent), "{absent} in {:?}", classes(&w));
+        }
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["type"], "qwen_image");
+        let shift = &node(&w, "ModelSamplingFlux")["inputs"];
+        assert_eq!((&shift["max_shift"], &shift["base_shift"], &shift["width"], &shift["height"]), (&json!(1.15), &json!(0.5), &json!(1024), &json!(768)));
+        let scheduler = &node(&w, "BasicScheduler")["inputs"];
+        assert_eq!((&scheduler["scheduler"], &scheduler["steps"], &scheduler["denoise"]), (&json!("simple"), &json!(12), &json!(1.0)));
+        assert_eq!(node(&w, "KSamplerSelect")["inputs"]["sampler_name"], "euler");
+        assert_eq!(node(&w, "CLIPTextEncode")["inputs"]["text"], "a red frog");
+        // Its VAE decodes four channels: what is shown is the image without them, opaque.
+        let shown = |w: &Value| w[node(w, "PreviewImage")["inputs"]["images"][0].as_str().unwrap()]["class_type"].as_str().unwrap().to_string();
+        assert_eq!(shown(&w), "SplitImageWithAlpha");
+
+        // A transparent background is asked for in the model's own words, and its alpha is kept.
+        let alpha = Job { alpha: true, ..job() };
+        let w = workflow(&ming, &alpha).unwrap();
+        assert_eq!(node(&w, "CLIPTextEncode")["inputs"]["text"], "RGBA, 4-channel, transparent background, a red frog");
+        assert_eq!(shown(&w), "VAEDecode");
+        // A prompt that starts with one of the phrases already is left as it is.
+        let own = Job { prompt: "Cutout PNG, alpha=0 outside the object. A frog".into(), ..alpha.clone() };
+        assert_eq!(node(&workflow(&ming, &own).unwrap(), "CLIPTextEncode")["inputs"]["text"], "Cutout PNG, alpha=0 outside the object. A frog");
+        // The words are Ming Image's: no other model is given them.
+        assert_eq!(node(&workflow(&Family::ZImage.preset(), &alpha).unwrap(), "CLIPTextEncode")["inputs"]["text"], "a red frog");
+        assert_eq!(shown(&workflow(&Family::ZImage.preset(), &alpha).unwrap()), "VAEDecode");
+
+        // CFG above 1 brings the negative prompt back, through a CFG guider.
+        let guided = Model { cfg: 3.0, negative_prompt: "blurry".into(), ..ming.clone() };
+        let w = workflow(&guided, &job()).unwrap();
+        assert_well_formed(&w);
+        let guider = &node(&w, "CFGGuider")["inputs"];
+        assert_eq!((&guider["cfg"], &w[guider["negative"][0].as_str().unwrap()]["inputs"]["text"]), (&json!(3.0), &json!("blurry")));
+        assert!(!has(&w, "BasicGuider"));
+
+        // Given a picture it is sampled with the LCM sampler of its edit template, and answers
+        // opaque: the phrase is for text to image.
+        for source in [&INPAINT, &IMG2IMG] {
+            let w = inpaint_workflow(&ming, &alpha, source).unwrap();
+            assert_well_formed(&w);
+            assert!(has(&w, "SamplerLCM") && !has(&w, "KSamplerSelect") && has(&w, "ModelSamplingFlux"), "{:?}", classes(&w));
+            let lcm = &node(&w, "SamplerLCM")["inputs"];
+            assert_eq!((&lcm["s_noise"], &lcm["s_noise_end"], &lcm["noise_clip_std"]), (&json!(1.02), &json!(1.0), &json!(0.0)));
+            assert_eq!(node(&w, "BasicScheduler")["inputs"]["denoise"], 0.6);
+            assert_eq!(node(&w, "CLIPTextEncode")["inputs"]["text"], "a red frog");
+            assert_eq!(shown(&w), "SplitImageWithAlpha");
+        }
+
+        // An edit, as ComfyUI's Image Edit template: its encoder takes the pictures (and the VAE,
+        // to hand them to the model), over an empty latent of the size asked for.
+        let references = ["logo.png".to_string()];
+        let w = edit_workflow(&ming, &alpha, &Edit { image: "src.png", references: &references }).unwrap();
+        assert_well_formed(&w);
+        let nodes = w.as_object().unwrap();
+        let (id, encode) = nodes.iter().find(|(_, n)| n["class_type"] == "TextEncodeMingImageEdit").unwrap();
+        assert_eq!(encode["inputs"]["prompt"], "a red frog");
+        assert!(encode["inputs"]["clip"].is_array() && encode["inputs"]["vae"].is_array());
+        let picture = |i: usize| encode["inputs"].get(format!("images.image_{i}")).map(|link| w[link[0].as_str().unwrap()]["inputs"]["image"].clone());
+        assert_eq!((picture(1), picture(2), picture(3)), (Some(json!("src.png")), Some(json!("logo.png")), None));
+        assert_eq!(node(&w, "BasicGuider")["inputs"]["conditioning"], json!([id, 0]));
+        let latent = &node(&w, "EmptyLatentImage")["inputs"];
+        assert_eq!((&latent["width"], &latent["height"]), (&json!(1024), &json!(768)));
+        assert!(has(&w, "SamplerLCM") && has(&w, "ModelSamplingFlux") && !has(&w, "CLIPTextEncode") && !has(&w, "VAEEncode"), "{:?}", classes(&w));
+        assert_eq!((count(&w, "TextEncodeMingImageEdit"), shown(&w).as_str()), (1, "SplitImageWithAlpha"));
+        // With CFG both sides of the guidance see the pictures.
+        let w = edit_workflow(&guided, &job(), &Edit { image: "src.png", references: &[] }).unwrap();
+        assert_well_formed(&w);
+        assert_eq!((count(&w, "TextEncodeMingImageEdit"), has(&w, "CFGGuider")), (2, true));
     }
 
     #[test]

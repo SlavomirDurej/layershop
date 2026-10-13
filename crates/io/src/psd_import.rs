@@ -840,6 +840,9 @@ pub fn psd_to_document_with(file: &PsdFile, ctl: &photocraft_raster::Interrupt) 
     cx.warnings.extend(comp_warnings);
     // Slices (resource 1050), after layer ids are known; the raw data stays for verbatim export.
     crate::slices_map::import(&mut doc);
+    // What generated layers were made from (the `pcGn` item of their `shmd`), which names layers
+    // by id too.
+    crate::generation_map::import(&mut doc);
     // Character and paragraph styles from the type layers' engine data.
     cx.warnings.extend(crate::text_styles_map::import(&mut doc));
 

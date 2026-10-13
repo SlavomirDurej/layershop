@@ -170,7 +170,7 @@ pub fn prefs_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("preferences.json"))
 }
 
-/// The cloud AI API keys (Preferences › Integrations), in a file of their own so they never
+/// The cloud AI API keys (Preferences › Generative AI), in a file of their own so they never
 /// travel with the preferences.
 pub fn ai_keys_file() -> Option<PathBuf> {
     config_dir().map(|d| d.join("ai-keys.json"))

@@ -987,6 +987,13 @@ pub const SECTIONS: [(&str, &str); 18] = [
     ("integrations", "Integrations"),
 ];
 
+/// The Preferences dialog's Generative AI section: (id, title). It is a view, not a key of the
+/// preferences: it edits [`GENERATIVE_AI_PATH`], which stays where saved preferences and the
+/// automation guard on `integrations` already have it.
+pub const GENERATIVE_AI: (&str, &str) = ("generativeAi", "Generative AI");
+/// Where the Generative AI section's values are stored.
+pub const GENERATIVE_AI_PATH: &str = "integrations.ai";
+
 /// Preferences that nothing reads yet, so Edit › Preferences doesn't show them: a control that
 /// does nothing is worse than a missing one (https://github.com/storytold/photocraft/issues/204).
 /// They still load, save and round-trip through `prefs.get` / `prefs.set` unchanged.
@@ -1694,6 +1701,10 @@ fn prefs_reset(s: &mut Session, p: &Value) -> Result<Value> {
 /// `edit.preferences.<section>`: the section's values (the GUI opens the dialog on it instead).
 fn preferences_section(s: &mut Session, p: &Value) -> Result<Value> {
     let section = p.get("__section").and_then(Value::as_str).unwrap_or("general").to_string();
+    if section == GENERATIVE_AI.0 {
+        let values = s.prefs().get(GENERATIVE_AI_PATH).unwrap_or(Value::Null);
+        return Ok(json!({"section": section, "title": GENERATIVE_AI.1, "values": values}));
+    }
     let title = SECTIONS.iter().find(|(id, _)| *id == section).map_or("General", |(_, t)| *t);
     let values = s.prefs().get(&section).unwrap_or(Value::Null);
     Ok(json!({"section": section, "title": title, "values": values}))
@@ -1916,6 +1927,7 @@ pub fn specs() -> Vec<CommandSpec> {
         section!("edit.preferences.enhancedControls", "Enhanced Controls…"),
         section!("edit.preferences.rawDefaults", "Camera Raw…"),
         section!("edit.preferences.integrations", "Integrations…"),
+        section!("edit.preferences.generativeAi", "Generative AI…"),
         spec!(
             "edit.keyboardShortcuts",
             "Keyboard Shortcuts…",

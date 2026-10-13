@@ -1,4 +1,5 @@
-//! Cloud image models: requests for the OpenAI and Gemini image APIs, and their answers.
+//! Cloud image models: requests for the OpenAI, Gemini, xAI, Meta and Black Forest Labs image
+//! APIs, and their answers.
 
 use base64::Engine;
 use serde_json::{Value, json};
@@ -13,6 +14,17 @@ use crate::{Error, Result};
 const OPENAI_URL: &str = "https://api.openai.com/v1/images/generations";
 const OPENAI_EDIT_URL: &str = "https://api.openai.com/v1/images/edits";
 const GEMINI_URL: &str = "https://generativelanguage.googleapis.com/v1beta/models";
+const XAI_URL: &str = "https://api.x.ai/v1/images/generations";
+const XAI_EDIT_URL: &str = "https://api.x.ai/v1/images/edits";
+const META_URL: &str = "https://api.meta.ai/v1/images/generations";
+const META_EDIT_URL: &str = "https://api.meta.ai/v1/images/edits";
+const BFL_URL: &str = "https://api.bfl.ai/v1";
+
+/// Aspect ratios xAI's image models accept (it also takes 19.5:9, a phone screen's).
+const XAI_RATIOS: [(u32, u32); 13] = [(1, 1), (16, 9), (9, 16), (4, 3), (3, 4), (3, 2), (2, 3), (2, 1), (1, 2), (20, 9), (9, 20), (21, 9), (5, 2)];
+/// Aspect ratios FLUX 3 Image accepts.
+const BFL_RATIOS: [(u32, u32); 15] =
+    [(21, 9), (2, 1), (16, 9), (3, 2), (7, 5), (4, 3), (5, 4), (1, 1), (4, 5), (3, 4), (5, 7), (2, 3), (9, 16), (1, 2), (9, 21)];
 
 /// Aspect ratios the Gemini image models accept.
 const GEMINI_RATIOS: [(u32, u32); 10] = [(1, 1), (2, 3), (3, 2), (3, 4), (4, 3), (4, 5), (5, 4), (9, 16), (16, 9), (21, 9)];
@@ -21,7 +33,7 @@ fn api_model(model: &Model) -> Result<&str> {
     let id = model.api_model.trim();
     // The id becomes part of a URL (Gemini): keep it to what model ids are made of.
     if id.is_empty() || id.len() > 100 || !id.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | ':')) {
-        return Err(Error::Config(format!("{}: `{id}` is not a model id (Preferences › Integrations)", model.name)));
+        return Err(Error::Config(format!("{}: `{id}` is not a model id (Preferences › Generative AI)", model.name)));
     }
     Ok(id)
 }
@@ -29,7 +41,7 @@ fn api_model(model: &Model) -> Result<&str> {
 fn key_of<'a>(model: &Model, key: &'a str) -> Result<&'a str> {
     let key = key.trim();
     if key.is_empty() || key.chars().any(|c| c.is_control()) {
-        return Err(Error::Config(format!("{} needs an API key: add it in Preferences › Integrations", model.provider.label())));
+        return Err(Error::Config(format!("{} needs an API key: add it in Preferences › Generative AI", model.provider.label())));
     }
     Ok(key)
 }
@@ -139,10 +151,7 @@ pub fn gemini_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
         Some(source) => {
             let b64 = |bytes: &[u8]| base64::engine::general_purpose::STANDARD.encode(bytes);
             json!([
-                {"text": format!(
-                    "Edit the first image. Change only the region that is transparent in the second image (a mask of the same size), and keep everything else exactly as it is, at the same position and scale. In that region: {}",
-                    job.prompt
-                )},
+                {"text": masked_instruction(&job.prompt)},
                 {"inlineData": {"mimeType": "image/png", "data": b64(&source.image)}},
                 {"inlineData": {"mimeType": "image/png", "data": b64(&source.mask)}},
             ])
@@ -154,6 +163,235 @@ pub fn gemini_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
         "generationConfig": {"responseModalities": ["IMAGE"], "imageConfig": image},
     });
     Ok(Request::post_json(format!("{GEMINI_URL}/{id}:generateContent"), body.to_string().into_bytes()).header("x-goog-api-key", key).timeout(timeout_seconds))
+}
+
+/// What a model without a mask input is told when it is given one as a second picture (Gemini,
+/// xAI, Meta, FLUX 3): the layer's mask then hides what it changed outside anyway.
+fn masked_instruction(prompt: &str) -> String {
+    format!(
+        "Edit the first image. Change only the region that is transparent in the second image (a mask of the same size), and keep everything else exactly as it is, at the same position and scale. In that region: {prompt}"
+    )
+}
+
+/// The pictures a request with a source sends, in order, and its prompt: the picture and its
+/// mask with [`masked_instruction`], or the picture and its references with the prompt as typed.
+fn pictures<'a>(job: &'a Job, source: &'a Source) -> (String, Vec<&'a Vec<u8>>) {
+    if source.mask.is_empty() {
+        (job.prompt.clone(), std::iter::once(&source.image).chain(&source.references).collect())
+    } else {
+        (masked_instruction(&job.prompt), vec![&source.image, &source.mask])
+    }
+}
+
+fn base64_of(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+fn data_url(bytes: &[u8]) -> String {
+    format!("data:image/png;base64,{}", base64_of(bytes))
+}
+
+/// The supported aspect ratio closest to a `width` × `height` selection (xAI).
+pub fn xai_ratio(width: u32, height: u32) -> (u32, u32) {
+    nearest_ratio(width, height, &XAI_RATIOS).unwrap_or((1, 1))
+}
+
+/// xAI renders at `1k` or `2k`.
+fn xai_resolution(model: &Model) -> &'static str {
+    if model.image_size.trim().eq_ignore_ascii_case("1K") { "1k" } else { "2k" }
+}
+
+/// The request that renders `job` with an xAI image model (Grok Imagine). Its images API is
+/// OpenAI's in shape, but an edit is JSON with the pictures as data URLs, not a form.
+pub fn xai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64) -> Result<Request> {
+    let id = api_model(model)?;
+    let key = key_of(model, key)?;
+    let mut body = json!({"model": id, "prompt": job.prompt, "n": 1, "response_format": "b64_json", "resolution": xai_resolution(model)});
+    let quality = model.quality.trim();
+    if matches!(quality, "low" | "medium") {
+        body["quality"] = json!(quality);
+    }
+    let url = match &job.source {
+        Some(source) => {
+            let (prompt, sent) = pictures(job, source);
+            body["prompt"] = json!(prompt);
+            // The answer takes the first picture's shape. One picture goes in `image`, several
+            // in `images` (the API takes one field or the other).
+            let item = |bytes: &&Vec<u8>| json!({"url": data_url(bytes), "type": "image_url"});
+            match sent.as_slice() {
+                [one] => body["image"] = item(one),
+                many => body["images"] = Value::Array(many.iter().map(item).collect()),
+            }
+            XAI_EDIT_URL
+        }
+        None => {
+            let (rw, rh) = xai_ratio(job.width, job.height);
+            body["aspect_ratio"] = json!(format!("{rw}:{rh}"));
+            XAI_URL
+        }
+    };
+    Ok(Request::post_json(url, body.to_string().into_bytes()).header("Authorization", &format!("Bearer {key}")).timeout(timeout_seconds))
+}
+
+/// The `size` asked of Muse Image for a `width` × `height` selection. It sets the shape of the
+/// picture, not its pixels, and a shape beyond 16:1 is refused.
+pub fn meta_size(width: u32, height: u32) -> (u32, u32) {
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let aspect = (w / h).clamp(1.0 / 16.0, 16.0);
+    let (w, h) = if aspect >= 1.0 { ((1024.0 * aspect).round() as u32, 1024) } else { (1024, (1024.0 / aspect).round() as u32) };
+    render_size(w, h, 1.0, 8)
+}
+
+/// The request that renders `job` with a Meta image model (Muse Image): OpenAI's images API in
+/// shape, with an edit sent as JSON (`images`, as data URLs). It takes no mask and no seed.
+pub fn meta_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64) -> Result<Request> {
+    let id = api_model(model)?;
+    let key = key_of(model, key)?;
+    let mut body = json!({"model": id, "prompt": job.prompt, "n": 1, "response_format": "b64_json", "output_format": "png"});
+    let url = match &job.source {
+        Some(source) => {
+            let (prompt, sent) = pictures(job, source);
+            body["prompt"] = json!(prompt);
+            body["images"] = Value::Array(sent.iter().map(|bytes| json!({"image_url": data_url(bytes)})).collect());
+            META_EDIT_URL
+        }
+        None => {
+            let (w, h) = meta_size(job.width, job.height);
+            body["size"] = json!(format!("{w}x{h}"));
+            META_URL
+        }
+    };
+    Ok(Request::post_json(url, body.to_string().into_bytes()).header("Authorization", &format!("Bearer {key}")).timeout(timeout_seconds))
+}
+
+/// The supported aspect ratio closest to a `width` × `height` selection (FLUX 3 Image).
+pub fn bfl_ratio(width: u32, height: u32) -> (u32, u32) {
+    nearest_ratio(width, height, &BFL_RATIOS).unwrap_or((1, 1))
+}
+
+/// The request that submits `job` to Black Forest Labs. The model id is the endpoint. FLUX 3
+/// takes an aspect ratio, a resolution tier and its pictures in `images`; the endpoints before
+/// it (FLUX.2, Kontext, FLUX 1.1) take a size in pixels and their pictures in `input_image`,
+/// `input_image_2`, …. Neither takes a mask.
+pub fn bfl_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64) -> Result<Request> {
+    let id = api_model(model)?;
+    let key = key_of(model, key)?;
+    let (prompt, sent) = match &job.source {
+        Some(source) => pictures(job, source),
+        None => (job.prompt.clone(), Vec::new()),
+    };
+    let mut body = json!({"prompt": prompt});
+    if id.starts_with("flux-3") {
+        let size = model.image_size.trim().to_ascii_lowercase();
+        body["resolution"] = json!(if matches!(size.as_str(), "2k" | "4k") { size.as_str() } else { "1k" });
+        if sent.is_empty() {
+            let (rw, rh) = bfl_ratio(job.width, job.height);
+            body["aspect_ratio"] = json!(format!("{rw}:{rh}"));
+        } else {
+            // `auto`, the default, keeps the first picture's framing.
+            body["images"] = Value::Array(sent.iter().map(|bytes| json!(base64_of(bytes))).collect());
+        }
+    } else {
+        let (w, h) = match &job.source {
+            Some(source) => (source.width, source.height),
+            None => render_size(job.width, job.height, 1.0, 16),
+        };
+        body["width"] = json!(w);
+        body["height"] = json!(h);
+        for (i, bytes) in sent.iter().enumerate() {
+            let name = if i == 0 { "input_image".to_string() } else { format!("input_image_{}", i + 1) };
+            body[name] = json!(base64_of(bytes));
+        }
+    }
+    Ok(Request::post_json(format!("{BFL_URL}/{id}"), body.to_string().into_bytes()).header("x-key", key).timeout(timeout_seconds.min(120)))
+}
+
+/// `url` is an https address at Black Forest Labs: the only place the key may be sent to (the
+/// address to poll comes from the answer to the submitted job).
+fn bfl_host(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("https://") else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    !authority.contains('@') && {
+        let host = authority.split(':').next().unwrap_or("");
+        host == "bfl.ai" || host.ends_with(".bfl.ai")
+    }
+}
+
+/// The request that asks whether a submitted job is done.
+pub fn bfl_poll_request(polling_url: &str, key: &str) -> Result<Request> {
+    if !bfl_host(polling_url) {
+        return Err(Error::BadResponse("Black Forest Labs answered with an address to poll that is not its own".into()));
+    }
+    Ok(Request::get(polling_url).header("x-key", key.trim()).timeout(30))
+}
+
+/// What Black Forest Labs says went wrong: `detail` as text, or as a list of validation errors.
+fn bfl_error(status: u16, v: &Value) -> Error {
+    let detail = v.get("detail").or_else(|| v.get("error")).or_else(|| v.get("message"));
+    let text = match detail {
+        Some(Value::String(s)) => Some(clip(s, 400)),
+        Some(Value::Array(items)) => {
+            let said: Vec<&str> = items.iter().take(4).filter_map(|i| i.get("msg").and_then(Value::as_str)).collect();
+            (!said.is_empty()).then(|| clip(&said.join("; "), 400))
+        }
+        Some(Value::Object(o)) => o.get("message").and_then(Value::as_str).map(|s| clip(s, 400)),
+        _ => None,
+    };
+    let hint = match status {
+        401 | 403 => " (check the API key in Preferences › Generative AI)",
+        402 => " (the account is out of credits)",
+        404 => " (check the model id in Preferences › Generative AI: it is the name of the endpoint, such as flux-3-image)",
+        429 => " (too many requests at once)",
+        _ => "",
+    };
+    Error::Server(match text {
+        Some(t) => format!("Black Forest Labs: {t}{hint}"),
+        None => format!("Black Forest Labs answered HTTP {status}{hint}"),
+    })
+}
+
+/// A submitted job: where to ask for it, and what it cost in US dollars when the answer says.
+pub fn parse_bfl_submitted(status: u16, body: &[u8]) -> Result<(String, Option<f64>)> {
+    let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    let url = v.get("polling_url").and_then(Value::as_str).filter(|u| !u.is_empty() && u.len() <= 2048);
+    match url {
+        Some(url) if (200..300).contains(&status) => {
+            let cost = v.get("cost").and_then(Value::as_f64).and_then(|credits| crate::pricing::reported(credits, crate::pricing::BFL_CREDIT_USD));
+            Ok((url.to_string(), cost))
+        }
+        _ if (200..300).contains(&status) => Err(Error::BadResponse("Black Forest Labs did not say where to ask for the image".into())),
+        _ => Err(bfl_error(status, &v)),
+    }
+}
+
+/// Where a submitted job stands.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BflJob {
+    /// Still working, with its status (`Pending`, `Reasoning`, `Generating`).
+    Working(String),
+    /// Done: the address the image is downloaded from (signed, for an hour).
+    Ready(String),
+}
+
+/// What a poll of a submitted job says. A job that was refused or failed is an `Err`.
+pub fn parse_bfl_job(status: u16, body: &[u8]) -> Result<BflJob> {
+    let v: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    // A failed job can answer with an error status and its state in the body: read that first.
+    let Some(state) = v.get("status").and_then(Value::as_str) else { return Err(bfl_error(status, &v)) };
+    match state {
+        "Ready" => {
+            let sample = v.get("result").and_then(|r| r.get("sample")).and_then(Value::as_str).filter(|u| u.starts_with("https://") && u.len() <= 4096);
+            sample.map(|u| BflJob::Ready(u.to_string())).ok_or_else(|| Error::BadResponse("Black Forest Labs returned no image".into()))
+        }
+        "Request Moderated" => Err(Error::Server("Black Forest Labs refused the prompt or a picture sent with it (moderated). Sending it again unchanged will be refused again.".into())),
+        "Content Moderated" => Err(Error::Server("Black Forest Labs withheld the image it generated (moderated). Change the prompt and try again.".into())),
+        "Error" | "Failed" => {
+            let why = v.get("details").or_else(|| v.get("result")).filter(|d| !d.is_null()).map(|d| format!(": {}", clip(&d.to_string(), 300)));
+            Err(Error::Server(format!("Black Forest Labs could not generate the image{}", why.unwrap_or_default())))
+        }
+        "Task not found" => Err(Error::Server("Black Forest Labs lost track of the request. Generate again.".into())),
+        other => Ok(BflJob::Working(clip(other, 40))),
+    }
 }
 
 fn decode(b64: &str, who: &str) -> Result<Vec<u8>> {
@@ -169,10 +407,18 @@ fn decode(b64: &str, who: &str) -> Result<Vec<u8>> {
 /// The provider's error message, with a hint for the statuses users can fix.
 fn api_error(provider: Provider, status: u16, v: &Value) -> Error {
     let who = provider.label();
-    let msg = v.get("error").and_then(|e| e.get("message").and_then(Value::as_str).or_else(|| e.as_str())).map(|m| clip(m, 400));
+    let raw = v.get("error").and_then(|e| e.get("message").and_then(Value::as_str).or_else(|| e.as_str()));
+    // Google's free tier has no quota at all for the image models ("free_tier… limit: 0"): the
+    // key works, but its project has no billing. Waiting, as the message suggests, never helps.
+    if status == 429 && provider == Provider::Gemini && raw.is_some_and(|m| m.contains("free_tier")) {
+        return Error::Server(format!(
+            "{who}: this API key's Google Cloud project is on the free tier, which can't generate images. Set up billing for that project (Google AI Studio › API keys), or use a key from a project that has it. Credit on another project doesn't count."
+        ));
+    }
+    let msg = raw.map(|m| clip(m, 400));
     let hint = match status {
-        401 | 403 => " (check the API key in Preferences › Integrations)",
-        404 => " (check the model id in Preferences › Integrations)",
+        401 | 403 => " (check the API key in Preferences › Generative AI)",
+        404 => " (check the model id in Preferences › Generative AI)",
         429 => " (rate limit or quota reached)",
         _ => "",
     };
@@ -201,15 +447,28 @@ pub fn parse_openai(status: u16, body: &[u8]) -> Result<Vec<u8>> {
 
 /// [`parse_openai`], with the answer's `usage` object (the tokens billed) when it has one.
 pub fn parse_openai_with_usage(status: u16, body: &[u8]) -> Result<(Vec<u8>, Option<Value>)> {
-    let v = json_of(Provider::Openai, status, body)?;
+    parse_images(Provider::Openai, status, body)
+}
+
+/// The image bytes in an answer shaped like OpenAI's images API (`data[0].b64_json`), which
+/// xAI's and Meta's are too, and its `usage` object when it has one.
+pub fn parse_images(provider: Provider, status: u16, body: &[u8]) -> Result<(Vec<u8>, Option<Value>)> {
+    let who = provider.label();
+    let v = json_of(provider, status, body)?;
     let b64 = v
         .get("data")
         .and_then(Value::as_array)
         .and_then(|d| d.first())
         .and_then(|d| d.get("b64_json"))
         .and_then(Value::as_str)
-        .ok_or_else(|| Error::BadResponse("OpenAI returned no image".into()))?;
-    Ok((decode(b64, "OpenAI")?, v.get("usage").filter(|u| u.is_object()).cloned()))
+        .ok_or_else(|| Error::BadResponse(format!("{who} returned no image")))?;
+    Ok((decode(b64, who)?, v.get("usage").filter(|u| u.is_object()).cloned()))
+}
+
+/// What an xAI request cost in US dollars, from the `usage` of its answer.
+pub fn xai_cost(usage: &Value) -> Option<f64> {
+    let ticks = usage.get("cost_in_usd_ticks").and_then(Value::as_f64)?;
+    crate::pricing::reported(ticks, 1.0 / crate::pricing::XAI_TICKS_PER_USD)
 }
 
 /// The image bytes in a Gemini `generateContent` answer.
@@ -398,6 +657,12 @@ mod tests {
         assert!(e.contains("Incorrect API key") && e.contains("check the API key"), "{e}");
         assert!(parse_openai(500, b"<html>oops").unwrap_err().to_string().contains("HTTP 500"));
         assert!(parse_openai(429, b"").unwrap_err().to_string().contains("quota"));
+        // Gemini's free tier has no image quota: say that billing is missing, not "retry later".
+        let free = br#"{"error":{"code":429,"message":"You exceeded your current quota.\n* Quota exceeded for metric: generativelanguage.googleapis.com/generate_content_free_tier_requests, limit: 0, model: gemini-3-pro-image\nPlease retry in 14h53m34s.","status":"RESOURCE_EXHAUSTED"}}"#;
+        let e = parse_gemini(429, free).unwrap_err().to_string();
+        assert!(e.contains("free tier") && e.contains("billing") && !e.contains("retry"), "{e}");
+        let paid = br#"{"error":{"code":429,"message":"Quota exceeded for metric: generate_content_paid_tier_requests"}}"#;
+        assert!(parse_gemini(429, paid).unwrap_err().to_string().contains("rate limit or quota reached"));
         for bad in [
             &b"{}"[..],
             br#"{"data":[]}"#,
@@ -423,6 +688,181 @@ mod tests {
         assert!(parse_gemini(404, b"{}").unwrap_err().to_string().contains("model id"));
         for bad in [&b"{}"[..], br#"{"candidates":[]}"#, br#"{"candidates":[{"content":{"parts":7}}]}"#, b"[]", b"null"] {
             assert!(parse_gemini(200, bad).is_err(), "{}", String::from_utf8_lossy(bad));
+        }
+    }
+
+    fn edit_job(mask: &[u8], references: &[&[u8]]) -> Job {
+        let source = Source {
+            image: b"PICTURE".to_vec(),
+            mask: mask.to_vec(),
+            width: 1024,
+            height: 768,
+            strength: 1.0,
+            edit: mask.is_empty(),
+            references: references.iter().map(|r| r.to_vec()).collect(),
+        };
+        Job { source: Some(source), ..job(1024, 768, false) }
+    }
+
+    fn b64(bytes: &[u8]) -> String {
+        base64::engine::general_purpose::STANDARD.encode(bytes)
+    }
+
+    #[test]
+    fn xai_requests_are_json_with_a_ratio_and_pictures_as_data_urls() {
+        let mut m = Model::cloud_presets().into_iter().find(|m| m.provider == Provider::Xai).unwrap();
+        let r = xai_request(&m, &job(1920, 1080, true), " xai-key ", 90).unwrap();
+        assert_eq!((r.url.as_str(), r.timeout_seconds), (XAI_URL, 90));
+        assert!(r.headers.contains(&("Authorization".into(), "Bearer xai-key".into())) && !format!("{r:?}").contains("xai-key"));
+        let b = body(&r);
+        assert_eq!((b["model"].as_str(), b["aspect_ratio"].as_str(), b["resolution"].as_str()), (Some("grok-imagine-image-2.0"), Some("16:9"), Some("1k")));
+        assert_eq!((b["response_format"].as_str(), b["n"].as_u64()), (Some("b64_json"), Some(1)));
+        // `auto` is the API's default: only a chosen quality is sent. No seed, no transparency.
+        assert!(b.get("quality").is_none() && b.get("seed").is_none() && b.get("background").is_none() && b.get("image").is_none());
+        m.quality = "medium".into();
+        m.image_size = "4K".into();
+        let b = body(&xai_request(&m, &job(500, 1000, false), "k", 60).unwrap());
+        assert_eq!((b["quality"].as_str(), b["resolution"].as_str(), b["aspect_ratio"].as_str()), (Some("medium"), Some("2k"), Some("1:2")));
+        m.quality = "max".into();
+        assert!(body(&xai_request(&m, &job(64, 64, false), "k", 60).unwrap()).get("quality").is_none());
+        // An edit: the picture as a data URL in `image`, the answer in its shape.
+        let r = xai_request(&m, &edit_job(b"", &[]), "k", 60).unwrap();
+        let b = body(&r);
+        assert_eq!(r.url, XAI_EDIT_URL);
+        assert_eq!(b["image"], json!({"url": format!("data:image/png;base64,{}", b64(b"PICTURE")), "type": "image_url"}));
+        assert!(b.get("images").is_none() && b.get("aspect_ratio").is_none() && b["prompt"] == "a \"red\" frog");
+        // With references the pictures go in `images`, the one to edit first.
+        let b = body(&xai_request(&m, &edit_job(b"", &[b"SHIRT", b"HAT"]), "k", 60).unwrap());
+        let sent: Vec<&str> = b["images"].as_array().unwrap().iter().map(|i| i["url"].as_str().unwrap()).collect();
+        assert_eq!(sent.len(), 3);
+        assert!(sent[0].ends_with(&b64(b"PICTURE")) && sent[2].ends_with(&b64(b"HAT")) && b.get("image").is_none());
+        // It has no mask input: the mask goes as a second picture, with what it means.
+        let b = body(&xai_request(&m, &edit_job(b"MASK", &[b"IGNORED"]), "k", 60).unwrap());
+        assert_eq!(b["images"].as_array().unwrap().len(), 2);
+        assert!(b["prompt"].as_str().unwrap().starts_with("Edit the first image. Change only the region that is transparent"));
+        assert!(xai_request(&m, &job(64, 64, false), "", 60).is_err());
+    }
+
+    #[test]
+    fn meta_requests_give_muse_image_a_shape_and_its_pictures_as_data_urls() {
+        let m = Model::cloud_presets().into_iter().find(|m| m.provider == Provider::Meta).unwrap();
+        let r = meta_request(&m, &job(1920, 1080, true), "meta-key", 60).unwrap();
+        assert_eq!(r.url, META_URL);
+        assert!(r.headers.contains(&("Authorization".into(), "Bearer meta-key".into())));
+        let b = body(&r);
+        assert_eq!((b["model"].as_str(), b["output_format"].as_str(), b["response_format"].as_str()), (Some("muse-image-1.0"), Some("png"), Some("b64_json")));
+        let (w, h) = b["size"].as_str().unwrap().split_once('x').map(|(w, h)| (w.parse::<f64>().unwrap(), h.parse::<f64>().unwrap())).unwrap();
+        assert!((w / h - 16.0 / 9.0).abs() < 0.03, "{w}x{h}");
+        // An unknown field is an HTTP 400 there: no seed, quality or background.
+        assert_eq!(b.as_object().unwrap().len(), 6, "{b}");
+        // A shape beyond 16:1 is refused: a long strip is asked for at the limit.
+        for (w, h) in [(100_000, 10), (10, 100_000), (0, 0), (u32::MAX, 1)] {
+            let (rw, rh) = meta_size(w, h);
+            let aspect = f64::from(rw) / f64::from(rh);
+            assert!(rw > 0 && rh > 0 && (1.0 / 16.6..=16.6).contains(&aspect), "{w}x{h} -> {rw}x{rh}");
+        }
+        let r = meta_request(&m, &edit_job(b"", &[b"SHIRT"]), "k", 60).unwrap();
+        let b = body(&r);
+        assert_eq!(r.url, META_EDIT_URL);
+        assert_eq!(b["images"], json!([{"image_url": format!("data:image/png;base64,{}", b64(b"PICTURE"))}, {"image_url": format!("data:image/png;base64,{}", b64(b"SHIRT"))}]));
+        assert!(b.get("size").is_none() && b.get("mask").is_none());
+        // `mask` is an unsupported parameter: the mask is a second picture.
+        let b = body(&meta_request(&m, &edit_job(b"MASK", &[]), "k", 60).unwrap());
+        assert!(b["images"][1]["image_url"].as_str().unwrap().ends_with(&b64(b"MASK")) && b["prompt"].as_str().unwrap().contains("second image"));
+    }
+
+    #[test]
+    fn answers_shaped_like_openais_are_read_for_every_provider_that_sends_them() {
+        let ok = br#"{"data":[{"b64_json":"aGVsbG8=","mime_type":"image/jpeg"}],"usage":{"cost_in_usd_ticks":600000000}}"#;
+        let (bytes, usage) = parse_images(Provider::Xai, 200, ok).unwrap();
+        assert_eq!(bytes, b"hello");
+        // Six cents, in ticks of a ten-thousand-millionth of a dollar.
+        assert!((xai_cost(&usage.unwrap()).unwrap() - 0.06).abs() < 1e-12);
+        for junk in [json!({}), json!({"cost_in_usd_ticks": "x"}), json!({"cost_in_usd_ticks": -5}), json!({"cost_in_usd_ticks": 1e300}), json!(null)] {
+            assert_eq!(xai_cost(&junk), None, "{junk}");
+        }
+        assert_eq!(parse_images(Provider::Meta, 200, br#"{"data":[{"b64_json":"aGVsbG8="}],"background":"opaque"}"#).unwrap().0, b"hello");
+        // Errors name the provider, with the hint for a bad key.
+        let e = parse_images(Provider::Meta, 401, br#"{"error":{"message":"invalid key"}}"#).unwrap_err().to_string();
+        assert!(e.contains("Meta: invalid key") && e.contains("check the API key"), "{e}");
+        let e = parse_images(Provider::Xai, 200, br#"{"data":[{"url":"https://x"}]}"#).unwrap_err().to_string();
+        assert!(e.contains("xAI returned no image"), "{e}");
+        for junk in [&b""[..], b"not json", b"[]", br#"{"data":7}"#, br#"{"data":[{"b64_json":"!!"}]}"#] {
+            assert!(parse_images(Provider::Xai, 200, junk).is_err());
+            assert!(parse_images(Provider::Meta, 500, junk).is_err());
+        }
+    }
+
+    #[test]
+    fn black_forest_labs_jobs_are_submitted_to_the_models_endpoint_and_polled_at_its_own_hosts() {
+        let mut m = Model::cloud_presets().into_iter().find(|m| m.provider == Provider::Bfl).unwrap();
+        let r = bfl_request(&m, &job(1920, 1080, true), " bfl-key ", 600).unwrap();
+        assert_eq!(r.url, "https://api.bfl.ai/v1/flux-3-image");
+        assert!(r.headers.contains(&("x-key".into(), "bfl-key".into())) && !format!("{r:?}").contains("bfl-key"));
+        // The schema refuses unknown fields: a prompt, a shape and a size tier, nothing else.
+        assert_eq!(body(&r), json!({"prompt": "a \"red\" frog", "aspect_ratio": "16:9", "resolution": "1k"}));
+        m.image_size = "4K".into();
+        let b = body(&bfl_request(&m, &edit_job(b"", &[b"SHIRT"]), "k", 60).unwrap());
+        assert_eq!(b, json!({"prompt": "a \"red\" frog", "resolution": "4k", "images": [b64(b"PICTURE"), b64(b"SHIRT")]}));
+        let b = body(&bfl_request(&m, &edit_job(b"MASK", &[]), "k", 60).unwrap());
+        assert_eq!(b["images"], json!([b64(b"PICTURE"), b64(b"MASK")]));
+        // An older endpoint takes pixels and numbered pictures.
+        m.api_model = "flux-2-pro".into();
+        let r = bfl_request(&m, &edit_job(b"", &[b"SHIRT"]), "k", 60).unwrap();
+        assert_eq!(r.url, "https://api.bfl.ai/v1/flux-2-pro");
+        assert_eq!(body(&r), json!({"prompt": "a \"red\" frog", "width": 1024, "height": 768, "input_image": b64(b"PICTURE"), "input_image_2": b64(b"SHIRT")}));
+        let b = body(&bfl_request(&m, &job(1920, 1080, false), "k", 60).unwrap());
+        assert!(b["width"].as_u64().unwrap().is_multiple_of(16) && b["height"].as_u64().unwrap().is_multiple_of(16) && b.get("aspect_ratio").is_none());
+        // The id is part of the address: nothing that could lead elsewhere.
+        for id in ["", "../x", "flux 3", "a/b", "x?y=1", "x#y"] {
+            m.api_model = id.into();
+            assert!(bfl_request(&m, &job(64, 64, false), "k", 60).is_err(), "{id}");
+        }
+
+        let (url, cost) = parse_bfl_submitted(200, br#"{"id":"t1","polling_url":"https://api.eu2.bfl.ai/v1/get_result?id=t1","cost":4.8,"output_mp":1.0}"#).unwrap();
+        assert_eq!(url, "https://api.eu2.bfl.ai/v1/get_result?id=t1");
+        assert!((cost.unwrap() - 0.048).abs() < 1e-12);
+        assert_eq!(parse_bfl_submitted(200, br#"{"id":"t1","polling_url":"https://api.bfl.ai/x","cost":null}"#).unwrap().1, None);
+        // The key is sent to Black Forest Labs' own hosts only, whatever the answer says.
+        let poll = bfl_poll_request(&url, " k ").unwrap();
+        assert_eq!((poll.method, poll.url.as_str()), (crate::http::Method::Get, url.as_str()));
+        assert!(poll.headers.contains(&("x-key".into(), "k".into())));
+        for evil in [
+            "http://api.bfl.ai/v1/get_result",
+            "https://evil.example/get_result?x=.bfl.ai",
+            "https://api.bfl.ai.evil.example/x",
+            "https://api.bfl.ai@evil.example/x",
+            "https://evilbfl.ai/x",
+            "ftp://api.bfl.ai/x",
+            "",
+        ] {
+            assert!(bfl_poll_request(evil, "k").is_err(), "{evil}");
+        }
+        assert!(bfl_poll_request("https://bfl.ai/x", "k").is_ok() && bfl_poll_request("https://api.us1.bfl.ai:443/x?id=1", "k").is_ok());
+
+        // Errors say what the user can do about them.
+        let e = parse_bfl_submitted(402, br#"{"detail":"Insufficient credits"}"#).unwrap_err().to_string();
+        assert!(e.contains("Insufficient credits") && e.contains("out of credits"), "{e}");
+        let e = parse_bfl_submitted(422, br#"{"detail":[{"loc":["body","seed"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}]}"#).unwrap_err().to_string();
+        assert!(e.contains("Extra inputs are not permitted"), "{e}");
+        assert!(parse_bfl_submitted(404, b"<html>").unwrap_err().to_string().contains("name of the endpoint"));
+        assert!(parse_bfl_submitted(200, br#"{"id":"t1"}"#).is_err() && parse_bfl_submitted(200, b"").is_err());
+
+        // Polling: working until Ready, with the address of the image; refusals and failures are errors.
+        for state in ["Pending", "Reasoning", "Generating", "Something New"] {
+            assert_eq!(parse_bfl_job(200, format!(r#"{{"status":"{state}"}}"#).as_bytes()).unwrap(), BflJob::Working(state.into()));
+        }
+        let ready = parse_bfl_job(200, br#"{"status":"Ready","result":{"sample":"https://delivery-eu1.bfl.ai/results/a.png?sig=1","duration":4.2}}"#).unwrap();
+        assert_eq!(ready, BflJob::Ready("https://delivery-eu1.bfl.ai/results/a.png?sig=1".into()));
+        for bad in [r#"{"status":"Ready"}"#, r#"{"status":"Ready","result":{"sample":"http://plain/a.png"}}"#, r#"{"status":"Ready","result":{"sample":7}}"#] {
+            assert!(parse_bfl_job(200, bad.as_bytes()).is_err(), "{bad}");
+        }
+        assert!(parse_bfl_job(200, br#"{"status":"Request Moderated"}"#).unwrap_err().to_string().contains("refused the prompt"));
+        assert!(parse_bfl_job(200, br#"{"status":"Content Moderated"}"#).unwrap_err().to_string().contains("withheld"));
+        assert!(parse_bfl_job(503, br#"{"status":"Error","details":{"reason":"overloaded"}}"#).unwrap_err().to_string().contains("overloaded"));
+        assert!(parse_bfl_job(200, br#"{"status":"Task not found"}"#).unwrap_err().to_string().contains("Generate again"));
+        for junk in [&b""[..], b"null", b"[]", br#"{"status":7}"#, br#"{"detail":"Not authenticated"}"#] {
+            assert!(parse_bfl_job(403, junk).is_err());
         }
     }
 }

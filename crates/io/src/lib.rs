@@ -40,6 +40,7 @@ pub mod comps_map;
 pub mod effects_map;
 pub mod exr_parts;
 mod flat;
+pub mod generation_map;
 mod gradient_bake;
 pub mod linked;
 mod multichannel_map;

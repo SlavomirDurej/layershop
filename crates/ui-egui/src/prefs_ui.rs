@@ -916,9 +916,15 @@ pub fn width(fields: &Map<String, Value>, available: f32) -> Option<f32> {
     }
 }
 
+/// The sections the dialog lists: the preferences' own, then Generative AI, which edits
+/// `integrations.ai` with its own editor ([`crate::ai_gen_ui::prefs_section`]).
+fn dialog_sections() -> impl Iterator<Item = (&'static str, &'static str)> {
+    SECTIONS.iter().copied().chain(std::iter::once(prefs::GENERATIVE_AI))
+}
+
 /// Open Edit › Preferences on `section`.
 pub fn open_preferences(app: &mut PhotocraftApp, section: &str) -> u64 {
-    let section = if SECTIONS.iter().any(|(id, _)| *id == section) { section } else { "general" };
+    let section = if dialog_sections().any(|(id, _)| id == section) { section } else { "general" };
     let working = preference_values(app.session.prefs());
     let order = field_order(app.session.prefs(), &working);
     let id = open_kind(app, "prefs", "Preferences", json!({"section": section, "values": working, "__order": order}));
@@ -1092,9 +1098,7 @@ fn preference_matches(section: &str, key: &str, query: &str) -> bool {
 
 fn preference_sections(values: &Value, search: &str) -> Vec<(&'static str, &'static str)> {
     let query = search.trim().to_lowercase();
-    SECTIONS
-        .iter()
-        .copied()
+    dialog_sections()
         .filter(|(id, title)| {
             query.is_empty()
                 || title.to_lowercase().contains(&query)
@@ -1125,7 +1129,7 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui
     ui.add_space(6.0);
     ui.horizontal_top(|ui| {
         // Section list.
-        ui.vertical(|ui| {
+        let list = ui.vertical(|ui| {
             ui.set_width(170.0);
             if found.is_empty() {
                 ui.label(RichText::new(tl!("No matching settings")).color(t.text_dim));
@@ -1159,19 +1163,29 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui
                 }
             }
         });
+        let list_height = list.response.rect.height();
         let content_height = (ui.ctx().content_rect().height() - 240.0).clamp(240.0, 680.0);
         crate::widgets::vline(ui, content_height);
         ui.vertical(|ui| {
             ui.set_width((ui.available_width() - 12.0).max(340.0));
-            let title = SECTIONS.iter().find(|(id, _)| *id == section).map_or("General", |(_, t)| *t);
+            let title = dialog_sections().find(|(id, _)| *id == section).map_or("General", |(_, t)| t);
             ui.label(RichText::new(tl!(&title)).font(crate::theme::semibold(14.0)).color(t.text));
             let show_all = search.trim().is_empty()
                 || title.to_lowercase().contains(&search.trim().to_lowercase())
                 || tl!(&title).to_lowercase().contains(&search.trim().to_lowercase());
             let filter = if show_all { "" } else { search.trim() };
             ui.add_space(6.0);
-            // Integrations keeps its own scroll position: its page is far longer than the others.
-            egui::ScrollArea::vertical().max_height(content_height - 30.0).id_salt(("prefs-scroll", section == "integrations")).show(ui, |ui| {
+            // Generative AI lays its own page out in the height there is: a list of models and
+            // the selected one's settings side by side, each scrolling by itself.
+            if section == prefs::GENERATIVE_AI.0 {
+                if let Some(obj) = values.get_mut("integrations").and_then(Value::as_object_mut) {
+                    // In a short window the section list is taller than the settings beside it:
+                    // the page takes that height too rather than leave it empty.
+                    crate::ai_gen_ui::prefs_section(ui, obj, f, content_height.max(list_height) - 30.0);
+                }
+                return;
+            }
+            egui::ScrollArea::vertical().max_height(content_height - 30.0).id_salt("prefs-scroll").show(ui, |ui| {
                 let order: Vec<String> =
                     f.get("__order").and_then(|o| o.get(&section)).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 if !has_visible_fields(&values, &section) {
@@ -1188,15 +1202,10 @@ fn prefs_body(ui: &mut egui::Ui, f: &mut Map<String, Value>, system: Option<egui
                     if section == "performance" {
                         gpu_status_rows(ui, f.get("__gpuInfo"), obj);
                     }
-                    if section == "integrations" {
-                        crate::ai_gen_ui::prefs_section(ui, obj, f);
-                    }
                     ui.add_space(8.0);
                 }
-                // Integrations holds the user's model list: no one-click reset for that.
                 if search.trim().is_empty()
                     && has_visible_fields(&values, &section)
-                    && section != "integrations"
                     && crate::widgets::secondary_button(ui, tl!("Reset Section"), 110.0).clicked()
                     && let Some(def) = prefs::Preferences::default().get(&section)
                 {
@@ -1268,7 +1277,16 @@ fn rendering_mode_value(obj: &Map<String, Value>) -> String {
 
 /// Does `section` have any setting the dialog shows (see [`prefs::HIDDEN_UNTIL_IMPLEMENTED`])?
 fn has_visible_fields(values: &Value, section: &str) -> bool {
-    values.get(section).and_then(Value::as_object).is_some_and(|o| o.keys().any(|k| !prefs::is_hidden(&format!("{section}.{k}"))))
+    // Generative AI is a view of `integrations.ai`, which Integrations itself doesn't show.
+    if section == prefs::GENERATIVE_AI.0 {
+        return values.pointer("/integrations/ai").is_some_and(Value::is_object);
+    }
+    values.get(section).and_then(Value::as_object).is_some_and(|o| {
+        o.keys().any(|k| {
+            let path = format!("{section}.{k}");
+            !prefs::is_hidden(&path) && path != prefs::GENERATIVE_AI_PATH
+        })
+    })
 }
 
 /// JPEG and WebP have independent settings; unrelated format controls stay out of view.
@@ -2026,7 +2044,9 @@ mod tests {
         assert!(contains("performance", "performance"));
         assert!(contains("interface.uiScale", "interface"));
         assert!(preference_sections(&values, "this setting does not exist").is_empty());
-        assert_eq!(preference_sections(&values, "").len(), SECTIONS.len());
+        // Every section of the preferences, and Generative AI.
+        assert_eq!(preference_sections(&values, "").len(), SECTIONS.len() + 1);
+        assert!(contains("generative", prefs::GENERATIVE_AI.0) && !contains("generative", "integrations"));
     }
 
     #[test]
@@ -2653,8 +2673,13 @@ mod tests {
         let values = prefs::Preferences::default().to_json();
         assert!(has_visible_fields(&values, "general"));
         assert!(has_visible_fields(&values, "fileHandling"));
-        // Every Scratch Disks setting is still unimplemented.
-        assert!(!has_visible_fields(&values, "scratchDisks"));
+        // Every setting of these sections is still unimplemented; the models under Integrations
+        // are edited in Generative AI.
+        for section in ["integrations", "scratchDisks"] {
+            assert!(!has_visible_fields(&values, section), "{section}");
+        }
+        assert!(has_visible_fields(&values, prefs::GENERATIVE_AI.0));
+        assert!(!has_visible_fields(&json!({"integrations": {}}), prefs::GENERATIVE_AI.0));
         // "Fill new type layers with placeholder text" and "Use Escape to Commit" are live; other Type rows stay hidden.
         assert!(has_visible_fields(&values, "type"));
         assert!(!prefs::is_hidden("type.fillNewTypeLayersWithPlaceholder"));

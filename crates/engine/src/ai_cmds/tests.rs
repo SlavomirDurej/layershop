@@ -184,6 +184,7 @@ fn bad_params_and_missing_setup_are_errors_not_panics() {
     let e = none.execute("ai.generate", json!({"prompt": "x"})).unwrap_err().to_string();
     assert!(e.contains("desktop app"), "{e}");
     none.ai.transport = Some(fake.clone());
+    none.execute("prefs.set", json!({"path": "integrations.ai.models", "value": []})).unwrap();
     let e = none.execute("ai.generate", json!({"prompt": "x"})).unwrap_err().to_string();
     assert!(e.contains("no AI model is set up"), "{e}");
 }
@@ -209,6 +210,132 @@ fn a_server_that_returns_garbage_is_an_error_and_the_document_is_untouched() {
     let e = s.execute("ai.generate", json!({"prompt": "x"})).unwrap_err().to_string();
     assert!(e.contains("not an image"), "{e}");
     assert_eq!(layer_count(&s), 1);
+}
+
+/// Ideogram 4's refusal as it measured: flat grey 109 with a band of light type over about 1.5%.
+fn refusal_png(w: u32, h: u32) -> Vec<u8> {
+    let mut rgba = [109u8, 109, 109, 255].repeat((w * h) as usize);
+    for y in (h * 9 / 20)..(h * 11 / 20) {
+        for x in (w / 7)..(w * 6 / 7 / 2 + w / 7) {
+            if x % 3 != 0 {
+                rgba[((y * w + x) * 4) as usize..][..3].copy_from_slice(&[230, 230, 230]);
+            }
+        }
+    }
+    photocraft_codecs::encode(&Image::from_u8(w, h, ChannelLayout::Rgba, rgba).unwrap(), Format::Png, &EncodeOptions::default()).unwrap()
+}
+
+#[test]
+fn the_refusal_picture_is_told_from_real_images() {
+    assert!(is_refusal_picture(&refusal_png(160, 90)));
+    // A colourful, busy picture is not.
+    let busy: Vec<u8> = (0..160 * 90u32).flat_map(|i| [(i * 7 % 251) as u8, (i * 13 % 241) as u8, (i * 29 % 239) as u8, 255]).collect();
+    let png = |rgba: Vec<u8>| {
+        photocraft_codecs::encode(&Image::from_u8(160, 90, ChannelLayout::Rgba, rgba).unwrap(), Format::Png, &EncodeOptions::default()).unwrap()
+    };
+    assert!(!is_refusal_picture(&png(busy)));
+    // Plain grey with nothing written on it is a grey image, not a refusal.
+    assert!(!is_refusal_picture(&png([109, 109, 109, 255].repeat(160 * 90))));
+    // Flat, but not that grey, or not grey at all.
+    assert!(!is_refusal_picture(&png([200, 200, 200, 255].repeat(160 * 90))));
+    assert!(!is_refusal_picture(&png([109, 40, 200, 255].repeat(160 * 90))));
+    // Not an image, or an empty one.
+    assert!(!is_refusal_picture(b""));
+    assert!(!is_refusal_picture(b"\x89PNG\r\n\x1a\n this is not a png"));
+}
+
+/// An Ideogram 4 that draws its refusal for the first `refusals` images it is asked for, then a
+/// green one.
+struct Refuses {
+    inner: Arc<FakeComfy>,
+    refusal: Vec<u8>,
+    refusals: usize,
+    drawn: Mutex<usize>,
+}
+
+impl Transport for Refuses {
+    fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+        let mut response = self.inner.send(r)?;
+        if r.url.contains("/view?") {
+            let mut drawn = self.drawn.lock().unwrap();
+            if *drawn < self.refusals {
+                response.body = self.refusal.clone();
+            }
+            *drawn += 1;
+        }
+        Ok(response)
+    }
+}
+
+fn ideogram_session(refusals: usize) -> (Session, Arc<Refuses>) {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let transport = Arc::new(Refuses { inner: fake, refusal: refusal_png(64, 36), refusals, drawn: Mutex::new(0) });
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let model = serde_json::to_value(Model { id: "ideo".into(), ..Family::Ideogram4.preset() }).unwrap();
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
+    s.ai.transport = Some(transport.clone());
+    (s, transport)
+}
+
+fn queued_seeds(t: &Refuses) -> Vec<u64> {
+    let seen = t.inner.seen.lock().unwrap();
+    seen.iter()
+        .filter(|(u, _)| u.ends_with("/prompt"))
+        .map(|(_, b)| {
+            let v: Value = serde_json::from_slice(b).unwrap();
+            // Ideogram 4 seeds a RandomNoise node, the KSampler graphs a `seed`.
+            v["prompt"]
+                .as_object()
+                .unwrap()
+                .values()
+                .find_map(|n| n["inputs"]["noise_seed"].as_u64().or_else(|| n["inputs"]["seed"].as_u64()))
+                .expect("no seed in the workflow")
+        })
+        .collect()
+}
+
+#[test]
+fn a_refused_seed_is_replaced_by_a_new_one_and_the_refusal_never_reaches_a_layer() {
+    let (mut s, t) = ideogram_session(2);
+    let r = s.execute("ai.generate", json!({"prompt": "a coffee shop"})).unwrap();
+    let seeds = queued_seeds(&t);
+    assert_eq!(seeds.len(), 3, "two refusals, then the image");
+    assert!(seeds[0] != seeds[1] && seeds[1] != seeds[2], "{seeds:?}");
+    // The layer remembers the seed that drew its image, so "render this one again" reproduces it.
+    assert_eq!(r["seed"], seeds[2]);
+    assert_eq!(layer_count(&s), 2);
+    let p = px(&mut s, 32, 24);
+    assert!(p[1] > 0.95 && p[0] < 0.05, "the green image, not the grey refusal: {p:?}");
+}
+
+#[test]
+fn a_model_that_keeps_refusing_is_an_error_after_a_few_seeds_and_no_layer_is_added() {
+    let (mut s, t) = ideogram_session(usize::MAX);
+    let e = s.execute("ai.generate", json!({"prompt": "a coffee shop"})).unwrap_err().to_string();
+    assert!(e.contains("Image blocked by safety filter") && e.contains("on 4 seeds in a row") && e.contains("not a PhotoCraft or ComfyUI filter"), "{e}");
+    assert_eq!(queued_seeds(&t).len(), 4, "the first render and three more");
+    assert_eq!(layer_count(&s), 1);
+}
+
+#[test]
+fn a_seed_the_user_chose_is_not_replaced() {
+    let (mut s, t) = ideogram_session(usize::MAX);
+    let e = s.execute("ai.generate", json!({"prompt": "a coffee shop", "seed": 5})).unwrap_err().to_string();
+    assert!(e.contains("at seed 5"), "{e}");
+    assert_eq!(queued_seeds(&t), vec![5]);
+    assert_eq!(layer_count(&s), 1);
+}
+
+#[test]
+fn other_models_are_not_asked_to_render_a_grey_picture_again() {
+    // Z-Image has no such refusal: a flat grey picture with light marks is simply its answer.
+    let fake = FakeComfy::new(32, 32, [0, 0, 0, 255]);
+    let mut s = session(&fake);
+    let t = Arc::new(Refuses { inner: fake, refusal: refusal_png(64, 36), refusals: usize::MAX, drawn: Mutex::new(0) });
+    s.ai.transport = Some(t.clone());
+    s.execute("ai.generate", json!({"prompt": "a grey wall with chalk marks"})).unwrap();
+    assert_eq!(queued_seeds(&t).len(), 1);
 }
 
 #[test]
@@ -280,7 +407,11 @@ fn settings_survive_a_preferences_round_trip() {
     assert_eq!(again.prefs().integrations.ai, s.prefs().integrations.ai);
     assert_eq!(again.prefs().integrations.ai.models[0].unet, "z_image_turbo_bf16.safetensors");
     // Preferences written before this section existed still load.
+    // They get the models a new installation lists.
     again.load_prefs_json(r#"{"integrations":{"allowAgentControl":false}}"#).unwrap();
+    assert_eq!(again.prefs().integrations.ai.models, Model::defaults());
+    // A list the user emptied stays empty.
+    again.load_prefs_json(r#"{"integrations":{"ai":{"models":[]}}}"#).unwrap();
     assert!(again.prefs().integrations.ai.models.is_empty());
     assert_eq!(layer_name(&Family::ZImage.preset(), &"word ".repeat(40)).chars().count(), "[z_image_turbo] ".len() + 41);
 }
@@ -464,6 +595,7 @@ fn layers_are_named_after_the_model_and_the_prompt() {
         ("z image turbo bf16", "z_image_turbo"),
         ("qwen image 2512 fp8 e4m3fn", "qwen_image_2512"),
         ("qwen image 2.1 int8 convrot", "qwen_image_2.1"),
+        ("ming image 0.1 design int8 convrot", "ming_image_0.1_design"),
         ("flux2 dev fp8mixed", "flux2_dev"),
         ("ltx 2.3 22b dev Q4_K_M", "ltx_2.3_dev_k_m"),
         ("GPT Image 2.5 Sunburst", "gpt_image_2.5_sunburst"),
@@ -781,6 +913,62 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
     assert_eq!(made(&s).unwrap().prompt, "a pond");
 }
 
+/// [`session`] with Ming Image as its one model.
+fn ming_session(fake: &Arc<FakeComfy>) -> Session {
+    let mut s = session(fake);
+    let model = serde_json::to_value(Model { id: "ming".into(), ..Family::MingImage.preset() }).unwrap();
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
+    s
+}
+
+/// Ming Image is the local model that renders transparency: it is asked for it in its own words,
+/// at its reference size, and the alpha it answers with reaches the layer. Given a picture it is
+/// not asked (it answers opaque), and works at half that size.
+#[test]
+fn ming_image_generates_transparency_and_edits_at_half_its_size() {
+    // A server that answers half transparent.
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 128]);
+    let mut s = ming_session(&fake);
+    let listed = s.execute("ai.models", json!({})).unwrap();
+    let m = &listed["models"][0];
+    assert_eq!(
+        (&m["alpha"], &m["generate"], &m["edit"], &m["inpaint"], &m["references"]),
+        (&json!(true), &json!(true), &json!(true), &json!(false), &json!(3))
+    );
+    let r = s.execute("ai.generate", json!({"prompt": "a logo", "alpha": true, "seed": 3})).unwrap();
+    // The 64 x 48 canvas at two megapixels.
+    assert_eq!((r["mode"].as_str(), &r["renderSize"]), (Some("txt2img"), &json!([1632, 1232])));
+    let queued = fake.queued().to_string();
+    assert!(
+        queued.contains("RGBA, 4-channel, transparent background, a logo") && queued.contains("BasicGuider") && !queued.contains("SplitImageWithAlpha"),
+        "{queued}"
+    );
+    // Green at half strength over the white background: the layer kept the alpha.
+    let p = px(&mut s, 30, 20);
+    assert!((0.2..0.8).contains(&p[0]) && p[1] > 0.95, "{p:?}");
+    // Without the Alpha Channel box the prompt is the user's, and the workflow drops the alpha.
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = ming_session(&fake);
+    s.execute("ai.generate", json!({"prompt": "a logo", "seed": 3})).unwrap();
+    let queued = fake.queued().to_string();
+    assert!(queued.contains("\"text\":\"a logo\"") && queued.contains("SplitImageWithAlpha"), "{queued}");
+
+    // An edit: the picture at two megapixels, the edit template's encoder and sampler, no phrase.
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = ming_session(&fake);
+    let r = s.execute("ai.generate", json!({"prompt": "make it green", "mode": "imgEdit", "alpha": true, "seed": 3})).unwrap();
+    assert_eq!((r["mode"].as_str(), &r["bounds"], &r["renderSize"]), (Some("imgEdit"), &json!([0, 0, 64, 48]), &json!([1632, 1232])));
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    assert_eq!((image.width(), image.height()), (1632, 1232));
+    let queued = fake.queued().to_string();
+    for want in ["TextEncodeMingImageEdit", "SamplerLCM", "SplitImageWithAlpha", "make it green"] {
+        assert!(queued.contains(want), "missing {want}: {queued}");
+    }
+    assert!(!queued.contains("RGBA, 4-channel") && !queued.contains("KSamplerSelect"), "{queued}");
+    let p = px(&mut s, 30, 20);
+    assert!(p[0] < 0.05 && p[1] > 0.95, "{p:?}");
+}
+
 /// [`session`] with the models an edit is tried with: Qwen Image 2.1 (the default), Qwen Image
 /// Edit, and Z-Image, which can't edit.
 fn edit_session(fake: &Arc<FakeComfy>) -> Session {
@@ -839,6 +1027,45 @@ fn an_edit_with_a_selection_is_cropped_edited_and_composited() {
     assert_eq!(r["bounds"], json!([16, 12, 16, 16]));
     let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "source": {"layer": background}, "rect": [0, 0, 32, 16]})).unwrap();
     assert_eq!((&r["bounds"], &r["renderSize"]), (&json!([0, 0, 32, 16]), &json!([1408, 704])));
+}
+
+#[test]
+fn a_painted_mask_scopes_an_edit_like_the_selection_it_becomes() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    let before = layer_count(&s);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    // The area is painted instead of selected (`ai.mask`). An empty mask scopes nothing.
+    s.execute("ai.mask", json!({"paint": true})).unwrap();
+    assert_eq!(edit_plan(&s, None, 0.0, None).unwrap().area, Rect::new(0, 0, 64, 48));
+    s.execute("paint.stroke", json!({"points": [[20, 20], [40, 20]], "size": 12, "hardness": 1.0, "color": "#ffffff", "target": "quickMask"})).unwrap();
+    // While it is painted, the plan already counts it as the selection it will become.
+    let painted = inpaint_blocked(&s).unwrap();
+    assert_eq!(edit_plan(&s, None, 0.0, None).unwrap().area, painted);
+    // Generating leaves the mode: the mask is the selection, the edit's area and the layer's mask.
+    let r = s.execute("ai.generate", json!({"prompt": "make it green", "mode": "imgEdit", "context": 0})).unwrap();
+    assert_eq!((r["mode"].as_str(), &r["bounds"]), (Some("imgEdit"), &json!([painted.x0, painted.y0, painted.width(), painted.height()])));
+    assert_eq!(layer_count(&s), before + 1);
+    {
+        let d = s.active().unwrap();
+        assert!(d.doc.quick_mask.is_none() && !mask_painting(&s));
+        assert_eq!(d.doc.selection.as_ref().unwrap().content_bounds(), painted);
+        let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+        assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), painted);
+    }
+    // An edit that can't run keeps the mask being painted.
+    s.execute("ai.mask", json!({"paint": true})).unwrap();
+    for p in [json!({"source": {"layer": 999_999}}), json!({"rect": [900, 900, 8, 8]}), json!({"rect": "all"})] {
+        let mut params = json!({"prompt": "x", "mode": "imgEdit"});
+        params.as_object_mut().unwrap().extend(p.as_object().unwrap().clone());
+        assert!(s.execute("ai.generate", params).is_err() && mask_painting(&s), "{p}");
+    }
+    // A mask emptied again: no selection, and the whole picture is edited.
+    s.execute("ai.mask", json!({"clear": true})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "source": {"layer": background}})).unwrap();
+    assert_eq!(r["bounds"], json!([0, 0, 64, 48]));
+    let d = s.active().unwrap();
+    assert!(d.doc.selection.is_none() && d.doc.quick_mask.is_none());
 }
 
 #[test]

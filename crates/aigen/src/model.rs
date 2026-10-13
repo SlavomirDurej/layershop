@@ -13,16 +13,25 @@ pub enum Provider {
     Openai,
     /// Google's Gemini image API (Nano Banana); needs an API key.
     Gemini,
+    /// xAI's image API (Grok Imagine); needs an API key.
+    Xai,
+    /// Meta's Model API (Muse Image); needs an API key.
+    Meta,
+    /// Black Forest Labs' API (FLUX): a job is submitted, then polled; needs an API key.
+    Bfl,
 }
 
 impl Provider {
-    pub const ALL: [Provider; 3] = [Provider::Comfy, Provider::Openai, Provider::Gemini];
+    pub const ALL: [Provider; 6] = [Provider::Comfy, Provider::Openai, Provider::Gemini, Provider::Xai, Provider::Meta, Provider::Bfl];
 
     pub fn key(self) -> &'static str {
         match self {
             Provider::Comfy => "comfy",
             Provider::Openai => "openai",
             Provider::Gemini => "gemini",
+            Provider::Xai => "xai",
+            Provider::Meta => "meta",
+            Provider::Bfl => "bfl",
         }
     }
 
@@ -31,7 +40,15 @@ impl Provider {
             Provider::Comfy => "Local (ComfyUI)",
             Provider::Openai => "OpenAI",
             Provider::Gemini => "Google Gemini",
+            Provider::Xai => "xAI",
+            Provider::Meta => "Meta",
+            Provider::Bfl => "Black Forest Labs",
         }
+    }
+
+    /// The cloud providers' keys, as `ai.setKey` takes them: `openai|gemini|…`.
+    pub fn cloud_keys() -> String {
+        Provider::ALL.into_iter().filter(|p| !p.is_local()).map(Provider::key).collect::<Vec<_>>().join("|")
     }
 
     /// Runs on this machine, without an API key.
@@ -45,6 +62,9 @@ impl Provider {
             Provider::Comfy => None,
             Provider::Openai => Some("OPENAI_API_KEY"),
             Provider::Gemini => Some("GEMINI_API_KEY"),
+            Provider::Xai => Some("XAI_API_KEY"),
+            Provider::Meta => Some("META_API_KEY"),
+            Provider::Bfl => Some("BFL_API_KEY"),
         }
     }
 }
@@ -65,6 +85,9 @@ pub enum Family {
     QwenImage,
     /// Qwen Image 2.1: a different text encoder, VAE and prompt node from Qwen Image.
     QwenImage21,
+    /// Ming Image (0.1 Design): a model for layouts with text (pages, posters, UI). It generates
+    /// and edits with the same weights, and can render a transparent background.
+    MingImage,
     /// FLUX.1 Fill (Fill Dev, OneReward): BFL's inpainting model. It is given the picture and
     /// the mask as conditioning, so it knows where it paints; it can't generate from text alone.
     Flux1Fill,
@@ -81,7 +104,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 15] = [
+    pub const ALL: [Family; 16] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux2,
@@ -92,6 +115,7 @@ impl Family {
         Family::Ideogram4,
         Family::QwenImage,
         Family::QwenImage21,
+        Family::MingImage,
         Family::Flux1Fill,
         Family::QwenInpaint,
         Family::QwenEdit,
@@ -111,6 +135,7 @@ impl Family {
             Family::Ideogram4 => "ideogram4",
             Family::QwenImage => "qwenImage",
             Family::QwenImage21 => "qwenImage21",
+            Family::MingImage => "mingImage",
             Family::Flux1Fill => "flux1Fill",
             Family::QwenInpaint => "qwenInpaint",
             Family::QwenEdit => "qwenEdit",
@@ -135,6 +160,7 @@ impl Family {
             Family::Ideogram4 => "Ideogram 4",
             Family::QwenImage => "Qwen Image",
             Family::QwenImage21 => "Qwen Image 2.1",
+            Family::MingImage => "Ming Image",
             Family::Flux1Fill => "FLUX.1 Fill (inpainting)",
             Family::QwenInpaint => "Qwen Image + InstantX ControlNet (inpainting)",
             Family::QwenEdit => "Qwen Image Edit (editing)",
@@ -169,15 +195,48 @@ impl Family {
         if matches!(self, Family::QwenImage21 | Family::HidreamO1) { 32 } else { 16 }
     }
 
+    /// The size a text-to-image for a `width` × `height` selection is rendered at:
+    /// [`crate::size::render_size`], but HiDream O1 only does well at the sizes it was trained
+    /// at, so it gets the one closest in shape whatever `megapixels` says (0 still renders at
+    /// the selection's own size: the user's to choose).
+    pub fn render_size(self, width: u32, height: u32, megapixels: f64) -> (u32, u32) {
+        use crate::size::{HIDREAM_O1_SIZES, nearest_ratio, render_size};
+        if self == Family::HidreamO1
+            && megapixels.is_finite()
+            && megapixels > 0.0
+            && let Some(size) = nearest_ratio(width, height, &HIDREAM_O1_SIZES)
+        {
+            return size;
+        }
+        render_size(width, height, megapixels, self.size_multiple())
+    }
+
+    /// The megapixels a picture this family is given (to edit, restyle or inpaint) is worked on
+    /// at, when it renders text to image at `megapixels`. Ming Image can be raised to four, but
+    /// a picture doubles what it attends to: on an RTX 4090 an edit at four megapixels took 45 s
+    /// against 17 s at two, and one stalled for ten minutes encoding the picture beside the
+    /// 18 GB text encoder. 0 (the selection's own size) is the user's to choose.
+    pub fn source_megapixels(self, megapixels: f64) -> f64 {
+        if self == Family::MingImage && megapixels > 2.0 { 2.0 } else { megapixels }
+    }
+
     /// Has a distilled-guidance control (FLUX), separate from CFG.
     pub fn has_guidance(self) -> bool {
         matches!(self, Family::Flux1 | Family::Flux2 | Family::Flux1Fill)
     }
 
+    /// Answers a prompt its training flags with a picture of the words "Image blocked by safety
+    /// filter" instead of an image. Ideogram 4 does: the words are drawn by the weights (the
+    /// graph has no filter node), and a seed that draws them for a harmless prompt draws a
+    /// normal image on the next. The engine recognises the picture and tries another seed.
+    pub fn draws_refusal(self) -> bool {
+        self == Family::Ideogram4
+    }
+
     /// A dedicated inpainting model: it is given the picture and the mask as conditioning, so it
     /// paints what belongs inside the mask, and it can't generate from a prompt alone. These are
     /// the models of ComfyUI's own inpainting templates; the settings list them on their own page
-    /// and the panel offers them on the InPaint tab only.
+    /// and the panel offers them on the Edit tab only.
     pub fn inpaint_only(self) -> bool {
         matches!(self, Family::Flux1Fill | Family::QwenInpaint)
     }
@@ -192,16 +251,16 @@ impl Family {
     }
 
     /// A dedicated edit model: it changes a picture it is given, following an instruction, and
-    /// can't generate from a prompt alone. The panel offers it on the ImgEdit tab only.
+    /// can't generate from a prompt alone. The panel offers it on the Edit tab only.
     pub fn edit_only(self) -> bool {
         self == Family::QwenEdit
     }
 
-    /// Edits a picture following an instruction (the panel's ImgEdit tab): the edit models, and
-    /// the models that generate and edit with the same weights (Qwen Image 2.1, FLUX.2). They are
-    /// shown the picture whole, as a reference, and render a new one from it.
+    /// Edits a picture following an instruction (the panel's Edit tab): the edit models, and
+    /// the models that generate and edit with the same weights (Qwen Image 2.1, Ming Image,
+    /// FLUX.2). They are shown the picture whole, as a reference, and render a new one from it.
     pub fn edits(self) -> bool {
-        matches!(self, Family::QwenImage21 | Family::QwenEdit | Family::Flux2)
+        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2)
     }
 
     /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
@@ -215,13 +274,14 @@ impl Family {
     pub fn preset(self) -> Model {
         let base = Model { provider: Provider::Comfy, family: self, name: self.label().to_string(), ..Model::default() };
         match self {
+            // CFG 2, not the template's 1: the setting the comparison of 2026-10-13 was judged at.
             Family::ZImage => Model {
                 name: "Z-Image Turbo".into(),
                 unet: "z_image_turbo_bf16.safetensors".into(),
                 clip: "qwen_3_4b.safetensors".into(),
                 vae: "ae.safetensors".into(),
                 steps: 8,
-                cfg: 1.0,
+                cfg: 2.0,
                 sampler: "res_multistep".into(),
                 scheduler: "simple".into(),
                 shift: 3.0,
@@ -266,14 +326,17 @@ impl Family {
                 cfg: 4.0,
                 ..base
             },
+            // ComfyUI's HiDream O1 template, size included: 4.2 megapixels is its 2048 x 2048 for
+            // a square. At one megapixel the picture came out soft (2026-10-12).
             Family::HidreamO1 => Model {
                 name: "HiDream O1".into(),
                 checkpoint: "hidream_o1_image_bf16.safetensors".into(),
                 steps: 40,
-                cfg: 3.6,
-                sampler: "euler_ancestral".into(),
+                cfg: 5.0,
+                sampler: "dpmpp_2m_sde_gpu".into(),
                 scheduler: "normal".into(),
                 shift: 8.0,
+                megapixels: 4.2,
                 ..base
             },
             Family::HidreamI1 => Model {
@@ -297,7 +360,8 @@ impl Family {
                 clip: "qwen3vl_8b_fp8_scaled.safetensors".into(),
                 vae: "flux2-vae.safetensors".into(),
                 steps: 28,
-                cfg: 7.0,
+                // 5, not the template's 7: the setting the comparison of 2026-10-13 was judged at.
+                cfg: 5.0,
                 shift: 5.0,
                 ..base
             },
@@ -318,6 +382,22 @@ impl Family {
                 vae: "qwen_image_2.1_vae_bf16.safetensors".into(),
                 steps: 25,
                 cfg: 1.0,
+                ..base
+            },
+            // Two megapixels, as ComfyUI's template renders it: small type is garbled at one
+            // megapixel, and a transparent background rarely comes out there (measured: 1 of 7 at
+            // 1024 x 1024, 14 of 20 above it). At four (2672 x 1504) a photographic scene came out
+            // waxy, with a third person the prompt did not ask for; the same graph and seed at
+            // 1928 x 1088 matched the template's result.
+            Family::MingImage => Model {
+                name: "Ming Image 0.1 Design".into(),
+                unet: "ming_image_0.1_design_int8_convrot.safetensors".into(),
+                clip: "ming_image_0.1_ling_mini_2.0_int8_convrot.safetensors".into(),
+                vae: "ming_image_vae_bf16.safetensors".into(),
+                steps: 12,
+                cfg: 1.0,
+                megapixels: 2.0,
+                alpha: true,
                 ..base
             },
             Family::Flux1Fill => Model {
@@ -360,7 +440,7 @@ impl Family {
 }
 
 /// The most reference pictures an edit is given besides the one it edits (`ai.generate`'s
-/// `references`, the ImgEdit tab's rows).
+/// `references`, the Edit tab's rows).
 pub const MAX_REFERENCES: usize = 3;
 
 /// One image generator and its rendering parameters. Every field is stored for every model so
@@ -396,6 +476,17 @@ pub struct Model {
     /// Optional LoRA file (`models/loras`) and its strength.
     pub lora: String,
     pub lora_strength: f64,
+    /// HiDream O1, text to image: a text encoder that can write (Gemma 4, `models/text_encoders`).
+    /// It rewrites the prompt as the one descriptive paragraph the model was trained on before
+    /// the picture is rendered. Empty: the prompt goes in as typed.
+    pub enhancer: String,
+    /// HiDream O1, text to image: the Z-Image Turbo files (diffusion model, text encoder, VAE)
+    /// that go over the result once more at `refine_strength` (a denoise, 0..=1), which gives
+    /// skin and fabric their fine texture. An empty `refiner` leaves the pass out.
+    pub refiner: String,
+    pub refiner_clip: String,
+    pub refiner_vae: String,
+    pub refine_strength: f64,
     pub steps: u32,
     pub cfg: f64,
     pub sampler: String,
@@ -419,16 +510,18 @@ pub struct Model {
     pub megapixels: f64,
     /// The model can return a transparent background (the panel's Alpha Channel box).
     pub alpha: bool,
-    /// Offered for inpainting (the panel's InPaint tab). `None`: what its architecture or
+    /// Offered for inpainting (the panel's Edit tab). `None`: what its architecture or
     /// provider can do ([`Model::can_inpaint`]); the settings' checkbox overrides that.
     pub inpaint: Option<bool>,
 
     // ----- cloud -----
-    /// The provider's model id (`gpt-image-2.5-sunburst`, `gemini-3-pro-image-preview`, …).
+    /// The provider's model id (`gpt-image-2.5-sunburst`, `gemini-3-pro-image-preview`, …). For
+    /// Black Forest Labs it is the endpoint (`flux-3-image`).
     pub api_model: String,
-    /// OpenAI: `auto`, `low`, `medium`, `high`, and for GPT Image 2.5 `xhigh` or `max`.
+    /// OpenAI: `auto`, `low`, `medium`, `high`, and for GPT Image 2.5 `xhigh` or `max`. xAI:
+    /// `auto`, `low` or `medium`.
     pub quality: String,
-    /// Gemini: `1K`, `2K` or `4K`.
+    /// Gemini and Black Forest Labs: `1K`, `2K` or `4K`. xAI: `1K` or `2K`.
     pub image_size: String,
 }
 
@@ -451,6 +544,11 @@ impl Default for Model {
             controlnet: String::new(),
             lora: String::new(),
             lora_strength: 1.0,
+            enhancer: String::new(),
+            refiner: String::new(),
+            refiner_clip: String::new(),
+            refiner_vae: String::new(),
+            refine_strength: 0.35,
             steps: 20,
             cfg: 1.0,
             sampler: "euler".into(),
@@ -484,22 +582,22 @@ impl Model {
         self.inpaint.unwrap_or(match self.provider {
             Provider::Comfy if self.family == Family::Custom => self.workflow.contains("%image%"),
             Provider::Comfy => self.family.inpaints(),
-            Provider::Openai | Provider::Gemini => false,
+            Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => false,
         })
     }
 
-    /// Generates from a prompt alone (the panel's Txt2Img tab): everything but the dedicated
+    /// Generates from a prompt alone (the panel's Create tab): everything but the dedicated
     /// inpainting and edit models.
     pub fn can_generate(&self) -> bool {
         !(self.provider.is_local() && (self.family.inpaint_only() || self.family.edit_only()))
     }
 
-    /// Edits a picture following an instruction (the panel's ImgEdit tab). Local:
+    /// Edits a picture following an instruction (the panel's Edit tab). Local:
     /// [`Family::edits`]. Cloud models are sent the picture and the instruction.
     pub fn can_edit(&self) -> bool {
         match self.provider {
             Provider::Comfy => self.family.edits(),
-            Provider::Openai | Provider::Gemini => true,
+            Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => true,
         }
     }
 
@@ -508,15 +606,120 @@ impl Model {
         if self.provider.is_local() { self.family.max_references() } else { MAX_REFERENCES }
     }
 
-    /// The cloud models offered by "Add Cloud Model".
+    /// The cloud models offered by "Add Model". GPT Image 2 stays offered beside 2.5: some
+    /// prefer the look of its pictures.
     pub fn cloud_presets() -> Vec<Model> {
         vec![
             Model::cloud(Provider::Openai, "GPT Image 2.5 Sunburst", "gpt-image-2.5-sunburst", true),
             Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true),
             Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false),
+            Model::cloud(Provider::Gemini, "Nano Banana 2.1", "gemini-nano-banana-2.1", false),
             Model::cloud(Provider::Gemini, "Nano Banana Pro", "gemini-3-pro-image-preview", false),
             Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false),
+            Model::cloud(Provider::Xai, "Grok Imagine Image 2.0", "grok-imagine-image-2.0", false),
+            Model::cloud(Provider::Meta, "Muse Image", "muse-image-1.0", false),
+            Model::cloud(Provider::Bfl, "FLUX 3 Image", "flux-3-image", false),
         ]
+    }
+
+    /// The models a new installation lists, best and newest first: the cloud models (in the
+    /// order of Artificial Analysis' text-to-image board of 2026-10-13), then the local ones.
+    /// Each has the settings it was judged at: one prompt rendered by every model at
+    /// 1920 x 1080 on 2026-10-13. The local entries name the files that comparison ran; Scan
+    /// Server points an entry at the file the user's server has of the same model
+    /// ([`crate::detect::same_variant`]).
+    pub fn defaults() -> Vec<Model> {
+        let cloud = |name: &str| Model::cloud_presets().into_iter().find(|m| m.name == name);
+        let local = |family: Family, name: &str| Model { name: name.into(), ..family.preset() };
+        let models = [
+            cloud("GPT Image 2.5 Sunburst"),
+            cloud("GPT Image 2.5 Flare"),
+            cloud("Grok Imagine Image 2.0"),
+            cloud("Nano Banana 2"),
+            cloud("FLUX 3 Image"),
+            cloud("Muse Image"),
+            cloud("Nano Banana Pro"),
+            Some(local(Family::QwenImage21, "Qwen Image 2.1")),
+            Some(Model { unet: "krea2_turbo_int8_convrot.safetensors".into(), ..local(Family::Krea2, "Krea 2 Turbo") }),
+            Some(Model { unet: "z_image_turbo_int8_convrot.safetensors".into(), ..local(Family::ZImage, "Z-Image Turbo") }),
+            // The distilled Klein: four steps, no guidance (the preset is the undistilled one).
+            Some(Model { unet: "flux-2-klein-9b-fp8.safetensors".into(), steps: 4, cfg: 1.0, ..local(Family::Flux2, "FLUX.2 Klein 9B") }),
+            Some(local(Family::Ideogram4, "Ideogram 4")),
+            // With its prompt written by Gemma 4 and the result refined by Z-Image Turbo.
+            Some(Model {
+                enhancer: "gemma4_e4b_it_fp8_scaled.safetensors".into(),
+                refiner: "z_image_turbo_bf16.safetensors".into(),
+                refiner_clip: "qwen_3_4b.safetensors".into(),
+                refiner_vae: "ae.safetensors".into(),
+                ..local(Family::HidreamO1, "HiDream O1")
+            }),
+            Some(Model {
+                unet: "ernie-image-turbo.safetensors".into(),
+                steps: 8,
+                cfg: 1.0,
+                megapixels: 2.0,
+                ..local(Family::Ernie, "Ernie Image Turbo")
+            }),
+            Some(local(Family::MingImage, "Ming Image 0.1 Design")),
+        ];
+        let mut settings = Settings::default_without_models();
+        for mut model in models.into_iter().flatten() {
+            model.id = settings.unique_id(&model.name);
+            settings.models.push(model);
+        }
+        settings.models
+    }
+
+    /// Where the model stands in the recommended order: lower is better and newer. Cloud models
+    /// by their place on Artificial Analysis' text-to-image board (2026-10-13), local ones by
+    /// architecture (the text-to-image ones as the comparison of that day left them, then the
+    /// older ones and those that only edit or inpaint). A model this table doesn't know comes
+    /// after the ones it does, among its own kind.
+    pub fn rank(&self) -> usize {
+        /// Model ids by their beginning: `gemini-3.1-flash-image` is also its `-preview`.
+        const CLOUD: [&str; 12] = [
+            "gpt-image-2.5-sunburst",
+            "gpt-image-2.5-flare",
+            "gpt-image-2",
+            "gemini-nano-banana-2.1",
+            "grok-imagine-image-2",
+            "gemini-3.1-flash-image",
+            "flux-3",
+            "muse-image",
+            "gpt-image-1.5",
+            "gemini-3-pro-image",
+            "flux-2",
+            "grok-imagine",
+        ];
+        const LOCAL: [Family; 16] = [
+            Family::QwenImage21,
+            Family::Krea2,
+            Family::ZImage,
+            Family::Flux2,
+            Family::Ideogram4,
+            Family::HidreamO1,
+            Family::Ernie,
+            Family::MingImage,
+            Family::QwenImage,
+            Family::HidreamI1,
+            Family::Flux1,
+            Family::Checkpoint,
+            Family::QwenEdit,
+            Family::Flux1Fill,
+            Family::QwenInpaint,
+            Family::Custom,
+        ];
+        if self.provider.is_local() {
+            LOCAL.iter().position(|f| *f == self.family).unwrap_or(LOCAL.len())
+        } else {
+            let id = self.api_model.trim();
+            CLOUD.iter().position(|known| id.starts_with(known)).unwrap_or(CLOUD.len())
+        }
+    }
+
+    /// The file that makes a local model what it is: its checkpoint, else its diffusion model.
+    pub fn main_file(&self) -> &str {
+        if self.checkpoint.trim().is_empty() { self.unet.trim() } else { self.checkpoint.trim() }
     }
 }
 
@@ -534,19 +737,62 @@ pub struct Settings {
     pub comfy_launch: crate::launch::Launch,
     /// Give up on a generation after this long.
     pub timeout_seconds: u32,
+    /// Offer cloud models in the AI Gen panel's model lists.
+    pub show_cloud: bool,
+    /// Offer local models in the AI Gen panel's model lists.
+    pub show_local: bool,
+    /// The models, in the order the user gave them: the panel lists the cloud ones first, then
+    /// the local ones, each kind in this order ([`Settings::listed`]).
     pub models: Vec<Model>,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { comfy_url: "http://127.0.0.1:8188".into(), comfy_autostart: false, comfy_launch: Default::default(), timeout_seconds: 600, models: Vec::new() }
+        Self { models: Model::defaults(), ..Self::default_without_models() }
     }
 }
 
 impl Settings {
-    /// The model with this id, or the first enabled one for an empty id.
+    /// The defaults with an empty model list.
+    pub fn default_without_models() -> Self {
+        Self {
+            comfy_url: "http://127.0.0.1:8188".into(),
+            comfy_autostart: false,
+            comfy_launch: Default::default(),
+            timeout_seconds: 600,
+            show_cloud: true,
+            show_local: true,
+            models: Vec::new(),
+        }
+    }
+
+    /// The positions in `models` of the models of one kind (`local` or cloud), in their order.
+    pub fn kind(&self, local: bool) -> impl Iterator<Item = usize> + '_ {
+        self.models.iter().enumerate().filter(move |(_, m)| m.provider.is_local() == local).map(|(i, _)| i)
+    }
+
+    /// The models the AI Gen panel offers, in its order: the ticked models of the kinds that are
+    /// shown, cloud before local, each kind in the order of `models`.
+    pub fn listed(&self) -> Vec<&Model> {
+        [(false, self.show_cloud), (true, self.show_local)]
+            .into_iter()
+            .filter(|(_, shown)| *shown)
+            .flat_map(|(local, _)| self.kind(local))
+            .filter_map(|i| self.models.get(i))
+            .filter(|m| m.enabled)
+            .collect()
+    }
+
+    /// Put the models of each kind in the recommended order ([`Model::rank`]). Models of the
+    /// same rank keep the order they had.
+    pub fn sort_recommended(&mut self) {
+        // Cloud before local in the list itself too, so its order reads as the panel's.
+        self.models.sort_by_key(|m| (m.provider.is_local(), m.rank()));
+    }
+
+    /// The model with this id, or for an empty id the first the panel offers ([`Self::listed`]).
     pub fn model(&self, id: &str) -> Option<&Model> {
-        if id.is_empty() { self.models.iter().find(|m| m.enabled) } else { self.models.iter().find(|m| m.id == id) }
+        if id.is_empty() { self.listed().into_iter().next() } else { self.models.iter().find(|m| m.id == id) }
     }
 
     /// An id for a new model named `name` that no existing model has.
@@ -573,7 +819,7 @@ mod tests {
 
     #[test]
     fn settings_round_trip_and_tolerate_missing_and_unknown_keys() {
-        let mut s = Settings::default();
+        let mut s = Settings::default_without_models();
         s.models.push(Model { id: "z".into(), ..Family::ZImage.preset() });
         let json = serde_json::to_value(&s).unwrap();
         assert_eq!(json["models"][0]["family"], "zImage");
@@ -586,7 +832,7 @@ mod tests {
 
     #[test]
     fn ids_are_unique_slugs() {
-        let mut s = Settings::default();
+        let mut s = Settings::default_without_models();
         assert_eq!(s.unique_id("Z-Image Turbo"), "z-image-turbo");
         s.models.push(Model { id: "z-image-turbo".into(), ..Model::default() });
         assert_eq!(s.unique_id("Z-Image Turbo"), "z-image-turbo-2");
@@ -595,7 +841,7 @@ mod tests {
 
     #[test]
     fn the_first_enabled_model_is_the_default() {
-        let mut s = Settings::default();
+        let mut s = Settings::default_without_models();
         assert!(s.model("").is_none());
         s.models.push(Model { id: "a".into(), enabled: false, ..Model::default() });
         s.models.push(Model { id: "b".into(), ..Model::default() });
@@ -627,7 +873,7 @@ mod tests {
     #[test]
     fn editing_follows_the_architecture() {
         for f in Family::ALL {
-            let want = matches!(f, Family::QwenImage21 | Family::QwenEdit | Family::Flux2);
+            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2);
             assert_eq!((f.preset().can_edit(), f.edits()), (want, want), "{f:?}");
             assert!(f.max_references() <= MAX_REFERENCES && (!f.edit_only() || f.edits()), "{f:?}");
         }
@@ -636,6 +882,116 @@ mod tests {
         assert!(edit.can_edit() && !edit.can_generate() && !edit.can_inpaint() && edit.max_references() == 2);
         // Cloud models are sent the picture and the instruction.
         assert!(Model::cloud_presets().iter().all(|m| m.can_edit() && m.max_references() == MAX_REFERENCES));
+        // Ming Image generates and edits, at its reference size, and can render transparency.
+        let ming = Family::MingImage.preset();
+        assert!(ming.can_generate() && ming.can_edit() && !ming.can_inpaint() && ming.alpha);
+        assert_eq!((ming.steps, ming.cfg, ming.megapixels, ming.max_references()), (12, 1.0, 2.0, MAX_REFERENCES));
+        // Raised to four, it is still given pictures at two; other models, and a lower size, are left.
+        assert_eq!(
+            (Family::MingImage.source_megapixels(4.0), Family::MingImage.source_megapixels(1.0), Family::MingImage.source_megapixels(0.0)),
+            (2.0, 1.0, 0.0)
+        );
+        assert_eq!(Family::Flux2.source_megapixels(4.0), 4.0);
+        assert!(Family::MingImage.source_megapixels(f64::NAN).is_nan());
+        // The other local presets don't claim transparency.
+        assert!(Family::ALL.into_iter().all(|f| f == Family::MingImage || !f.preset().alpha));
+    }
+
+    #[test]
+    fn a_new_installation_lists_the_models_that_were_compared() {
+        let s = Settings::default();
+        let ids: Vec<&str> = s.models.iter().map(|m| m.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "gpt-image-2-5-sunburst",
+                "gpt-image-2-5-flare",
+                "grok-imagine-image-2-0",
+                "nano-banana-2",
+                "flux-3-image",
+                "muse-image",
+                "nano-banana-pro",
+                "qwen-image-2-1",
+                "krea-2-turbo",
+                "z-image-turbo",
+                "flux-2-klein-9b",
+                "ideogram-4",
+                "hidream-o1",
+                "ernie-image-turbo",
+                "ming-image-0-1-design",
+            ]
+        );
+        // That is the recommended order: cloud first, each kind best and newest first.
+        let mut sorted = s.clone();
+        sorted.models.reverse();
+        sorted.sort_recommended();
+        assert_eq!(sorted.models, s.models);
+        assert!(s.models.windows(2).all(|w| (w[0].provider.is_local(), w[0].rank()) < (w[1].provider.is_local(), w[1].rank())));
+        // Every one generates from a prompt and is listed; the first is what an empty id means.
+        assert!(s.models.iter().all(|m| m.enabled && m.can_generate() && !m.name.is_empty()));
+        assert_eq!(s.model("").map(|m| m.api_model.as_str()), Some("gpt-image-2.5-sunburst"));
+        // The settings the comparison was judged at.
+        let by = |id: &str| s.model(id).unwrap();
+        assert_eq!((by("z-image-turbo").steps, by("z-image-turbo").cfg, by("z-image-turbo").sampler.as_str()), (8, 2.0, "res_multistep"));
+        assert_eq!((by("ideogram-4").steps, by("ideogram-4").cfg, by("ideogram-4").shift), (28, 5.0, 5.0));
+        assert_eq!((by("flux-2-klein-9b").steps, by("flux-2-klein-9b").cfg), (4, 1.0));
+        assert_eq!((by("ernie-image-turbo").steps, by("ernie-image-turbo").cfg, by("ernie-image-turbo").megapixels), (8, 1.0, 2.0));
+        assert_eq!((by("hidream-o1").steps, by("hidream-o1").refiner.as_str()), (40, "z_image_turbo_bf16.safetensors"));
+        assert_eq!((by("ming-image-0-1-design").megapixels, by("ming-image-0-1-design").alpha), (2.0, true));
+        assert!(s.models.iter().filter(|m| !m.provider.is_local()).all(|m| m.quality == "auto" && m.image_size == "1K"));
+        assert_eq!(by("hidream-o1").main_file(), "hidream_o1_image_bf16.safetensors");
+        assert_eq!(by("krea-2-turbo").main_file(), "krea2_turbo_int8_convrot.safetensors");
+        // The newer cloud models are offered, not listed until they have been tried.
+        let offered: Vec<String> = Model::cloud_presets().into_iter().map(|m| m.api_model).collect();
+        assert!(offered.contains(&"gemini-nano-banana-2.1".to_string()) && offered.contains(&"gpt-image-2".to_string()));
+        assert!(!s.models.iter().any(|m| m.api_model == "gemini-nano-banana-2.1" || m.api_model == "gpt-image-2"));
+        for id in ["grok-imagine-image-2.0", "muse-image-1.0", "flux-3-image"] {
+            assert!(offered.contains(&id.to_string()), "{id}");
+        }
+        // Every provider has a key of its own, a label, and but for the local one an environment variable.
+        assert_eq!(Provider::cloud_keys(), "openai|gemini|xai|meta|bfl");
+        for p in Provider::ALL {
+            assert_eq!(serde_json::to_value(p).unwrap(), p.key());
+            assert!(!p.label().is_empty() && p.key_env().is_some() != p.is_local(), "{p:?}");
+        }
+        assert_eq!(serde_json::from_str::<Settings>(r#"{"models":[]}"#).unwrap().models, []);
+    }
+
+    #[test]
+    fn the_panel_lists_cloud_models_first_in_the_users_order_and_only_the_kinds_shown() {
+        let cloud = |id: &str, api: &str| Model { id: id.into(), ..Model::cloud(Provider::Openai, id, api, false) };
+        let local = |id: &str, family: Family| Model { id: id.into(), ..family.preset() };
+        let mut s = Settings::default_without_models();
+        s.models = vec![
+            local("ernie", Family::Ernie),
+            cloud("pro", "gemini-3-pro-image-preview"),
+            local("qwen", Family::QwenImage21),
+            cloud("mine", "my-own-model"),
+            Model { enabled: false, ..cloud("off", "gpt-image-2") },
+            cloud("sunburst", "gpt-image-2.5-sunburst"),
+        ];
+        let ids = |s: &Settings| s.listed().into_iter().map(|m| m.id.clone()).collect::<Vec<_>>();
+        // Cloud before local, each kind in the order it has in the settings; unticked ones left out.
+        assert_eq!(ids(&s), ["pro", "mine", "sunburst", "ernie", "qwen"]);
+        assert_eq!(s.model("").map(|m| m.id.as_str()), Some("pro"));
+        assert_eq!((s.kind(false).collect::<Vec<_>>(), s.kind(true).collect::<Vec<_>>()), (vec![1, 3, 4, 5], vec![0, 2]));
+        // A kind that is switched off is not offered, and is not what an empty id means; a model
+        // of it can still be asked for by its id.
+        s.show_cloud = false;
+        assert_eq!(ids(&s), ["ernie", "qwen"]);
+        assert_eq!((s.model("").map(|m| m.id.as_str()), s.model("pro").map(|m| m.id.as_str())), (Some("ernie"), Some("pro")));
+        s.show_local = false;
+        assert!(ids(&s).is_empty() && s.model("").is_none());
+        // The recommended order: by rank within each kind, a model the table doesn't know last
+        // of its kind, and the unticked one in its place.
+        (s.show_cloud, s.show_local) = (true, true);
+        s.sort_recommended();
+        assert_eq!(s.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["sunburst", "off", "pro", "mine", "qwen", "ernie"]);
+        assert!(cloud("x", "").rank() > cloud("x", "grok-imagine-image").rank() && cloud("x", "gemini-3.1-flash-image").rank() == cloud("x", "gemini-3.1-flash-image-preview").rank());
+        // Settings saved before these switches existed show both kinds.
+        let old: Settings = serde_json::from_str(r#"{"models":[]}"#).unwrap();
+        assert!(old.show_cloud && old.show_local);
+        assert_eq!(serde_json::to_value(&old).unwrap()["showCloud"], true);
     }
 
     #[test]

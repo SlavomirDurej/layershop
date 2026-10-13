@@ -1,6 +1,6 @@
 //! Generative AI: fill the selection with an image from a local (ComfyUI) or cloud model.
 //!
-//! - `ai.generate` renders a prompt with one of the models set up in Preferences › Integrations
+//! - `ai.generate` renders a prompt with one of the models set up in Preferences › Generative AI
 //!   (`integrations.ai`) and places the result on a new layer over the selection's bounds (the
 //!   whole canvas without a selection), masked by the selection. The selection's size decides
 //!   the size the model is asked for. It is a background job: cancellable, one undo step.
@@ -137,7 +137,7 @@ impl AiRuntime {
             return Err("AI generation needs the desktop app".into());
         }
         if !model.provider.is_local() && self.key(model.provider).is_empty() {
-            return Err(format!("{} needs an API key (Preferences › Integrations)", model.provider.label()));
+            return Err(format!("{} needs an API key (Preferences › Generative AI)", model.provider.label()));
         }
         Ok(())
     }
@@ -618,7 +618,8 @@ pub fn edit_plan(s: &Session, source: Option<SourceRef>, context: f64, rect: Opt
     let canvas = d.doc.bounds();
     let source = source.or_else(|| default_img2img_source(s));
     let here = !matches!(source, Some(SourceRef::Document(id)) if id != d.doc.id.0);
-    let selected = d.doc.selection.as_ref().map(|sel| sel.content_bounds().intersect(&canvas)).filter(|b| !b.is_empty());
+    // A mask being painted ([`mask`]) counts as the selection it will become.
+    let selected = pending_selection(&d.doc);
     let rect = rect.or_else(|| selected.filter(|_| here).map(|b| inpaint_area(b, canvas, context)));
     img2img_plan(s, source, rect)
         .map_err(|why| if why == NO_PICTURE { "Editing needs a picture: a layer with pixels, or an open document with an image".to_string() } else { why })
@@ -677,6 +678,49 @@ fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Re
         return Err(EngineError::Other("could not read the area to inpaint".into()));
     }
     Ok(Source { image, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength, edit: false, references: Vec::new() })
+}
+
+/// How many more seeds a model that drew its refusal ([`photocraft_aigen::Family::draws_refusal`])
+/// is given before the generation gives up.
+const REFUSAL_RETRIES: u32 = 3;
+
+/// Whether `bytes` is the picture a model draws in place of an image its training declined: flat
+/// mid-grey with the words "Image blocked by safety filter" in light type. Measured on Ideogram 4
+/// (1328×752 and a 1443×638 crop): median grey 109, 96–98% of the pixels within ±6 of it, 1–3%
+/// light type, and no colour at all, where every real image has under 20% of its pixels that
+/// flat and a chroma of 20 or more. Anything that cannot be decoded is not it.
+fn is_refusal_picture(bytes: &[u8]) -> bool {
+    let Ok(image) = photocraft_codecs::decode(bytes) else { return false };
+    let rgba = image.to_rgba8();
+    let (pixels, _) = rgba.as_chunks::<4>();
+    let total = pixels.len();
+    if total == 0 {
+        return false;
+    }
+    let mut histogram = [0u64; 256];
+    let mut chroma = 0u64;
+    for &[r, g, b, _] in pixels {
+        let (r, g, b) = (u64::from(r), u64::from(g), u64::from(b));
+        let luma = (r + g + b) / 3;
+        if let Some(bin) = histogram.get_mut(luma as usize) {
+            *bin += 1;
+        }
+        chroma += r.abs_diff(g) + g.abs_diff(b);
+    }
+    let total = total as u64;
+    let mut seen = 0u64;
+    let median = histogram
+        .iter()
+        .position(|&n| {
+            seen += n;
+            seen * 2 >= total
+        })
+        .unwrap_or(0);
+    let within = |lo: usize, hi: usize| histogram.get(lo..=hi.min(255)).map_or(0, |bins| bins.iter().sum::<u64>());
+    let flat = within(median.saturating_sub(6), median + 6) as f64 / total as f64;
+    let light = within(median + 35, 255) as f64 / total as f64;
+    let chroma = chroma as f64 / total as f64;
+    (96..=124).contains(&median) && flat >= 0.90 && chroma <= 5.0 && (0.002..=0.08).contains(&light)
 }
 
 /// Decode a generated image and fit it to `area`, in the document's format with alpha: scaled
@@ -758,7 +802,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let id = p.get("model").and_then(Value::as_str).unwrap_or("");
     let mut model = settings.model(id).cloned().ok_or_else(|| {
         if id.is_empty() {
-            EngineError::Other("no AI model is set up: add one in Preferences › Integrations".into())
+            EngineError::Other("no AI model is set up: add one in Preferences › Generative AI".into())
         } else {
             bad(cmd, format!("no AI model `{id}`"))
         }
@@ -787,19 +831,19 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let context = number("context", DEFAULT_CONTEXT, 4.0)?;
     if edit && !model.can_edit() {
         return Err(EngineError::Other(format!(
-            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Qwen Image Edit, FLUX.2 or a cloud model; the panel's ImgEdit tab lists them)",
+            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.2 or a cloud model; the panel's Edit tab lists them)",
             model.name
         )));
     }
     if !inpaint && !edit && !model.can_generate() {
         return Err(EngineError::Other(if model.family.edit_only() {
             format!(
-                "{} is an edit model: it changes a picture following an instruction (`\"mode\": \"imgEdit\"`, the panel's ImgEdit tab) and does nothing else",
+                "{} is an edit model: it changes a picture following an instruction (`\"mode\": \"imgEdit\"`, the panel's Edit tab) and does nothing else",
                 model.name
             )
         } else {
             format!(
-                "{} is an inpainting model: it repaints a selection (`\"mode\": \"inpaint\"`, the panel's InPaint tab) and can't generate from a prompt alone",
+                "{} is an inpainting model: it repaints a selection (`\"mode\": \"inpaint\"`, the panel's Edit tab) and can't generate from a prompt alone",
                 model.name
             )
         }));
@@ -809,11 +853,19 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(EngineError::Other(format!("{} takes {} reference pictures at most, not {}", model.name, model.max_references(), references.len())));
     }
     if inpaint && !model.can_inpaint() {
-        return Err(EngineError::Other(format!("{} is not set up for inpainting (Preferences \u{203a} AI Integrations, its Inpainting box)", model.name)));
+        return Err(EngineError::Other(format!("{} is not set up for inpainting (Preferences \u{203a} Generative AI, its Supports inpainting box)", model.name)));
     }
-    // A mask painted for it (Quick Mask) becomes the selection first.
-    if inpaint && s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
-        inpaint_blocked(s).map_err(EngineError::Other)?;
+    // A mask painted for it (Quick Mask) becomes the selection first: what an inpainting
+    // repaints, and what scopes an edit (an empty one: no selection, the whole picture).
+    if (inpaint || edit) && s.active().is_some_and(|d| d.doc.quick_mask.is_some()) {
+        if inpaint {
+            inpaint_blocked(s).map_err(EngineError::Other)?;
+        } else {
+            // An edit that can't run is refused before the mask is given up.
+            let canvas = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();
+            let rect = if p.get("rect").is_some() { Some(target_area(p, None, canvas)?) } else { None };
+            edit_plan(s, source_param(p)?, context, rect).map_err(EngineError::Other)?;
+        }
         leave_quick_mask(s)?;
     }
     // What an inpainting reads: the active pixel layer, and the selection's bounds on it.
@@ -858,6 +910,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         None if model.seed >= 0 => model.seed as u64 & 0xFFFF_FFFF_FFFF,
         None => photocraft_aigen::random_seed(),
     };
+    // A seed the user asked for stays; only a random one is changed when the model refuses it.
+    let reseed = p.get("seed").is_none() && model.seed < 0;
     let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
     let mut job = Job { prompt: prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
@@ -923,8 +977,27 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(server) = &server {
                 server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
             }
-            let image = photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(ai_error)?;
-            ctx.check()?;
+            let mut refused = 0;
+            let image = loop {
+                let image = photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(ai_error)?;
+                ctx.check()?;
+                if !model.family.draws_refusal() || !is_refusal_picture(&image.bytes) {
+                    break image;
+                }
+                // The words are in the picture, not in an error: never put them on a layer. The
+                // next seed usually draws the image; a seed the user fixed is theirs to change.
+                refused += 1;
+                if !reseed || refused > REFUSAL_RETRIES {
+                    let what = if reseed { format!("on {refused} seeds in a row") } else { format!("at seed {}", job.seed) };
+                    return Err(EngineError::Other(format!(
+                        "{} drew its own \"Image blocked by safety filter\" picture {what}. The refusal is part of the model, not a PhotoCraft or ComfyUI filter, and it can fire on harmless prompts: \
+                         generate again with another seed, or reword the prompt.",
+                        model.name
+                    )));
+                }
+                job.seed = photocraft_aigen::random_seed();
+                ctx.progress(0.0, &format!("{} refused that seed; trying another…", model.name));
+            };
             ctx.progress(0.98, "Placing the image…");
             // What was given a picture answers in its shape: it goes back where that came from.
             let surface = fit(&image.bytes, fmt, area, kind != GenerationMode::Txt2img)?;
@@ -974,6 +1047,7 @@ fn sources(s: &mut Session, p: &Value) -> Result<Value> {
 
 fn models(s: &mut Session, _: &Value) -> Result<Value> {
     let settings = settings(s);
+    let listed: Vec<&str> = settings.listed().into_iter().map(|m| m.id.as_str()).collect();
     let list: Vec<Value> = settings
         .models
         .iter()
@@ -981,12 +1055,13 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
             let ready = s.ai.ready(m);
             json!({
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
+                "listed": listed.contains(&m.id.as_str()),
                 "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "references": m.max_references(),
                 "ready": ready.is_ok(), "why": ready.err(),
             })
         })
         .collect();
-    Ok(json!({"models": list, "comfyUrl": settings.comfy_url, "available": s.ai.transport.is_some()}))
+    Ok(json!({"models": list, "listed": listed, "comfyUrl": settings.comfy_url, "available": s.ai.transport.is_some()}))
 }
 
 /// The settings a server command works with: `settings` when given (the Preferences dialog's
@@ -1047,7 +1122,7 @@ fn server_status(s: &mut Session, _: &Value) -> Result<Value> {
 
 fn provider_param(p: &Value, cmd: &str) -> Result<Provider> {
     let key = p.get("provider").and_then(Value::as_str).unwrap_or("");
-    Provider::ALL.into_iter().find(|x| x.key() == key && !x.is_local()).ok_or_else(|| bad(cmd, "`provider` must be openai|gemini"))
+    Provider::ALL.into_iter().find(|x| x.key() == key && !x.is_local()).ok_or_else(|| bad(cmd, format!("`provider` must be {}", Provider::cloud_keys())))
 }
 
 fn set_key(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1079,8 +1154,8 @@ fn can_generate(s: &Session) -> std::result::Result<(), String> {
     if s.ai.transport.is_none() {
         return Err("AI generation needs the desktop app".into());
     }
-    if !s.prefs().integrations.ai.models.iter().any(|m| m.enabled) {
-        return Err("no AI model is set up (Preferences › Integrations)".into());
+    if s.prefs().integrations.ai.listed().is_empty() {
+        return Err("no AI model is set up (Preferences › Generative AI)".into());
     }
     Ok(())
 }
@@ -1092,7 +1167,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id},…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, …; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, OpenAI; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model,"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id},…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, …; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -1102,7 +1177,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Inpaint Mask",
             menu: &[],
             shortcut: None,
-            params: r##"{"paint":bool?,"clear":bool?} → {painting,empty}: paint the area to inpaint instead of selecting it. paint:true enters Quick Mask with the selection as the mask (none: empty) and the tint over the selected part, so paint.stroke {"target":"quickMask","color":"#ffffff"} adds to it and "#000000" takes away; paint:false turns the mask into the selection; clear:true empties the mask (outside the mode: deselects). ai.generate {"mode":"inpaint"} leaves the mode itself"##,
+            params: r##"{"paint":bool?,"clear":bool?} → {painting,empty}: paint the area to inpaint, or to scope an edit, instead of selecting it. paint:true enters Quick Mask with the selection as the mask (none: empty) and the tint over the selected part, so paint.stroke {"target":"quickMask","color":"#ffffff"} adds to it and "#000000" takes away; paint:false turns the mask into the selection; clear:true empties the mask (outside the mode: deselects). ai.generate leaves the mode itself, for "mode":"inpaint" and "imgEdit""##,
             enabled: can_mask,
             run: mask,
             journal: true,
@@ -1122,7 +1197,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Models",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {models:[{id,name,provider,local,enabled,alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),ready,why}],comfyUrl,available}"##,
+            params: r##"{} → {models:[{id,name,provider,local,enabled,listed (offered in the AI Gen panel),alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),ready,why}],listed:[id,…] (the panel's order: cloud first; the first is the default model),comfyUrl,available}"##,
             enabled: always,
             run: models,
             journal: false,
@@ -1172,7 +1247,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set AI API Key",
             menu: &[],
             shortcut: None,
-            params: r##"{"provider":"openai|gemini","key":str (empty removes it)} (kept for this session; the app saves it apart from the preferences)"##,
+            params: r##"{"provider":"openai|gemini|xai|meta|bfl","key":str (empty removes it)} (kept for this session; the app saves it apart from the preferences)"##,
             enabled: always,
             run: set_key,
             journal: false,

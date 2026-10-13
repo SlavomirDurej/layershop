@@ -389,6 +389,11 @@ fn preference_sections_are_commands() {
         assert_eq!(r["title"], title);
         assert!(r["values"].is_object(), "{id}");
     }
+    // Generative AI is a section of the dialog whose values live under Integrations.
+    let r = s.execute("edit.preferences.generativeAi", json!({})).unwrap();
+    assert_eq!((r["section"].as_str(), r["title"].as_str()), (Some(GENERATIVE_AI.0), Some("Generative AI")));
+    assert_eq!(r["values"], s.prefs().get(GENERATIVE_AI_PATH).unwrap());
+    assert!(r["values"]["models"].is_array() && !SECTIONS.contains(&GENERATIVE_AI));
 }
 
 #[test]

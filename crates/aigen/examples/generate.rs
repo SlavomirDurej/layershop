@@ -3,6 +3,7 @@
 //! ```sh
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188            # list detected models
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a red frog" out.png 768 512
+//! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a red frog" out.png 768 512 alpha   # transparent background
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a teapot" out.png inpaint image.png mask.png 0.8
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 find         # how it was started
 //! ```
@@ -111,7 +112,8 @@ fn run() -> Result<(), String> {
             source: Some(Source { image, mask, width, height, strength, edit: false, references: Vec::new() }),
         }
     } else {
-        Job { prompt, width: size(4), height: size(5), seed: random_seed(), alpha: false, source: None }
+        // A further `alpha` asks for a transparent background (the panel's Alpha Channel box).
+        Job { prompt, width: size(4), height: size(5), seed: random_seed(), alpha: args.get(6).map(String::as_str) == Some("alpha"), source: None }
     };
     let settings = Settings { comfy_url: url, ..Settings::default() };
     let control = Control { cancelled: &|| false, progress: &|f, m| eprintln!("{:>3.0}%  {m}", f * 100.0), sleep: &|d: Duration| std::thread::sleep(d) };

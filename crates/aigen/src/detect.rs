@@ -1,4 +1,4 @@
-//! Guess ready-to-use models from the files a ComfyUI server has ("Detect Local Models").
+//! Guess ready-to-use models from the files a ComfyUI server has (Manage Models › Scan Server).
 //!
 //! File names are the only evidence, so this recognises the names the model publishers and the
 //! ComfyUI templates use, and leaves anything else to "Add Local Model".
@@ -57,6 +57,12 @@ fn family_of(file: &str) -> Option<Family> {
         Family::HidreamI1
     } else if n.contains("ideogram") {
         Family::Ideogram4
+    } else if n.contains("ming_image") || n.contains("ming-image") {
+        // Its sibling, Ming Image Design Layer, takes a design apart into layers: another task.
+        if n.contains("layer") {
+            return None;
+        }
+        Family::MingImage
     } else if n.contains("qwen_image_2.1") || n.contains("qwen-image-2.1") || n.contains("qwen_image_21") {
         Family::QwenImage21
     } else if n.contains("qwen_image") || n.contains("qwen-image") {
@@ -71,7 +77,7 @@ fn family_of(file: &str) -> Option<Family> {
 /// user is free to try anything else); the alternative is ComfyUI's own error, a tensor shape.
 pub fn problem(model: &Model) -> Option<String> {
     let name = if model.name.trim().is_empty() { model.family.label() } else { model.name.trim() };
-    let fix = "On Preferences › AI Integrations › Local Models, press Scan Server to repair it";
+    let fix = "On Preferences › Generative AI › Manage Models, press Scan Server to repair it";
     let unet = model.unet.to_ascii_lowercase();
     let is_21_file = family_of(&model.unet) == Some(Family::QwenImage21);
     match model.family {
@@ -102,6 +108,13 @@ pub fn problem(model: &Model) -> Option<String> {
     }
 }
 
+/// `checkpoint` is HiDream O1 Dev, the distilled model (`hidream_o1_image_dev_…`), which is
+/// sampled differently from the full one.
+pub fn hidream_o1_dev(checkpoint: &str) -> bool {
+    let n = checkpoint.to_ascii_lowercase();
+    n.contains("_dev") || n.contains("-dev")
+}
+
 /// `existing` with the architecture, files and sampling of `detected` (the same model file,
 /// detected afresh): what Scan Server does to a model that was set up as the wrong
 /// architecture. The user's own choices that still apply are kept: its id, name, whether it is
@@ -121,6 +134,59 @@ pub fn repaired(existing: &Model, detected: &Model) -> Model {
     }
 }
 
+/// What a model file is, whatever it is quantised to: its name without the folder, the extension
+/// and the words that say how the weights are stored (`z_image_turbo_int8_convrot.safetensors`
+/// and `z_image_turbo_bf16.safetensors` are both `z image turbo`).
+pub fn variant(file: &str) -> String {
+    const STORAGE: [&str; 14] =
+        ["bf16", "fp16", "fp8", "fp32", "int8", "mxfp8", "convrot", "scaled", "mixed", "fp8mixed", "e4m3fn", "e5m2", "gguf", "safetensors"];
+    let stem = file.rsplit(['/', '\\']).next().unwrap_or(file).to_ascii_lowercase();
+    let stem = stem.rsplit_once('.').filter(|(_, ext)| !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphabetic())).map_or(stem.as_str(), |(s, _)| s);
+    stem.split(['_', '-', ' ']).filter(|word| !word.is_empty() && !STORAGE.contains(word)).collect::<Vec<_>>().join(" ")
+}
+
+/// Two local models are the same model, perhaps stored differently: the same architecture and
+/// the same [`variant`] of their main file.
+pub fn same_variant(a: &Model, b: &Model) -> bool {
+    let (x, y) = (variant(a.main_file()), variant(b.main_file()));
+    a.provider.is_local() && b.provider.is_local() && a.family == b.family && !x.is_empty() && x == y
+}
+
+/// The server lists the file `model` is made of (`folders` as [`crate::comfy_models`] returns
+/// them). True for what has no single file to look for: a cloud model, a custom workflow, a
+/// model without one chosen yet.
+pub fn on_server(folders: &BTreeMap<String, Vec<String>>, model: &Model) -> bool {
+    let file = model.main_file();
+    if !model.provider.is_local() || model.family == Family::Custom || file.is_empty() {
+        return true;
+    }
+    let folder = if model.checkpoint.trim().is_empty() { "diffusion_models" } else { "checkpoints" };
+    folders.get(folder).is_some_and(|files| files.iter().any(|f| f == file))
+}
+
+/// `existing` pointed at the files of `detected` (the same model as the server stores it): what
+/// Scan Server does to a listed model whose own file the server doesn't have. Everything the
+/// user can tune (sampling, size, name, id) is kept.
+pub fn adopted(existing: &Model, detected: &Model) -> Model {
+    let d = detected;
+    Model {
+        unet: d.unet.clone(),
+        unet2: d.unet2.clone(),
+        checkpoint: d.checkpoint.clone(),
+        clip: d.clip.clone(),
+        clip2: d.clip2.clone(),
+        clip3: d.clip3.clone(),
+        clip4: d.clip4.clone(),
+        vae: d.vae.clone(),
+        controlnet: d.controlnet.clone(),
+        enhancer: d.enhancer.clone(),
+        refiner: d.refiner.clone(),
+        refiner_clip: d.refiner_clip.clone(),
+        refiner_vae: d.refiner_vae.clone(),
+        ..existing.clone()
+    }
+}
+
 /// Models for the text-to-image, inpainting and edit files in `folders` (as [`crate::comfy_models`] returns them),
 /// each with its family's reference settings and the encoder / VAE files the server has.
 pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
@@ -137,7 +203,8 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         m.unet = file.clone();
         match family {
             Family::ZImage if !turbo => (m.steps, m.cfg, m.sampler) = (30, 4.0, "euler".into()),
-            Family::Ernie if turbo => (m.steps, m.cfg) = (8, 1.0),
+            // Two megapixels: what the turbo model was judged at (2026-10-13).
+            Family::Ernie if turbo => (m.steps, m.cfg, m.megapixels) = (8, 1.0, 2.0),
             Family::Flux2 if n.contains("klein") => {
                 // The "base" Klein is the undistilled one; the other renders in four steps.
                 if !n.contains("base") {
@@ -172,6 +239,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::Ideogram4 => &["qwen3vl_8b"],
             Family::QwenImage | Family::QwenEdit => &["qwen_2.5_vl"],
             Family::QwenImage21 => &["qwen3vl_8b"],
+            Family::MingImage => &["ling_mini", "ming_image"],
             _ => &[],
         };
         m.clip = choose(clips, &m.clip, clip_needles);
@@ -187,6 +255,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         }
         let vae_needles: &[&str] = match family {
             Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
+            Family::MingImage => &["ming_image_vae", "ming_image"],
             Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
             Family::Krea2 | Family::QwenImage | Family::QwenEdit => &["qwen_image_vae"],
             _ => &["ae.safetensors"],
@@ -219,6 +288,29 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             let mut m = Family::HidreamO1.preset();
             m.name = title(file);
             m.checkpoint = file.clone();
+            if hidream_o1_dev(file) {
+                // ComfyUI's HiDream O1 Dev template: distilled, so fewer steps and no guidance.
+                (m.steps, m.cfg, m.shift) = (28, 1.0, 7.6);
+                m.sampler = "lcm".into();
+            }
+            // With a Gemma 4 on the server the prompt is rewritten as the model wants it, and
+            // with Z-Image Turbo and its files the result is refined: both or neither of the
+            // refiner's three files, since it can't run on one.
+            let first = |files: &[String], needles: &[&str]| pick(files, needles).unwrap_or("").to_string();
+            m.enhancer = first(clips, &["gemma4_e4b_it", "gemma4_e2b_it"]);
+            let turbo = unets.iter().find(|u| {
+                let u = u.to_ascii_lowercase();
+                u.contains("z_image_turbo") || u.contains("z-image-turbo")
+            });
+            // FLUX.1's VAE by its whole name: every `…vae.safetensors` ends in it.
+            let ae = |v: &&String| v.rsplit(['/', '\\']).next().is_some_and(|name| name.eq_ignore_ascii_case("ae.safetensors"));
+            let (clip, vae) = (first(clips, &["qwen_3_4b"]), vaes.iter().find(ae).cloned().unwrap_or_default());
+            if let Some(turbo) = turbo
+                && !clip.is_empty()
+                && !vae.is_empty()
+            {
+                (m.refiner, m.refiner_clip, m.refiner_vae) = (turbo.clone(), clip, vae);
+            }
             out.push(m);
         } else if n.contains("sdxl") || n.contains("sd_xl") || n.contains("sd15") || n.contains("v1-5") {
             let mut m = Family::Checkpoint.preset();
@@ -254,6 +346,8 @@ mod tests {
                     "qwen_image_2512_fp8_e4m3fn.safetensors",
                     "qwen_image_2.1_int8_convrot.safetensors",
                     "qwen_image_edit_2511_bf16.safetensors",
+                    "ming_image_0.1_design_int8_convrot.safetensors",
+                    "ming_image_0.1_design_layer_int8_convrot.safetensors",
                     "ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
                     "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
                     "mystery.safetensors",
@@ -269,9 +363,19 @@ mod tests {
                     "clip_l.safetensors",
                     "t5xxl_fp16.safetensors",
                     "ministral-3-3b.safetensors",
+                    "ming_image_0.1_ling_mini_2.0_fp8_scaled.safetensors",
                 ]),
             ),
-            ("vae".to_string(), v(&["ae.safetensors", "flux2-vae.safetensors", "qwen_image_vae.safetensors", "qwen_image_2.1_vae_bf16.safetensors"])),
+            (
+                "vae".to_string(),
+                v(&[
+                    "ae.safetensors",
+                    "flux2-vae.safetensors",
+                    "qwen_image_vae.safetensors",
+                    "qwen_image_2.1_vae_bf16.safetensors",
+                    "ming_image_vae_fp16.safetensors",
+                ]),
+            ),
             ("checkpoints".to_string(), v(&["hidream_o1_image_bf16.safetensors", "ltx-2.3-22b-dev-fp8.safetensors", "sdxl_base_1.0.safetensors"])),
         ])
     }
@@ -280,11 +384,38 @@ mod tests {
     fn recognises_image_models_only() {
         let found = detect(&folders());
         let names: Vec<&str> = found.iter().map(|m| m.unet.as_str()).filter(|u| !u.is_empty()).collect();
-        assert_eq!(names.len(), 13, "{names:?}");
-        for skipped in ["kontext", "ltx", "hunyuan", "mystery", "unconditional"] {
+        assert_eq!(names.len(), 14, "{names:?}");
+        for skipped in ["kontext", "ltx", "hunyuan", "mystery", "unconditional", "layer"] {
             assert!(!names.iter().any(|n| n.contains(skipped)), "{skipped} in {names:?}");
         }
         assert_eq!(found.iter().filter(|m| !m.checkpoint.is_empty()).count(), 2);
+    }
+
+    #[test]
+    fn hidream_o1_dev_gets_its_own_templates_settings() {
+        let mut f = folders();
+        f.get_mut("checkpoints").unwrap().extend(["hidream_o1_image_dev_fp8_scaled.safetensors", "hidream_o1_image_mxfp8.safetensors"].map(String::from));
+        let found = detect(&f);
+        let by = |file: &str| found.iter().find(|m| m.checkpoint == file).cloned().unwrap();
+        let dev = by("hidream_o1_image_dev_fp8_scaled.safetensors");
+        assert_eq!((dev.family, dev.steps, dev.cfg, dev.shift, dev.sampler.as_str()), (Family::HidreamO1, 28, 1.0, 7.6, "lcm"));
+        // The full model, whatever it is quantised to.
+        for file in ["hidream_o1_image_bf16.safetensors", "hidream_o1_image_mxfp8.safetensors"] {
+            let full = by(file);
+            assert_eq!((full.steps, full.cfg, full.shift, full.sampler.as_str(), full.megapixels), (40, 5.0, 8.0, "dpmpp_2m_sde_gpu", 4.2), "{file}");
+        }
+        // Z-Image Turbo, its encoder and its VAE are on the server: the result is refined. No
+        // Gemma 4 is: the prompt goes in as typed.
+        assert_eq!(
+            (dev.enhancer.as_str(), dev.refiner.as_str(), dev.refiner_clip.as_str(), dev.refiner_vae.as_str(), dev.refine_strength),
+            ("", "z_image_turbo_bf16.safetensors", "qwen_3_4b.safetensors", "ae.safetensors", 0.35)
+        );
+        f.get_mut("text_encoders").unwrap().extend(["gemma4_e2b_it_int8_convrot.safetensors", "gemma4_e4b_it_fp8_scaled.safetensors"].map(String::from));
+        f.get_mut("vae").unwrap().retain(|v| v != "ae.safetensors");
+        let found = detect(&f);
+        let o1 = found.iter().find(|m| m.family == Family::HidreamO1).unwrap();
+        // The larger Gemma writes; a refiner missing one of its files is left out whole.
+        assert_eq!((o1.enhancer.as_str(), o1.refiner.as_str(), o1.refiner_clip.as_str()), ("gemma4_e4b_it_fp8_scaled.safetensors", "", ""));
     }
 
     #[test]
@@ -354,13 +485,15 @@ mod tests {
         let found = detect(&folders());
         let by = |file: &str| found.iter().find(|m| m.unet == file).unwrap();
         let turbo = by("z_image_turbo_bf16.safetensors");
-        assert_eq!((turbo.name.as_str(), turbo.steps, turbo.cfg), ("z image turbo bf16", 8, 1.0));
+        assert_eq!((turbo.name.as_str(), turbo.steps, turbo.cfg), ("z image turbo bf16", 8, 2.0));
         assert_eq!(by("z_image_bf16.safetensors").steps, 30);
         assert_eq!(by("flux-2-klein-9b-fp8.safetensors").steps, 4);
         assert_eq!(by("flux-2-klein-base-9b-fp8.safetensors").cfg, 5.0);
         let dev = by("flux2_dev_fp8mixed.safetensors");
         assert_eq!((dev.guidance, dev.clip.as_str()), (4.0, "mistral_3_small_flux2_bf16.safetensors"));
-        assert_eq!(by("ernie-image-turbo.safetensors").steps, 8);
+        let ernie = by("ernie-image-turbo.safetensors");
+        assert_eq!((ernie.steps, ernie.cfg, ernie.megapixels), (8, 1.0, 2.0));
+        assert_eq!(by("ideogram4_fp8_scaled.safetensors").cfg, 5.0);
         // The encoder the server has replaces the preset's when that one is missing.
         assert_eq!(by("flux1-dev.safetensors").clip2, "t5xxl_fp16.safetensors");
         assert_eq!(by("ideogram4_fp8_scaled.safetensors").unet2, "ideogram4_unconditional_fp8_scaled.safetensors");
@@ -373,6 +506,14 @@ mod tests {
         );
         let q = by("qwen_image_2512_fp8_e4m3fn.safetensors");
         assert_eq!((q.family, q.clip.as_str(), q.vae.as_str()), (Family::QwenImage, "qwen_2.5_vl_7b_fp8_scaled.safetensors", "qwen_image_vae.safetensors"));
+        // Ming Image: its own encoder and VAE (the ones the server has), its template's settings.
+        let ming = by("ming_image_0.1_design_int8_convrot.safetensors");
+        assert_eq!(
+            (ming.family, ming.name.as_str(), ming.clip.as_str(), ming.vae.as_str()),
+            (Family::MingImage, "ming image 0.1 design int8 convrot", "ming_image_0.1_ling_mini_2.0_fp8_scaled.safetensors", "ming_image_vae_fp16.safetensors")
+        );
+        assert_eq!((ming.steps, ming.cfg, ming.megapixels, ming.alpha), (12, 1.0, 2.0, true));
+        assert!(ming.can_generate() && ming.can_edit() && problem(ming).is_none());
     }
 
     #[test]
@@ -413,6 +554,37 @@ mod tests {
             assert_eq!(problem(&f.preset()), None, "{f:?}");
         }
         assert_eq!(problem(&Model { unet: "mystery.safetensors".into(), ..Family::Flux2.preset() }), None);
+    }
+
+    #[test]
+    fn a_listed_model_takes_the_files_the_server_has_of_it() {
+        assert_eq!(variant("z_image_turbo_int8_convrot.safetensors"), "z image turbo");
+        assert_eq!(variant("sub/z_image_turbo_bf16.safetensors"), variant("Z_Image_Turbo_fp8_scaled.safetensors"));
+        assert_ne!(variant("flux-2-klein-9b-fp8.safetensors"), variant("flux-2-klein-base-9b-fp8.safetensors"));
+        assert_ne!(variant("ernie-image-turbo.safetensors"), variant("ernie-image.safetensors"));
+        assert_ne!(variant("qwen_image_2.1_int8_convrot.safetensors"), variant("qwen_image_2512_fp8_e4m3fn.safetensors"));
+        assert_eq!((variant(""), variant("..."), variant("fp8.safetensors")), (String::new(), "...".to_string(), String::new()));
+        // A default local model finds itself in a scan of a server that stores it another way.
+        let found = detect(&folders());
+        let defaults = Model::defaults();
+        let z = defaults.iter().find(|m| m.id == "z-image-turbo").unwrap();
+        let stored = found.iter().find(|m| same_variant(z, m)).unwrap();
+        assert_eq!(stored.unet, "z_image_turbo_bf16.safetensors");
+        let fixed = adopted(z, stored);
+        assert_eq!(
+            (fixed.id.as_str(), fixed.name.as_str(), fixed.unet.as_str(), fixed.cfg),
+            ("z-image-turbo", "Z-Image Turbo", "z_image_turbo_bf16.safetensors", 2.0)
+        );
+        // The undistilled Z-Image and a cloud model are other models; a nameless file matches nothing.
+        assert!(!same_variant(z, found.iter().find(|m| m.unet == "z_image_bf16.safetensors").unwrap()));
+        assert!(!same_variant(&defaults[0], &defaults[0]) && !same_variant(&Model::default(), &Model::default()));
+        let o1 = defaults.iter().find(|m| m.id == "hidream-o1").unwrap();
+        assert!(found.iter().any(|m| same_variant(o1, m)));
+        // The server has HiDream O1's checkpoint and not the int8 Z-Image; a cloud model, a custom
+        // workflow and a model without a file have nothing to be missing.
+        assert!(on_server(&folders(), o1) && !on_server(&folders(), z) && on_server(&folders(), &fixed));
+        assert!(on_server(&folders(), &defaults[0]) && on_server(&BTreeMap::new(), &Family::Custom.preset()));
+        assert!(on_server(&BTreeMap::new(), &Model::default()) && !on_server(&BTreeMap::new(), z));
     }
 
     #[test]

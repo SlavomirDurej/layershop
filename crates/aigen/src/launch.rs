@@ -241,7 +241,7 @@ pub fn desktop_install(record: &str, config: &std::path::Path, exists: &dyn Fn(&
 }
 
 /// Where the launch settings are, for messages.
-const WHERE: &str = "Preferences › AI Integrations › Local Server";
+const WHERE: &str = "Preferences › Generative AI › Local Server";
 
 /// Why nothing answers at `base` and what to do about it, given what the settings allow: the
 /// message for a generation that found no server and may not start one.

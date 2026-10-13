@@ -71,10 +71,12 @@ impl Source {
 /// The size `model` renders a `width` × `height` area at: what a [`Source`] for it must measure.
 pub fn source_size(model: &Model, width: u32, height: u32) -> (u32, u32) {
     match model.provider {
-        Provider::Comfy => render_size(width, height, model.megapixels, model.family.size_multiple()),
+        Provider::Comfy => render_size(width, height, model.family.source_megapixels(model.megapixels), model.family.size_multiple()),
         Provider::Openai => cloud::openai_size(model, width, height),
-        // Gemini answers in the shape of the image it is given: send about what it renders.
-        Provider::Gemini => render_size(width, height, if model.image_size.trim() == "1K" { 1.0 } else { 4.0 }, 8),
+        // These answer in the shape of the image they are given: send about what they render.
+        Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => {
+            render_size(width, height, if model.image_size.trim() == "1K" { 1.0 } else { 4.0 }, 8)
+        }
     }
 }
 
@@ -134,28 +136,94 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
     let timeout = u64::from(settings.timeout_seconds.clamp(10, 3600));
     match model.provider {
         Provider::Comfy => generate_comfy(transport, settings, model, job, control, timeout),
-        Provider::Openai | Provider::Gemini => {
+        Provider::Bfl => generate_bfl(transport, model, key, job, control, timeout),
+        Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta => {
             let who = model.provider.label();
+            // An edit comes back in the shape of the picture it was given.
+            let given = job.source.as_ref().map(|source| (source.width, source.height));
             let (request, size) = match (&job.source, model.provider) {
                 (Some(source), Provider::Openai) => (cloud::openai_edit_request(model, job, source, key, timeout)?, (source.width, source.height)),
                 (None, Provider::Openai) => (cloud::openai_request(model, job, key, timeout)?, cloud::openai_size(model, job.width, job.height)),
-                (Some(source), _) => (cloud::gemini_request(model, job, key, timeout)?, (source.width, source.height)),
-                (None, _) => (cloud::gemini_request(model, job, key, timeout)?, (job.width, job.height)),
+                (_, Provider::Xai) => (cloud::xai_request(model, job, key, timeout)?, given.unwrap_or((job.width, job.height))),
+                (_, Provider::Meta) => (cloud::meta_request(model, job, key, timeout)?, given.unwrap_or_else(|| cloud::meta_size(job.width, job.height))),
+                (_, _) => (cloud::gemini_request(model, job, key, timeout)?, given.unwrap_or((job.width, job.height))),
             };
             (control.progress)(0.1, &format!("Waiting for {who}…"));
             let response = transport.send(&request).map_err(|e| Error::Network(format!("Could not reach {who}: {e}")))?;
             if (control.cancelled)() {
                 return Err(Error::Cancelled);
             }
-            let (bytes, cost) = if model.provider == Provider::Openai {
-                let (bytes, usage) = cloud::parse_openai_with_usage(response.status, &response.body)?;
-                (bytes, usage.and_then(|u| crate::pricing::billed(&model.api_model, &u)))
-            } else {
-                (cloud::parse_gemini(response.status, &response.body)?, None)
+            let (bytes, cost) = match model.provider {
+                Provider::Openai => {
+                    let (bytes, usage) = cloud::parse_openai_with_usage(response.status, &response.body)?;
+                    (bytes, usage.and_then(|u| crate::pricing::billed(&model.api_model, &u)))
+                }
+                // xAI's answer says what it cost.
+                Provider::Xai => {
+                    let (bytes, usage) = cloud::parse_images(Provider::Xai, response.status, &response.body)?;
+                    (bytes, usage.as_ref().and_then(cloud::xai_cost))
+                }
+                // Meta bills Muse Image a flat price for each image it returns.
+                Provider::Meta => {
+                    let (bytes, _) = cloud::parse_images(Provider::Meta, response.status, &response.body)?;
+                    (bytes, model.api_model.trim().starts_with("muse-image").then_some(crate::pricing::MUSE_IMAGE_USD))
+                }
+                _ => (cloud::parse_gemini(response.status, &response.body)?, None),
             };
             Ok(Generated { bytes, seed: job.seed, width: size.0, height: size.1, cost })
         }
     }
+}
+
+/// How often Black Forest Labs is asked whether the image is ready.
+const BFL_POLL: Duration = Duration::from_millis(1500);
+
+/// Black Forest Labs: submit the job, ask for it until it is ready, download the image. The key
+/// goes to its API only: not to the address the image is downloaded from.
+fn generate_bfl(transport: &dyn Transport, model: &Model, key: &str, job: &Job, control: &Control<'_>, timeout: u64) -> Result<Generated> {
+    let who = model.provider.label();
+    let unreachable = |e: Error| Error::Network(format!("Could not reach {who}: {e}"));
+    let request = cloud::bfl_request(model, job, key, timeout)?;
+    let (width, height) = job.source.as_ref().map_or((job.width, job.height), |source| (source.width, source.height));
+    (control.progress)(0.05, &format!("Sending to {who}…"));
+    let submitted = transport.send(&request).map_err(unreachable)?;
+    let (polling_url, cost) = cloud::parse_bfl_submitted(submitted.status, &submitted.body)?;
+    let poll = cloud::bfl_poll_request(&polling_url, key)?;
+    let label = if model.name.is_empty() { who } else { model.name.as_str() };
+    let polls = (timeout * 1000 / BFL_POLL.as_millis().max(1) as u64).max(1);
+    let mut failures = 0u32;
+    for n in 0..polls {
+        if (control.cancelled)() {
+            return Err(Error::Cancelled);
+        }
+        (control.sleep)(BFL_POLL);
+        let state = match transport.send(&poll) {
+            Ok(r) => cloud::parse_bfl_job(r.status, &r.body)?,
+            Err(_) => {
+                failures += 1;
+                if failures > MAX_POLL_FAILURES {
+                    return Err(Error::Network(format!("Lost the connection to {who} while it was generating")));
+                }
+                continue;
+            }
+        };
+        failures = 0;
+        match state {
+            cloud::BflJob::Working(status) => {
+                // No step count: creep towards done so the bar moves.
+                (control.progress)(0.1 + 0.85 * (1.0 - 1.0 / (1.0 + n as f32 / 12.0)), &format!("Generating with {label}… ({status})"));
+            }
+            cloud::BflJob::Ready(sample) => {
+                (control.progress)(0.97, "Downloading the image…");
+                let r = transport.send(&Request::get(sample).timeout(120)).map_err(|e| Error::Network(format!("Could not download the image from {who}: {e}")))?;
+                if !r.ok() || r.body.is_empty() {
+                    return Err(Error::Server(format!("{who} could not serve the generated image (HTTP {})", r.status)));
+                }
+                return Ok(Generated { bytes: r.body, seed: job.seed, width, height, cost });
+            }
+        }
+    }
+    Err(Error::Server(format!("{who} did not finish within {timeout} seconds (raise the timeout in Preferences › Generative AI)")))
 }
 
 fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model, job: &Job, control: &Control<'_>, timeout: u64) -> Result<Generated> {
@@ -164,7 +232,7 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
     // An inpainting renders at the size of the image it was given.
     let (width, height) = match &job.source {
         Some(source) => (source.width, source.height),
-        None => render_size(job.width, job.height, model.megapixels, model.family.size_multiple()),
+        None => model.family.render_size(job.width, job.height, model.megapixels),
     };
     let render = Job { width, height, source: None, ..job.clone() };
     let workflow = match &job.source {
@@ -253,7 +321,7 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
         }
     }
     let _ = transport.send(&Request::post_json(format!("{base}/interrupt"), b"{}".to_vec()).timeout(5));
-    Err(Error::Server(format!("ComfyUI did not finish within {timeout} seconds (raise the timeout in Preferences › Integrations)")))
+    Err(Error::Server(format!("ComfyUI did not finish within {timeout} seconds (raise the timeout in Preferences › Generative AI)")))
 }
 
 /// The model files a ComfyUI server offers, by folder (see [`comfy::FOLDERS`]), for the file
@@ -527,6 +595,11 @@ mod tests {
         let z = Family::ZImage.preset();
         assert_eq!(source_size(&z, 500, 500), render_size(500, 500, z.megapixels, 16));
         assert_eq!(source_size(&Family::QwenImage21.preset(), 500, 500).0 % 32, 0);
+        // Ming Image generates at two megapixels, and is given pictures at two when raised to four.
+        let ming = Family::MingImage.preset();
+        assert_eq!((source_size(&ming, 500, 500), render_size(500, 500, ming.megapixels, 16)), ((1408, 1408), (1408, 1408)));
+        let raised = Model { megapixels: 4.0, ..ming };
+        assert_eq!((source_size(&raised, 500, 500), render_size(500, 500, raised.megapixels, 16)), ((1408, 1408), (2000, 2000)));
         let gpt = Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false);
         assert_eq!(source_size(&gpt, 1600, 900), cloud::openai_size(&gpt, 1600, 900));
         let nb = Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false);
@@ -627,5 +700,107 @@ mod tests {
         let b = random_seed();
         assert_ne!(a, b);
         assert!(a < 1 << 48 && b < 1 << 48);
+    }
+
+    #[test]
+    fn xai_and_meta_answer_at_once_and_say_what_the_image_cost() {
+        let xai = Fake::new(|r, _| {
+            assert_eq!(r.url, "https://api.x.ai/v1/images/generations");
+            ok(r#"{"data":[{"b64_json":"aGVsbG8="}],"usage":{"cost_in_usd_ticks":400000000}}"#)
+        });
+        let m = Model::cloud(Provider::Xai, "Grok Imagine Image 2.0", "grok-imagine-image-2.0", false);
+        let g = generate(&xai, &settings(), &m, "k", &job(), &control(&|| false)).unwrap();
+        assert_eq!((g.bytes.as_slice(), g.cost), (&b"hello"[..], Some(0.04)));
+        assert_eq!(xai.urls().len(), 1);
+        // An edit goes to the edit endpoint and comes back at the size of the picture given.
+        let edit = Job { source: Some(Source { mask: Vec::new(), edit: true, ..source() }), ..job() };
+        let edits = Fake::new(|r, _| {
+            assert_eq!(r.url, "https://api.x.ai/v1/images/edits");
+            ok(r#"{"data":[{"b64_json":"aGVsbG8="}]}"#)
+        });
+        let g = generate(&edits, &settings(), &m, "k", &edit, &control(&|| false)).unwrap();
+        let given = edit.source.as_ref().map(|s| (s.width, s.height)).unwrap();
+        assert_eq!(((g.width, g.height), g.cost), (given, None));
+
+        let meta = Fake::new(|r, _| {
+            assert_eq!(r.url, "https://api.meta.ai/v1/images/generations");
+            ok(r#"{"data":[{"b64_json":"aGVsbG8="}],"output_format":"png"}"#)
+        });
+        let muse = Model::cloud(Provider::Meta, "Muse Image", "muse-image-1.0", false);
+        let g = generate(&meta, &settings(), &muse, "k", &job(), &control(&|| false)).unwrap();
+        assert_eq!((g.bytes.as_slice(), g.cost), (&b"hello"[..], Some(0.01)));
+        // Another model of Meta's has no price here.
+        let other = Model { api_model: "something-else".into(), ..muse.clone() };
+        assert_eq!(generate(&meta_any(), &settings(), &other, "k", &job(), &control(&|| false)).unwrap().cost, None);
+        // Without a key nothing is sent; a refusal is the provider's message.
+        assert!(matches!(generate(&meta, &settings(), &muse, "", &job(), &control(&|| false)), Err(Error::Config(_))));
+        let refused = Fake::new(|_, _| Ok(Response { status: 429, body: br#"{"error":{"message":"slow down"}}"#.to_vec() }));
+        let e = generate(&refused, &settings(), &m, "k", &job(), &control(&|| false)).unwrap_err().to_string();
+        assert!(e.contains("xAI: slow down"), "{e}");
+    }
+
+    fn meta_any() -> Fake {
+        Fake::new(|_, _| ok(r#"{"data":[{"b64_json":"aGVsbG8="}]}"#))
+    }
+
+    #[test]
+    fn black_forest_labs_is_submitted_polled_and_downloaded_without_the_key() {
+        const POLL_URL: &str = "https://api.eu1.bfl.ai/v1/get_result?id=t1";
+        const SAMPLE: &str = "https://delivery-eu1.bfl.ai/results/a.png?sig=1";
+        let m = Model::cloud(Provider::Bfl, "FLUX 3 Image", "flux-3-image", false);
+        let fake = Fake::new(|r, n| {
+            let keyed = r.headers.iter().any(|(k, v)| k == "x-key" && v == "bfl-k");
+            match (r.url.as_str(), n) {
+                ("https://api.bfl.ai/v1/flux-3-image", 0) => {
+                    assert!(keyed && r.method == Method::Post);
+                    ok(&format!(r#"{{"id":"t1","polling_url":"{POLL_URL}","cost":4.8}}"#))
+                }
+                (POLL_URL, 1) => ok(r#"{"status":"Pending"}"#),
+                (POLL_URL, 2) => ok(r#"{"status":"Generating"}"#),
+                (POLL_URL, 3) => {
+                    assert!(keyed && r.method == Method::Get);
+                    ok(&format!(r#"{{"status":"Ready","result":{{"sample":"{SAMPLE}"}}}}"#))
+                }
+                (SAMPLE, 4) => {
+                    // The signed address is not the API: the key stays home.
+                    assert!(r.headers.is_empty(), "{:?}", r.headers);
+                    ok("PNGDATA")
+                }
+                (u, n) => panic!("unexpected request {n}: {u}"),
+            }
+        });
+        let g = generate(&fake, &settings(), &m, "bfl-k", &job(), &control(&|| false)).unwrap();
+        assert_eq!(g.bytes, b"PNGDATA");
+        assert!((g.cost.unwrap() - 0.048).abs() < 1e-12);
+        assert_eq!(fake.urls().len(), 5);
+
+        // An answer that points the poll somewhere else is refused before the key goes there.
+        let hijack = Fake::new(|_, _| ok(r#"{"id":"t1","polling_url":"https://evil.example/get_result"}"#));
+        let e = generate(&hijack, &settings(), &m, "bfl-k", &job(), &control(&|| false)).unwrap_err();
+        assert!(matches!(e, Error::BadResponse(_)), "{e}");
+        assert_eq!(hijack.urls().len(), 1);
+        // A moderated job, one that never finishes, and a cancel each end the wait.
+        let moderated = Fake::new(|_, n| if n == 0 { ok(&format!(r#"{{"id":"t","polling_url":"{POLL_URL}"}}"#)) } else { ok(r#"{"status":"Request Moderated"}"#) });
+        assert!(generate(&moderated, &settings(), &m, "k", &job(), &control(&|| false)).unwrap_err().to_string().contains("refused the prompt"));
+        let stuck = || Fake::new(|_, n| if n == 0 { ok(&format!(r#"{{"id":"t","polling_url":"{POLL_URL}"}}"#)) } else { ok(r#"{"status":"Pending"}"#) });
+        let (slow, quick) = (stuck(), Settings { timeout_seconds: 10, ..settings() });
+        let e = generate(&slow, &quick, &m, "k", &job(), &control(&|| false)).unwrap_err().to_string();
+        assert!(e.contains("did not finish within 10 seconds"), "{e}");
+        assert!(slow.urls().len() <= 8, "{}", slow.urls().len());
+        let (slow, polls) = (stuck(), AtomicU32::new(0));
+        let cancelled = generate(&slow, &settings(), &m, "k", &job(), &control(&|| polls.fetch_add(1, Ordering::Relaxed) >= 3)).unwrap_err();
+        assert_eq!(cancelled, Error::Cancelled);
+        // Out of credits, and a download that fails.
+        let broke = Fake::new(|_, _| Ok(Response { status: 402, body: br#"{"detail":"Insufficient credits"}"#.to_vec() }));
+        assert!(generate(&broke, &settings(), &m, "k", &job(), &control(&|| false)).unwrap_err().to_string().contains("out of credits"));
+        let gone = Fake::new(|r, n| match n {
+            0 => ok(&format!(r#"{{"id":"t","polling_url":"{POLL_URL}"}}"#)),
+            1 => ok(&format!(r#"{{"status":"Ready","result":{{"sample":"{SAMPLE}"}}}}"#)),
+            _ => {
+                assert_eq!(r.url, SAMPLE);
+                Ok(Response { status: 403, body: Vec::new() })
+            }
+        });
+        assert!(generate(&gone, &settings(), &m, "k", &job(), &control(&|| false)).unwrap_err().to_string().contains("could not serve"));
     }
 }

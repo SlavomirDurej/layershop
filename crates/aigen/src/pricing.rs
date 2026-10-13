@@ -15,6 +15,20 @@ use serde_json::Value;
 use crate::cloud::openai_size;
 use crate::model::Model;
 
+/// What Meta bills for one image from Muse Image: a flat price, whatever its size (Meta Model
+/// API pricing, 2026-10).
+pub const MUSE_IMAGE_USD: f64 = 0.01;
+/// What one Black Forest Labs credit costs: the answer to a request says how many it used.
+pub const BFL_CREDIT_USD: f64 = 0.01;
+/// xAI reports what a request cost in ticks: ten thousand million to the dollar.
+pub const XAI_TICKS_PER_USD: f64 = 1e10;
+
+/// A reported amount as dollars, when it is one: finite, not negative, and not absurd.
+pub fn reported(amount: f64, unit_usd: f64) -> Option<f64> {
+    let usd = amount * unit_usd;
+    (usd.is_finite() && (0.0..=10_000.0).contains(&usd)).then_some(usd)
+}
+
 /// US dollars per million tokens.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Rates {
