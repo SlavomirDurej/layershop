@@ -1295,8 +1295,15 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, op
 
 /// [`dropdown`], also returning the option under the pointer in its open list (live previews).
 pub fn dropdown_hovered<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, options: &[(T, &str)], width: f32) -> (bool, Option<T>) {
-    let (chosen, hovered) = dropdown_with(ui, id, current, options, width, false);
+    let (chosen, hovered) = dropdown_with(ui, id, current, options, width, false, &[]);
     (!chosen.is_empty(), hovered)
+}
+
+/// [`dropdown`] whose open list is in sections: each of `headings` is (the index of the option
+/// it stands above, its text). A heading is not a choice: the pointer, the arrow keys and a typed
+/// letter pass it by.
+pub fn dropdown_sectioned<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, options: &[(T, &str)], headings: &[(usize, &str)], width: f32) -> bool {
+    !dropdown_with(ui, id, current, options, width, false, headings).0.is_empty()
 }
 
 /// [`dropdown_hovered`] whose value also steps with the wheel over its button or open list: down
@@ -1306,10 +1313,18 @@ pub fn dropdown_hovered<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &m
 /// in order (one per notch; the last is `current`) and the option under the pointer in the open
 /// list, none while the pointer rests where the wheel last stepped.
 pub fn dropdown_wheel_hovered<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, options: &[(T, &str)], width: f32) -> (Vec<T>, Option<T>) {
-    dropdown_with(ui, id, current, options, width, true)
+    dropdown_with(ui, id, current, options, width, true, &[])
 }
 
-fn dropdown_with<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, options: &[(T, &str)], width: f32, wheel: bool) -> (Vec<T>, Option<T>) {
+fn dropdown_with<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    id: &str,
+    current: &mut T,
+    options: &[(T, &str)],
+    width: f32,
+    wheel: bool,
+    headings: &[(usize, &str)],
+) -> (Vec<T>, Option<T>) {
     let label = options.iter().find(|(v, _)| v == current).map(|(_, l)| tl!(l)).unwrap_or("—");
     let (mut chosen, mut hovered) = (Vec::new(), None);
     // The wheel's notches add up over the button and the open list alike.
@@ -1345,7 +1360,14 @@ fn dropdown_with<T: PartialEq + Clone>(ui: &mut Ui, id: &str, current: &mut T, o
             // The row nearest the pointer, by its distance to each row.
             let pointer = ui.ctx().pointer_hover_pos().filter(|_| ui.rect_contains_pointer(ui.clip_rect()));
             let mut nearest: Option<(f32, &T)> = None;
-            for (v, l) in options {
+            for (index, (v, l)) in options.iter().enumerate() {
+                if let Some((_, heading)) = headings.iter().find(|(at, _)| *at == index) {
+                    let t = Tokens::get(ui.ctx());
+                    if index > 0 {
+                        ui.add_space(4.0);
+                    }
+                    ui.add(egui::Label::new(egui::RichText::new(tl!(heading)).font(theme::medium(11.0)).color(t.text_faint)).selectable(false));
+                }
                 let item = ui.selectable_label(v == current, tl!(l));
                 if reveal && v == current {
                     item.scroll_to_me(None);

@@ -36,7 +36,7 @@ fn ukrainian_native_app_menu_keeps_product_and_language_names() {
         let layout = crate::native_menu::photocraft_layout(&crate::menus::menu_items(h.state()), lang("uk"), "uk");
         for (id, label) in [("help.about", "Про PhotoCraft"), (crate::native_menu::HIDE, "Приховати PhotoCraft"), ("file.exit", "Вийти з PhotoCraft")]
         {
-            assert_eq!(layout.bar.find(id).map(|item| item.label.as_str()), Some(label), "{id}");
+            assert_eq!(layout.bar.find(id).map(|item| item.label.as_str()), Some(crate::brand::display(label)), "{id}");
         }
         assert_eq!(layout.bar.find("app.language.uk").map(|item| (item.label.as_str(), item.checked)), Some(("Українська", Some(true))));
     });

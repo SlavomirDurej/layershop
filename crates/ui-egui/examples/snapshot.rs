@@ -9,6 +9,10 @@
 //! `--system-theme light|dark|none` supplies a deterministic OS appearance for theme captures.
 //!
 //! `--safe-gpu` draws the canvas on the CPU path, like the app's `--safe-gpu` launch.
+//! `--ai-setup-demo pc|location|models|install|ready` puts a screen of the Local AI setup wizard
+//! in front, against a stand-in network and engine (nothing is downloaded); `installed` and
+//! `installed-models` show a setup that is there already; `pc-comfy` and `location-comfy` a
+//! machine with ComfyUI Desktop; `env` gives the app the stand-in with the wizard closed.
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //! `--custom-titlebar` draws the Windows/Linux title bar (caption buttons in the top bar).
 //!
@@ -60,6 +64,10 @@ fn main() {
         ..Default::default()
     };
     let open = arg(&args, "--open");
+    let ai_setup_demo = arg(&args, "--ai-setup-demo");
+    // The stand-in setup's folders: its own, and gone again when the snapshot is taken.
+    let demo_dir = std::env::temp_dir().join(format!("photocraft-ai-setup-demo-{}", std::process::id()));
+    let demo_dir_in = demo_dir.clone();
     let safe_gpu = args.iter().any(|a| a == "--safe-gpu");
     // `--background-jobs`: long commands run as background jobs, as in the desktop app (#210).
     let background_jobs = args.iter().any(|a| a == "--background-jobs");
@@ -88,6 +96,12 @@ fn main() {
             }
             if let Some(path) = &open {
                 app.open_path(path).expect("open --open file");
+            }
+            if let Some(page) = &ai_setup_demo
+                && !photocraft_ui_egui::ai_setup_ui::demo::show(&mut app, &demo_dir_in, page)
+            {
+                eprintln!("--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-comfy, location-comfy or env");
+                std::process::exit(2);
             }
             app
         });
@@ -169,4 +183,7 @@ fn main() {
     let img = harness.render().expect("render");
     img.save(&out).expect("save png");
     println!("wrote {out} ({}×{})", img.width(), img.height());
+    // A stand-in setup stops with the app; what it wrote goes with it.
+    drop(harness);
+    let _ = std::fs::remove_dir_all(&demo_dir);
 }

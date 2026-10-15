@@ -1,6 +1,10 @@
 //! Community and project links: the Help menu, the About dialog, the start screen and the title
-//! bar all open these. URLs follow the crafting-app pattern (`getartcraft.com/apps/<app>`,
-//! `github.com/storytold/<app>`).
+//! bar all open these.
+//!
+//! This fork ships as LayerShop (see [`crate::brand`]), so the product's own links (website, source,
+//! issues) are LayerShop's. Upstream's community links stay in the Help menu, where their labels
+//! say whose they are ("Join the ArtCraft Discord…"); the unlabelled community buttons are off
+//! ([`COMMUNITY_BUTTON`]).
 
 use serde_json::{Value, json};
 
@@ -8,9 +12,14 @@ use crate::PhotocraftApp;
 
 pub const DISCORD: &str = "https://discord.gg/artcraft";
 pub const ARTCRAFT_WEBSITE: &str = "https://getartcraft.com";
-pub const APP_PAGE: &str = "https://getartcraft.com/apps/photocraft";
-pub const GITHUB: &str = "https://github.com/storytold/photocraft";
-pub const ISSUES: &str = "https://github.com/storytold/photocraft/issues";
+pub const APP_PAGE: &str = "https://layershop.aardvarkstudios.net";
+pub const GITHUB: &str = "https://github.com/SlavomirDurej/photocraft";
+pub const ISSUES: &str = "https://github.com/SlavomirDurej/photocraft/issues";
+
+/// Show the "Join us on Discord" buttons (start screen, About, title bar)? They open upstream's
+/// server, and "us" under this fork's name would say it is LayerShop's. Off here; Help › Join the
+/// ArtCraft Discord… still opens it, under a label that says whose it is.
+pub const COMMUNITY_BUTTON: bool = false;
 
 /// Help-menu link commands: (id, url). Labels live in `menus::UI_COMMANDS`.
 pub const COMMANDS: &[(&str, &str)] =
@@ -32,8 +41,12 @@ pub fn open(app: &mut PhotocraftApp, ctx: &egui::Context, url: &str) -> Value {
     json!({"url": url})
 }
 
-/// The prominent "Join us on Discord" button.
+/// The prominent "Join us on Discord" button (nothing, and no room taken, without
+/// [`COMMUNITY_BUTTON`]).
 pub fn discord_button(app: &mut PhotocraftApp, ui: &mut egui::Ui, min_width: f32) -> egui::Response {
+    if !COMMUNITY_BUTTON {
+        return ui.allocate_response(egui::Vec2::ZERO, egui::Sense::hover());
+    }
     let r = crate::widgets::primary_button(ui, tl!("Join us on Discord"), min_width).on_hover_text(DISCORD);
     if r.clicked() {
         open(app, ui.ctx(), DISCORD);
@@ -113,9 +126,9 @@ mod tests {
         let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), Default::default());
         let ctx = egui::Context::default();
         for (id, url) in [
-            ("help.discord", "https://discord.gg/artcraft"),
-            ("help.website", "https://getartcraft.com/apps/photocraft"),
-            ("help.github", "https://github.com/storytold/photocraft"),
+            ("help.discord", DISCORD),
+            ("help.website", APP_PAGE),
+            ("help.github", GITHUB),
         ] {
             let r = crate::menus::invoke(&mut app, &ctx, id, serde_json::json!({})).unwrap();
             assert_eq!(r["url"], url);

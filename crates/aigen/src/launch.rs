@@ -240,6 +240,191 @@ pub fn desktop_install(record: &str, config: &std::path::Path, exists: &dyn Fn(&
     None
 }
 
+/// The folders a model file can go in for the ComfyUI `launch` starts to see it, in ComfyUI's
+/// own order: the first is where it saves new ones itself. Each is a models folder, the one
+/// that holds `checkpoints`, `diffusion_models`, `vae` and the rest: ComfyUI's own (`models` in
+/// its base folder, or `--models-directory`), and those its extra model paths files add (each
+/// one passed with `--extra-model-paths-config`, and `extra_model_paths.yaml` beside its
+/// script). Only folders that exist are listed. `read` reads a small text file; `is_dir`
+/// answers "is this a folder?".
+pub fn models_folders(launch: &Launch, read: &dyn Fn(&std::path::Path) -> Option<String>, is_dir: &dyn Fn(&std::path::Path) -> bool) -> Vec<String> {
+    use std::path::{Path, PathBuf};
+    let folder = PathBuf::from(launch.folder.trim());
+    if folder.as_os_str().is_empty() {
+        return Vec::new();
+    }
+    let args = split_args(&launch.args);
+    // Relative paths are from the folder it is started in.
+    let after = |flag: &str| args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).map(|p| folder.join(p));
+    let script = args.iter().find(|a| a.to_ascii_lowercase().ends_with(".py")).map(|s| folder.join(s));
+    let comfy = script.as_deref().and_then(Path::parent).map_or_else(|| folder.clone(), Path::to_path_buf);
+    let base = after("--base-directory").unwrap_or_else(|| comfy.clone());
+    let own = after("--models-directory").unwrap_or_else(|| base.join("models"));
+    // ComfyUI reads the file beside its script first, then each one given, in order
+    // (`--extra-model-paths-config a.yaml b.yaml`, as often as it is given).
+    let mut configs = vec![comfy.join("extra_model_paths.yaml")];
+    for (i, a) in args.iter().enumerate() {
+        if a == "--extra-model-paths-config" {
+            configs.extend(args.iter().skip(i + 1).take_while(|x| !x.starts_with("--")).map(|x| folder.join(x)));
+        }
+    }
+    // As ComfyUI orders a folder type's paths: one marked `is_default` goes first, others last.
+    let key = |p: &Path| p.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let mut order = vec![own];
+    for config in configs.iter().take(16) {
+        let Some(yaml) = read(config) else { continue };
+        let dir = config.parent().unwrap_or(Path::new(""));
+        for (root, default) in extra_model_roots(&yaml, dir) {
+            let at = order.iter().position(|p| key(p) == key(&root));
+            match (at, default) {
+                (Some(i), true) => {
+                    let p = order.remove(i);
+                    order.insert(0, p);
+                }
+                (Some(_), false) => {}
+                (None, true) => order.insert(0, root),
+                (None, false) => order.push(root),
+            }
+        }
+    }
+    order.into_iter().filter(|p| is_dir(p)).map(|p| p.to_string_lossy().into_owned()).collect()
+}
+
+/// The models folders one extra model paths file (`extra_model_paths.yaml`) adds, in its order,
+/// each with whether it is marked `is_default`. `dir` is the file's folder, which a relative
+/// `base_path` is from. ComfyUI reads the file as YAML; this reads the shape such files have
+/// (sections of `key: value`, values over several lines after `|`), which is all it needs.
+fn extra_model_roots(yaml: &str, dir: &std::path::Path) -> Vec<(std::path::PathBuf, bool)> {
+    use std::path::{Component, Path, PathBuf};
+    #[derive(Default)]
+    struct Section {
+        base: Option<String>,
+        default: bool,
+        entries: Vec<(String, String)>,
+    }
+    let mut sections: Vec<Section> = Vec::new();
+    // The key whose value is on the lines below it, and how far it is indented.
+    let mut block: Option<(String, usize)> = None;
+    for line in yaml.lines().take(10_000) {
+        let body = line.trim();
+        let indent = line.len() - line.trim_start().len();
+        if body.is_empty() || body.starts_with('#') {
+            continue;
+        }
+        if let Some((key, at)) = &block {
+            if indent > *at {
+                if let Some(s) = sections.last_mut() {
+                    s.entries.push((key.clone(), body.to_string()));
+                }
+                continue;
+            }
+            block = None;
+        }
+        let Some((key, raw)) = yaml_pair(body) else { continue };
+        if indent == 0 {
+            sections.push(Section::default());
+            continue;
+        }
+        let Some(s) = sections.last_mut() else { continue };
+        match key.as_str() {
+            "base_path" => s.base = Some(yaml_scalar(raw)),
+            // A quoted string counts as true when it is not empty, as Python reads it.
+            "is_default" if raw.starts_with(['\'', '"']) => s.default = !yaml_scalar(raw).is_empty(),
+            "is_default" => s.default = !matches!(yaml_scalar(raw).as_str(), "" | "false" | "False" | "FALSE" | "no" | "No" | "off" | "null" | "~" | "0"),
+            _ if raw.starts_with('|') || raw.starts_with('>') => block = Some((key, indent)),
+            _ => s.entries.push((key, yaml_scalar(raw))),
+        }
+    }
+    let tidy = |p: PathBuf| p.components().filter(|c| !matches!(c, Component::CurDir)).collect::<PathBuf>();
+    let mut out = Vec::new();
+    for s in sections {
+        let base = match &s.base {
+            Some(b) if !b.trim().is_empty() => dir.join(b.trim()),
+            _ => dir.to_path_buf(),
+        };
+        // The folder that holds `diffusion_models` (or another standard one) is the models folder.
+        let root = ["diffusion_models", "checkpoints", "vae", "text_encoders", "unet", "clip", "loras"].into_iter().find_map(|kind| {
+            let (_, value) = s.entries.iter().find(|(k, v)| k.eq_ignore_ascii_case(kind) && !v.trim().is_empty())?;
+            let path = base.join(value.trim().trim_end_matches(['/', '\\']));
+            let named = path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.eq_ignore_ascii_case(kind));
+            named.then(|| path.parent().map(Path::to_path_buf)).flatten()
+        });
+        if let Some(root) = root {
+            out.push((tidy(root), s.default));
+        }
+    }
+    out
+}
+
+/// `key: value` on one YAML line: the key without its quotes, and the value as written.
+fn yaml_pair(body: &str) -> Option<(String, &str)> {
+    let (key, rest) = match body.chars().next() {
+        Some(q @ ('\'' | '"')) => {
+            let inner = body.get(1..)?;
+            let end = inner.find(q)?;
+            (inner.get(..end)?.to_string(), inner.get(end + 1..)?.trim_start().strip_prefix(':')?)
+        }
+        _ => {
+            // The first colon followed by a space or the end: `C:\` in a value is not one.
+            let at = body.char_indices().find(|&(i, c)| c == ':' && body.get(i + 1..).is_some_and(|r| r.is_empty() || r.starts_with(' ')))?.0;
+            (body.get(..at)?.trim().to_string(), body.get(at + 1..)?)
+        }
+    };
+    Some((key, rest.trim()))
+}
+
+/// A YAML value as text: quotes removed (`''` in single quotes is one, `\\` in double quotes
+/// one backslash), and a comment after a plain value dropped.
+fn yaml_scalar(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Some(inner) = raw.strip_prefix('\'') {
+        return inner.rsplit_once('\'').map_or(inner, |(v, _)| v).replace("''", "'");
+    }
+    if let Some(inner) = raw.strip_prefix('"') {
+        let mut out = String::new();
+        let mut chars = inner.chars();
+        while let Some(c) = chars.next() {
+            match c {
+                '"' => break,
+                '\\' => match chars.next() {
+                    Some('n') => out.push('\n'),
+                    Some('t') => out.push('\t'),
+                    Some(other) => out.push(other),
+                    None => break,
+                },
+                c => out.push(c),
+            }
+        }
+        return out;
+    }
+    raw.split(" #").next().unwrap_or("").trim().to_string()
+}
+
+/// The models folders the ComfyUI at `base` reports it reads (`/experiment/models`), the one it
+/// saves new files to first; empty when it can't tell (an older ComfyUI, or no answer).
+pub fn served_models_folders(transport: &dyn Transport, base: &str) -> Vec<String> {
+    let Ok(base) = comfy::base_url(base) else { return Vec::new() };
+    let Some(r) = transport.send(&Request::get(format!("{base}/experiment/models")).timeout(5)).ok().filter(|r| r.ok()) else { return Vec::new() };
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(&r.body) else { return Vec::new() };
+    let kinds = v.as_array().map_or(&[][..], Vec::as_slice);
+    let folders_of = |kind: &str| -> Vec<String> {
+        let Some(entry) = kinds.iter().take(256).find(|e| e.get("name").and_then(serde_json::Value::as_str) == Some(kind)) else { return Vec::new() };
+        let paths = entry.get("folders").and_then(serde_json::Value::as_array).map_or(&[][..], Vec::as_slice);
+        let mut out: Vec<String> = Vec::new();
+        for p in paths.iter().take(64).filter_map(serde_json::Value::as_str) {
+            // `C:\…\models\diffusion_models` → `C:\…\models`; a folder of its own name is not one.
+            let trimmed = p.trim_end_matches(['/', '\\']);
+            let Some((root, name)) = trimmed.rsplit_once(['/', '\\']) else { continue };
+            if name.eq_ignore_ascii_case(kind) && !root.is_empty() && !out.iter().any(|o| o.eq_ignore_ascii_case(root)) {
+                out.push(root.to_string());
+            }
+        }
+        out
+    };
+    let found = folders_of("diffusion_models");
+    if found.is_empty() { folders_of("checkpoints") } else { found }
+}
+
 /// Where the launch settings are, for messages.
 const WHERE: &str = "Preferences › Generative AI › Local Server";
 
@@ -489,6 +674,13 @@ mod native {
         desktop_install(&std::fs::read_to_string(file).ok()?, &config, &|p| p.is_file())
     }
 
+    /// [`models_folders`] on this computer's disk.
+    pub fn models_folders_here(launch: &Launch) -> Vec<String> {
+        // Settings files, not databases: anything big is not one.
+        let read = |p: &Path| std::fs::metadata(p).ok().filter(|m| m.is_file() && m.len() <= 1 << 20).and_then(|_| std::fs::read_to_string(p).ok());
+        models_folders(launch, &read, &|p| p.is_dir())
+    }
+
     /// A running process: its executable, working folder (where the OS tells), command line and
     /// parent.
     #[derive(Clone, Debug, Default)]
@@ -607,7 +799,7 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{find_installed, find_running};
+pub use native::{find_installed, find_running, models_folders_here};
 
 #[cfg(test)]
 mod tests {
@@ -702,6 +894,69 @@ mod tests {
         // An id that isn't a plain name can't reach outside the settings folder.
         let sneaky = r#"[{"id":"../../etc/passwd","installPath":"/installs/ComfyUI","adoptedPythonPath":"/docs/ComfyUI/.venv/bin/python"}]"#;
         assert!(!desktop_install(sneaky, Path::new("/cfg"), &|_| true).unwrap().args.contains("passwd"));
+    }
+
+    #[test]
+    fn the_models_folders_are_found_as_comfyui_finds_them() {
+        use std::path::Path;
+        let files = |list: &'static [(&'static str, &'static str)]| move |p: &Path| list.iter().find(|(f, _)| Path::new(f) == p).map(|(_, text)| text.to_string());
+        let dirs = |list: &'static [&'static str]| move |p: &Path| list.iter().any(|d| Path::new(d) == p);
+        let slashes = |v: Vec<String>| v.into_iter().map(|p| p.replace('\\', "/")).collect::<Vec<_>>();
+        // ComfyUI Desktop: the shared folder it saves new models to, then its own base folder's.
+        const SHARED: &str = "# Generated by Comfy Desktop\n\ncomfy.desktop_0:\n  base_path: '/shared/models'\n  is_default: true\n  'checkpoints': 'checkpoints/'\n  'controlnet': |-\n    controlnet/\n    t2i_adapter/\n  'diffusion_models': 'diffusion_models/'\n\ncomfy.desktop_1:\n  base_path: '/docs/ComfyUI/models'\n  'diffusion_models': 'diffusion_models/'\n";
+        let desktop = Launch {
+            python: "/docs/ComfyUI/.venv/bin/python".into(),
+            folder: "/installs/ComfyUI".into(),
+            args: "ComfyUI/main.py --base-directory /docs/ComfyUI --extra-model-paths-config /cfg/inst-1.yaml --enable-manager".into(),
+        };
+        let read = files(&[("/cfg/inst-1.yaml", SHARED)]);
+        assert_eq!(slashes(models_folders(&desktop, &read, &dirs(&["/shared/models", "/docs/ComfyUI/models"]))), ["/shared/models", "/docs/ComfyUI/models"]);
+        // Only folders that are there.
+        assert_eq!(slashes(models_folders(&desktop, &read, &dirs(&["/docs/ComfyUI/models"]))), ["/docs/ComfyUI/models"]);
+        // The portable build: models beside its script, then the file beside the script, written
+        // the older way (`base_path` is a ComfyUI folder, the entries under `models/`). A folder of
+        // one kind of file only is not a models folder.
+        const BESIDE: &str = "comfyui:\n    base_path: /other/ComfyUI\n    checkpoints: models/checkpoints/\n    diffusion_models: |\n      models/diffusion_models\n      models/unet\n    is_default: false # not this one\ncustom:\n    diffusion_models: /loose/unets\n";
+        let portable = Launch { python: "/p/python_embeded/python.exe".into(), folder: "/p".into(), args: "ComfyUI/main.py --windows-standalone-build".into() };
+        let read = files(&[("/p/ComfyUI/extra_model_paths.yaml", BESIDE)]);
+        assert_eq!(slashes(models_folders(&portable, &read, &dirs(&["/p/ComfyUI/models", "/other/ComfyUI/models", "/loose"]))), [
+            "/p/ComfyUI/models",
+            "/other/ComfyUI/models"
+        ]);
+        // `--models-directory`; files relative to where it starts, two after one flag; `is_default`
+        // puts a folder first, and moves one already listed there.
+        const ONE: &str = "a:\n  base_path: shared\n  diffusion_models: diffusion_models\nb:\n  base_path: \"/x/models\"\n  is_default: \"true\"\n  diffusion_models: diffusion_models/ # the big ones\n";
+        const TWO: &str = "again:\n  base_path: /e/shared\n  is_default: yes\n  vae: vae\n";
+        let own = Launch { folder: "/e".into(), args: "main.py --models-directory /m --extra-model-paths-config one.yaml two.yaml".into(), ..Launch::default() };
+        let read = files(&[("/e/one.yaml", ONE), ("/e/two.yaml", TWO)]);
+        assert_eq!(slashes(models_folders(&own, &read, &dirs(&["/m", "/e/shared", "/x/models"]))), ["/e/shared", "/x/models", "/m"]);
+        // Nothing to go on.
+        assert!(models_folders(&Launch::default(), &read, &|_| true).is_empty());
+        for junk in ["", ":", "a:\n  b", "x:\n  diffusion_models: |", "'unterminated: x", "\"", "  base_path: /x", "a:\n  'k\n", "a:\n  diffusion_models: '/x/diffusion_models"] {
+            let _ = extra_model_roots(junk, Path::new("/"));
+        }
+        // Values as YAML writes them.
+        assert_eq!(yaml_scalar(r#""C:\\Users\\a" # c"#), r"C:\Users\a");
+        assert_eq!(yaml_scalar("'it''s' # c"), "it's");
+        assert_eq!(yaml_scalar(r"C:\models # c"), r"C:\models");
+        assert_eq!(yaml_pair(r"base_path: C:\Users\a"), Some(("base_path".to_string(), r"C:\Users\a")));
+        assert_eq!(yaml_pair("'diffusion_models': 'x/'"), Some(("diffusion_models".to_string(), "'x/'")));
+        assert_eq!(yaml_pair(r"C:\no-key-here"), None);
+    }
+
+    #[test]
+    fn a_running_comfyui_says_where_its_models_are() {
+        let body = r#"[{"name":"checkpoints","folders":["C:\\Shared\\models\\checkpoints","C:\\Docs\\models\\checkpoints"]},
+            {"name":"diffusion_models","folders":["C:\\Shared\\models\\diffusion_models","C:\\Docs\\models\\unet","c:\\shared\\models\\diffusion_models\\","C:\\Docs\\models\\diffusion_models","D:\\loose"]}]"#;
+        assert_eq!(served_models_folders(&Fake(Some(body)), "http://127.0.0.1:8000"), ["C:\\Shared\\models", "C:\\Docs\\models"]);
+        // Without diffusion models listed, the checkpoints say it.
+        let older = r#"[{"name":"checkpoints","folders":["/home/u/ComfyUI/models/checkpoints"]}]"#;
+        assert_eq!(served_models_folders(&Fake(Some(older)), "http://127.0.0.1:8188"), ["/home/u/ComfyUI/models"]);
+        let odd = r#"[{"name":"diffusion_models","folders":["diffusion_models","/diffusion_models",7]}]"#;
+        for junk in [None, Some("{}"), Some("[]"), Some("[1]"), Some(r#"[{"name":"diffusion_models","folders":"x"}]"#), Some(odd), Some("<html>")] {
+            assert!(served_models_folders(&Fake(junk), "http://127.0.0.1:8000").is_empty(), "{junk:?}");
+        }
+        assert!(served_models_folders(&Fake(Some(body)), "not a url").is_empty());
     }
 
     struct Fake(Option<&'static str>);

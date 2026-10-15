@@ -93,6 +93,22 @@ pub fn platform_dir(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> 
     env("XDG_CONFIG_HOME").filter(|x| !x.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| h.join(".config"))).map(|c| c.join("photocraft"))
 }
 
+/// Where the Local AI setup puts the engine and the models unless the user chooses otherwise:
+/// `(engine, models)`, in folders named after the product (`name`).
+///
+/// Not under the settings folder: the engine is several gigabytes of program, which on Windows
+/// belongs in `%LOCALAPPDATA%` (it must not roam with a profile). A portable copy, or a settings
+/// folder chosen with `PHOTOCRAFT_CONFIG_DIR`, keeps them beside its settings, so the whole
+/// thing still moves as one folder.
+pub fn local_ai_dirs(data: &DataDir, env: impl Fn(&str) -> Option<OsString>, name: &str) -> Option<(PathBuf, PathBuf)> {
+    let own = |base: PathBuf| (base.join("engine"), base.join("models"));
+    match data.mode {
+        Mode::Override | Mode::Portable => data.dir.as_ref().map(|d| own(d.join("LocalAI"))),
+        Mode::Platform if cfg!(windows) => env("LOCALAPPDATA").filter(|a| !a.is_empty()).map(|a| own(PathBuf::from(a).join(name))),
+        Mode::Platform => data.dir.as_ref().map(|d| own(d.join("LocalAI"))),
+    }
+}
+
 /// The first portable marker file in `exe_dir`, if any.
 pub fn portable_marker(exe_dir: &Path) -> Option<PathBuf> {
     PORTABLE_MARKERS.iter().map(|m| exe_dir.join(m)).find(|p| p.is_file())

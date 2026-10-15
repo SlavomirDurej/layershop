@@ -21,6 +21,7 @@ photocraft-io = { workspace = true }
 photocraft-plugins = { workspace = true }
 # Model and settings types for Window › AI Gen and Preferences › Generative AI.
 photocraft-aigen = { workspace = true }
+photocraft-aisetup = { workspace = true }
 photocraft-algo = { workspace = true }
 photocraft-text = { workspace = true }
 photocraft-vector = { workspace = true }
@@ -51,6 +52,8 @@ sys-locale = "=0.3.2"
 winsafe = { version = "=0.0.29", default-features = false, features = ["kernel"] }
 
 [dev-dependencies]
+# Folders of their own for the Local AI setup tests (already in the tree through the engine).
+tempfile = "3"
 # egui's own default fonts in tests: the oracle for egui_fonts.rs, and contexts made with
 # `Context::default()` (no install_fonts) can lay out text.
 egui = { workspace = true, features = ["default_fonts"] }

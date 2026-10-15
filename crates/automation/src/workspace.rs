@@ -288,12 +288,29 @@ pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), Automati
     {
         return Err(command_error(id));
     }
+    if installs_local_ai(id, params) {
+        return Err(AutomationError::BadRequest(format!(
+            "automation command `{id}` would download and start a program, delete files, or name the folders to do it in; setting up local AI is the user's to do in the wizard (File \u{203a} Set Up Local AI)"
+        )));
+    }
     if reconfigures_ai_endpoints(id, params) {
         return Err(AutomationError::BadRequest(format!(
             "automation command `{id}` would change where AI generation sends requests or which API key it uses; the user sets those in Preferences"
         )));
     }
     Ok(())
+}
+
+/// The Local AI setup installs a program and starts it, and removes files. Looking is open to
+/// automation (`ai.setup.probe`, `ai.setup.manifest`, `ai.setup.status`, and `ai.setup.plan` for
+/// the folders the user already chose); installing, stopping, repairing, removing and signing in
+/// are not, and neither is planning for a folder or a server listing of the agent's choosing.
+fn installs_local_ai(id: &str, params: &Value) -> bool {
+    match id {
+        "ai.setup.start" | "ai.setup.cancel" | "ai.setup.repair" | "ai.setup.remove" | "ai.setup.setToken" => true,
+        "ai.setup.plan" => ["engineDir", "modelsDir", "serverFiles"].iter().any(|key| params.get(key).is_some()),
+        _ => false,
+    }
 }
 
 /// Generating (`ai.generate`) is open to automation: it reaches only the server and providers the
@@ -502,6 +519,35 @@ mod tests {
             let e = authorize_engine_command(id, &params).unwrap_err().to_string();
             assert!(e.contains(id), "{id} {params}: {e}");
             assert!(authorize_engine_step(id, &params).is_err(), "{id} {params}");
+        }
+    }
+
+    #[test]
+    fn automation_may_look_at_the_local_ai_setup_but_not_run_it() {
+        use serde_json::json;
+        for (id, params) in [
+            ("ai.setup.probe", json!({})),
+            ("ai.setup.manifest", json!({"vramGb": 12})),
+            ("ai.setup.status", json!({})),
+            ("ai.setup.plan", json!({"models": ["qwen-image-2-1"]})),
+        ] {
+            assert!(authorize_engine_command(id, &params).is_ok(), "{id} {params}");
+            assert!(authorize_desktop_engine_command(id, &params).is_ok(), "{id} {params}");
+        }
+        for (id, params) in [
+            ("ai.setup.start", json!({"models": ["qwen-image-2-1"]})),
+            ("ai.setup.start", json!({})),
+            ("ai.setup.cancel", json!({})),
+            ("ai.setup.repair", json!({})),
+            ("ai.setup.remove", json!({"engine": true})),
+            ("ai.setup.setToken", json!({"token": "hf_x"})),
+            ("ai.setup.plan", json!({"models": [], "modelsDir": "C:\\Windows"})),
+            ("ai.setup.plan", json!({"engineDir": null})),
+            ("ai.setup.plan", json!({"serverFiles": {}})),
+        ] {
+            let e = authorize_engine_command(id, &params).unwrap_err().to_string();
+            assert!(e.contains(id) && e.contains("the user's to do"), "{id} {params}: {e}");
+            assert!(authorize_engine_step(id, &params).is_err() && authorize_desktop_engine_step(id, &params).is_err(), "{id} {params}");
         }
     }
 

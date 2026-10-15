@@ -81,7 +81,7 @@ fn native_options(custom_titlebar: bool) -> eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_icon(app_icon::window_icon())
             .with_app_id(APP_ID)
-            .with_title("PhotoCraft")
+            .with_title(photocraft_ui_egui::brand::NAME)
             .with_inner_size([1440.0, 900.0])
             .with_min_inner_size([760.0, 480.0])
             .with_drag_and_drop(true)
@@ -188,6 +188,8 @@ fn main() -> eframe::Result {
     // reported in a notice once the app is up; a control token is a usage error like a bad port.
     let mut unreadable_paths: Vec<String> = Vec::new();
     let mut safe_gpu = false;
+    // `--setup-ai`: open the Local AI setup wizard at launch (an installer's last page, a shortcut).
+    let mut setup_ai = false;
     let mut in_window_menus = std::env::var_os("PHOTOCRAFT_IN_WINDOW_MENUS").is_some_and(|v| !v.is_empty() && v != "0");
     let mut args = std::env::args_os().skip(1);
     while let Some(a) = args.next() {
@@ -208,6 +210,7 @@ fn main() -> eframe::Result {
             Some("--automation-read-root") => automation_read_root = args.next().map(std::path::PathBuf::from),
             Some("--automation-write-root") => automation_write_root = args.next().map(std::path::PathBuf::from),
             Some("--safe-gpu") => safe_gpu = true,
+            Some("--setup-ai") => setup_ai = true,
             Some("--in-window-menus") => in_window_menus = true,
             Some("--version") => {
                 println!("photocraft {}", photocraft_engine::build_info::long_version());
@@ -366,7 +369,7 @@ fn main() -> eframe::Result {
     let created_in_callback = app_created.clone();
     let started_sentinel = sentinel.clone();
     let result = eframe::run_native(
-        "PhotoCraft",
+        photocraft_ui_egui::brand::NAME,
         options,
         Box::new(move |cc| {
             created_in_callback.store(true, std::sync::atomic::Ordering::Relaxed);
@@ -390,6 +393,25 @@ fn main() -> eframe::Result {
             app.session.ai.transport = Some(std::sync::Arc::new(photocraft_aigen::UreqTransport::new()));
             // Starts ComfyUI for a local model when none is running; stops it again on quit.
             app.session.ai.server = Some(std::sync::Arc::new(photocraft_aigen::ComfyProcess::new(services::config_dir().map(|d| d.join("comfyui.log")))));
+            // File › Set Up Local AI…: the wizard downloads ComfyUI and the model files through this,
+            // into folders of the product's own unless the user chooses others.
+            let local_ai = app_dirs::local_ai_dirs(app_dirs::current(), |k| std::env::var_os(k), photocraft_ui_egui::brand::NAME);
+            if let (Some(config), Some((engine, models))) = (services::config_dir(), local_ai) {
+                app.session.ai_setup.env = Some(photocraft_engine::ai_setup_cmds::SetupEnv {
+                    fetch: std::sync::Arc::new(photocraft_aisetup::fetch::UreqFetch::default()),
+                    state_file: config.join("ai-setup.json"),
+                    engine_dir: engine.to_string_lossy().into_owned(),
+                    models_dir: models.to_string_lossy().into_owned(),
+                    manifest: None,
+                });
+            }
+            if setup_ai {
+                photocraft_ui_egui::ai_setup_ui::open(&mut app);
+            } else if control.is_none() {
+                // The first launch after installing offers the wizard, once. An app started to be
+                // driven by an agent is not asked.
+                photocraft_ui_egui::ai_setup_ui::offer_at_first_launch(&mut app);
+            }
             app.integrated_titlebar = cfg!(target_os = "macos");
             app.custom_titlebar = custom_titlebar;
             // Only the title bar's free gap drags the window, never the menus (mac_window.rs).

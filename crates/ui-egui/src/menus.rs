@@ -224,6 +224,10 @@ pub(crate) fn invoke_unguarded(app: &mut PhotocraftApp, ctx: &egui::Context, id:
     if let Some(r) = crate::ai_gen_ui::menu(app, id, &params) {
         return r;
     }
+    // File › Set Up Local AI… (the wizard).
+    if let Some(r) = crate::ai_setup_ui::menu(app, id, &params) {
+        return r;
+    }
     // Filter › Plug-ins (installed WebAssembly plug-ins, Install Plug-in…).
     if let Some(r) = crate::plugin_ui::menu(app, id, &params) {
         return r;
@@ -734,6 +738,9 @@ pub fn is_enabled(app: &PhotocraftApp, id: &str) -> bool {
     if crate::preset_panels::handles(id) || crate::type_panels_ui::handles(id) || crate::timeline_ui::handles(id) || crate::ai_gen_ui::handles(id) {
         return true;
     }
+    if crate::ai_setup_ui::handles(id) {
+        return crate::ai_setup_ui::available(app);
+    }
     if let Some(e) = crate::view_cmds::is_enabled(app, id) {
         return e;
     }
@@ -949,6 +956,7 @@ pub fn is_live(id: &str) -> bool {
         || crate::type_panels_ui::handles(id)
         || crate::timeline_ui::handles(id)
         || crate::ai_gen_ui::handles(id)
+        || crate::ai_setup_ui::handles(id)
 }
 
 /// Commands outside the catalogue that belong right after a catalogue item: `(id, after)`.
@@ -1017,6 +1025,7 @@ pub fn menu_items(app: &PhotocraftApp) -> Vec<MenuItem> {
         }
     }
     crate::plugin_ui::insert_menu_items(app, &mut items);
+    crate::ai_setup_ui::insert_menu_items(app, &mut items);
     if let Some(mask) = app.session.active().and_then(|s| s.active_layer.and_then(|id| s.doc.layer(id))).and_then(|l| l.mask.as_ref())
         && let Some(item) = items.iter_mut().find(|i| i.id == "layer.layerMask.enabled")
     {
@@ -1846,7 +1855,7 @@ mod tests {
                 }
                 h.run_steps(3);
             };
-            let open = |h: &Harness<'_, PhotocraftApp>| h.query_by_label_contains("About PhotoCraft").is_some();
+            let open = |h: &Harness<'_, PhotocraftApp>| h.query_by_label_contains(crate::brand::display("About PhotoCraft")).is_some();
             let field_id = egui::Id::new("help-menu-search").with("field");
             let help = h.get_by_label("Help").rect().center();
             click(&mut h, help);

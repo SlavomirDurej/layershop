@@ -68,6 +68,9 @@ const MASK_FADE: f64 = 0.12;
 /// Longest prompt accepted (characters).
 const MAX_PROMPT: usize = 20_000;
 
+/// The name the Hugging Face token is stored under, beside the providers' keys.
+const HF_TOKEN: &str = "huggingface";
+
 /// What generation needs beyond the preferences: the network and the API keys.
 #[derive(Default, Clone)]
 pub struct AiRuntime {
@@ -114,6 +117,30 @@ impl AiRuntime {
         String::new()
     }
 
+    /// Store (or, with an empty token, forget) the Hugging Face token: what downloads a gated
+    /// model's files in the Local AI setup. It is kept with the API keys, and like them never
+    /// reaches the preferences.
+    pub fn set_hf_token(&mut self, token: &str) {
+        let token = token.trim();
+        if token.is_empty() {
+            self.keys.remove(HF_TOKEN);
+        } else {
+            self.keys.insert(HF_TOKEN.to_string(), token.to_string());
+        }
+    }
+
+    /// The Hugging Face token: the stored one, else the `HF_TOKEN` environment variable (desktop).
+    pub fn hf_token(&self) -> String {
+        if let Some(t) = self.keys.get(HF_TOKEN) {
+            return t.clone();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(t) = std::env::var("HF_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
+            return t.trim().to_string();
+        }
+        String::new()
+    }
+
     /// The stored keys as JSON text, for the app to save apart from the preferences.
     pub fn keys_json(&self) -> String {
         serde_json::to_string_pretty(&self.keys).unwrap_or_else(|_| "{}".into())
@@ -128,6 +155,9 @@ impl AiRuntime {
             if let Some(k) = m.get(p.key()).and_then(Value::as_str) {
                 self.set_key(p, k);
             }
+        }
+        if let Some(t) = m.get(HF_TOKEN).and_then(Value::as_str).filter(|t| t.len() <= 1024 && !t.chars().any(char::is_control)) {
+            self.set_hf_token(t);
         }
     }
 
@@ -1093,9 +1123,11 @@ fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let started = server.as_ref().is_some_and(|s| s.state() == ServerState::Started);
             ctx.progress(0.5, "Reading the model files…");
-            photocraft_aigen::comfy_models(transport.as_ref(), &settings.comfy_url).map(|folders| (folders, started)).map_err(ai_error)
+            let folders = photocraft_aigen::comfy_models(transport.as_ref(), &settings.comfy_url).map_err(ai_error)?;
+            let roots = photocraft_aigen::launch::served_models_folders(transport.as_ref(), &settings.comfy_url);
+            Ok((folders, roots, started))
         },
-        |_, (folders, started)| Ok(json!({"folders": folders, "startedHere": started})),
+        |_, (folders, roots, started)| Ok(json!({"folders": folders, "modelsFolders": roots, "startedHere": started})),
     )
 }
 
@@ -1105,7 +1137,13 @@ fn server_find(s: &mut Session, p: &Value) -> Result<Value> {
     let transport = transport(s)?;
     let server = s.ai.server.clone().ok_or_else(|| EngineError::Other("starting ComfyUI is not available here: it needs the desktop app".into()))?;
     let launch = server.find(transport.as_ref(), &settings.comfy_url).map_err(ai_error)?;
-    serde_json::to_value(&launch).map_err(|e| EngineError::Other(e.to_string()))
+    let mut found = serde_json::to_value(&launch).map_err(|e| EngineError::Other(e.to_string()))?;
+    // Where a ComfyUI started so keeps its models, as its settings give them.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        found["modelsFolders"] = json!(photocraft_aigen::launch::models_folders_here(&launch));
+    }
+    Ok(found)
 }
 
 /// `ai.server.stop`: stop the ComfyUI this app started (never one started elsewhere).
@@ -1207,7 +1245,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
             journal: false,
@@ -1217,7 +1255,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Find ComfyUI Installation",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?} → {python,folder,args}: how the ComfyUI running at the address was started (it must be running)"##,
+            params: r##"{"url":str?} → {python,folder,args,modelsFolders:[folder,…] (where it reads model files, as its settings give them)}: how the ComfyUI running at the address was started (it must be running)"##,
             enabled: always,
             run: server_find,
             journal: false,

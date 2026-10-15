@@ -378,7 +378,7 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     f.insert(ACTION.into(), json!("peek"));
     after_body(&mut app, &mut f);
     assert_eq!(f[STATUS]["error"], false);
-    assert!(f[STATUS]["text"].as_str().unwrap().contains("PhotoCraft will start it"), "{}", f[STATUS]);
+    assert!(f[STATUS]["text"].as_str().unwrap().contains(crate::brand::display("PhotoCraft will start it")), "{}", f[STATUS]);
     f["values"]["integrations"]["ai"]["comfyAutostart"] = json!(false);
     f.insert(ACTION.into(), json!("peek"));
     after_body(&mut app, &mut f);
@@ -392,7 +392,7 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     f.insert(ACTION.into(), json!("connect"));
     after_body(&mut app, &mut f);
     assert_eq!(server.ensured.lock().unwrap().last(), Some(&true));
-    assert!(f[STATUS]["text"].as_str().unwrap().contains("started by PhotoCraft"), "{}", f[STATUS]);
+    assert!(f[STATUS]["text"].as_str().unwrap().contains(crate::brand::display("started by PhotoCraft")), "{}", f[STATUS]);
     after_body(&mut app, &mut f);
     assert_eq!(f[STARTED], true);
     draw_section(&mut f);
@@ -1561,4 +1561,32 @@ fn the_order_of_the_list_is_the_panels_and_each_kind_can_be_left_out_of_it() {
     assert!(panel(&app).is_empty() && current_model(&app).is_none());
     draw_panel(&mut app);
     assert!(generate(&mut app).is_err());
+}
+
+#[test]
+fn the_panels_model_list_is_in_sections_and_names_the_models_plainly() {
+    let cloud = |id: &str| Model { id: id.into(), ..Model::cloud(Provider::Openai, id, "gpt-image-2", false) };
+    // As the panel lists them: cloud first. Each kind that is offered gets its heading.
+    let both = [cloud("a"), cloud("b"), z_image("z"), z_image("y")];
+    assert_eq!(model_headings(&both), [(0, "Cloud API"), (2, "Local Models")]);
+    assert_eq!(model_headings(&both[..2]), [(0, "Cloud API")]);
+    assert_eq!(model_headings(&both[2..]), [(0, "Local Models")]);
+    assert!(model_headings(&[]).is_empty());
+    // The list and the layer a generation lands on name the model, not where it runs.
+    let mut app = app();
+    add_model(&mut app, Model { name: "GPT Image 2".into(), ..cloud("gpt") });
+    add_model(&mut app, z_image("z"));
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    for mode in Mode::ALL {
+        app.ui.ai_gen.mode = mode;
+        draw_panel(&mut app);
+    }
+    app.ui.ai_gen.mode = Mode::Create;
+    app.ui.ai_gen.model = "z".into();
+    app.ui.ai_gen.prompt = "a frog".into();
+    let r = generate(&mut app).unwrap();
+    let layer = r["layer"].as_u64().unwrap();
+    let doc = &app.session.active().unwrap().doc;
+    let name = doc.layers.iter().find(|l| l.id.0 == layer).map(|l| l.name.to_lowercase()).unwrap();
+    assert!(name.starts_with("[z_image_turbo]") && !name.contains("local") && !name.contains("cloud"), "{name}");
 }

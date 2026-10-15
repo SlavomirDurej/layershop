@@ -1,0 +1,33 @@
+[package]
+name = "photocraft-aisetup"
+description = "Local AI setup for PhotoCraft: installs a private ComfyUI and the recommended model files, resumably"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+photocraft-aigen = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+# Everything that touches the network, the disk or another process is native only: the web build
+# keeps the manifest and the plan, and its setup commands report that they need the desktop app.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The same blocking HTTP client as photocraft-aigen (MIT OR Apache-2.0), here streaming to disk.
+ureq = { version = "3", default-features = false, features = ["rustls"] }
+# Checksums of what is downloaded (MIT OR Apache-2.0).
+sha2 = "0.11"
+# Reads ComfyUI's portable build, a 7z archive (Apache-2.0). Pure Rust: no bundled 7z.exe.
+sevenz-rust2 = { version = "0.24", default-features = false }
+# Free space on the drive a folder is on (MIT OR Apache-2.0).
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+
+[dev-dependencies]
+tempfile = "3"
+# Writing small archives for the unpacker's tests.
+sevenz-rust2 = { version = "0.24", default-features = false, features = ["compress"] }

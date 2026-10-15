@@ -1,0 +1,1792 @@
+//! The Local AI setup wizard: File › Set Up Local AI…
+//!
+//! Five screens that take someone who has never heard of ComfyUI from "no Python on this PC" to
+//! a first generated image: **Your PC** (what the machine has; nothing is changed), **Location**
+//! (where the engine and the models go), **Models** (which ones, with sizes and licences),
+//! **Install** (the downloads, which carry on with the window closed) and **Ready** (the test
+//! image). "Use my ComfyUI" connects a ComfyUI the user already has and only fetches the model
+//! files it lacks; "Cloud models only" skips local models altogether.
+//!
+//! The screens are thin: what they show comes from the engine's `ai.setup.*` commands, and what
+//! they do is run them. The wizard is a window, not a dialog: the editor stays usable beside it.
+//! Its state ([`AiSetupUi`]) is part of `UiState`, so `ui.inspect` reports it and a snapshot
+//! script can put any screen in front.
+//!
+//! The strings go through [`tr`], like the AI Gen panel's: they fall back to English until the
+//! catalogs gain them, and the product's name in them is this build's ([`crate::brand`]).
+
+use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, UiBuilder, pos2, vec2};
+use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
+
+use crate::PhotocraftApp;
+use crate::theme::Tokens;
+use crate::widgets;
+
+/// File › Set Up Local AI…: open the wizard. `{"page": "pc|location|models|install|ready"}`
+/// puts a screen in front, `{"route": "managed|existing"}` chooses who installs ComfyUI,
+/// `{"open": false}` closes it.
+pub const OPEN: &str = "ai.setup.open";
+const START: &str = "ai.setup.start";
+const WIDTH: f32 = 900.0;
+const HEIGHT: f32 = 600.0;
+const SIDEBAR: f32 = 210.0;
+/// The two big buttons above the footer of the first screen, when a ComfyUI was found.
+const CHOICE: f32 = 96.0;
+/// How often the running setup's progress is read.
+const POLL_SECONDS: f64 = 0.25;
+
+/// The wizard's screens.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Page {
+    #[default]
+    Pc,
+    Location,
+    Models,
+    Install,
+    Ready,
+}
+
+impl Page {
+    pub const ALL: [Page; 5] = [Page::Pc, Page::Location, Page::Models, Page::Install, Page::Ready];
+
+    fn key(self) -> &'static str {
+        match self {
+            Page::Pc => "pc",
+            Page::Location => "location",
+            Page::Models => "models",
+            Page::Install => "install",
+            Page::Ready => "ready",
+        }
+    }
+
+    fn label(self, existing: bool) -> &'static str {
+        match self {
+            Page::Pc => "Your PC",
+            Page::Location if existing => "Your ComfyUI",
+            Page::Location => "Location",
+            Page::Models => "Models",
+            Page::Install => "Install",
+            Page::Ready => "Ready",
+        }
+    }
+}
+
+/// The wizard's state (in `UiState`, so `ui.inspect` reports it).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiSetupUi {
+    pub open: bool,
+    pub page: Page,
+    /// "Use my ComfyUI": nothing is installed but the model files it lacks.
+    pub existing: bool,
+    /// The preset in front (`starter`, `recommended`, `everything`), or `custom`.
+    pub preset: String,
+    /// The ticked models (manifest ids).
+    pub models: Vec<String>,
+    pub engine_dir: String,
+    pub models_dir: String,
+    /// Use my ComfyUI: its address.
+    pub url: String,
+    /// What the engine last said: `ai.setup.probe`, `.manifest`, `.plan` and `.status`.
+    pub probe: Option<Value>,
+    pub manifest: Option<Value>,
+    pub plan: Option<Value>,
+    pub status: Option<Value>,
+    /// Use my ComfyUI: what Connect found (`{folders, launch, local}`).
+    pub server: Option<Value>,
+    /// Use my ComfyUI: the folders it reads model files from, the one it saves new ones to
+    /// first, when they could be found (from its settings, or from it running).
+    pub folders: Vec<String>,
+    /// What went wrong with the last thing asked for, shown where the eye is.
+    pub note: String,
+    /// The probe, or the look at the user's server, running in the background.
+    pub probe_job: Option<u64>,
+    pub server_job: Option<u64>,
+    /// Remove local AI… is asking to be confirmed.
+    pub confirm_remove: bool,
+    /// The installed model whose files are asked to be deleted, until that is confirmed.
+    pub remove_model: Option<String>,
+    /// A local model rendered in this session: local AI works, however it was set up.
+    pub local_worked: bool,
+    /// Asked for from the Preferences dialog, which is confirmed first (a window can't take
+    /// input beside a dialog, and the dialog's draft would overwrite what a setup writes).
+    #[serde(skip)]
+    from_prefs: Option<String>,
+    /// The token being typed. Never part of what `ui.inspect` reports.
+    #[serde(skip)]
+    token: String,
+    /// What the plan in `plan` was asked for, so it is asked again only when that changes, and
+    /// why it could not be made, when it could not.
+    #[serde(skip)]
+    plan_key: String,
+    #[serde(skip)]
+    plan_note: String,
+    /// The setups the session has seen end, and when the status was last read.
+    #[serde(skip)]
+    seen_seq: u64,
+    #[serde(skip)]
+    status_at: f64,
+}
+
+impl Default for AiSetupUi {
+    fn default() -> Self {
+        Self {
+            open: false,
+            page: Page::Pc,
+            existing: false,
+            preset: "recommended".into(),
+            models: Vec::new(),
+            engine_dir: String::new(),
+            models_dir: String::new(),
+            url: String::new(),
+            probe: None,
+            manifest: None,
+            plan: None,
+            status: None,
+            server: None,
+            folders: Vec::new(),
+            note: String::new(),
+            probe_job: None,
+            server_job: None,
+            confirm_remove: false,
+            remove_model: None,
+            local_worked: false,
+            from_prefs: None,
+            token: String::new(),
+            plan_key: String::new(),
+            plan_note: String::new(),
+            seen_seq: 0,
+            status_at: f64::NEG_INFINITY,
+        }
+    }
+}
+
+fn tr(s: &str) -> &str {
+    crate::i18n::t(s)
+}
+
+/// Menu ids handled here.
+pub fn handles(id: &str) -> bool {
+    id == OPEN
+}
+
+/// Can this build set up local AI at all (the desktop app, with its network and its folders)?
+pub fn available(app: &PhotocraftApp) -> bool {
+    app.session.is_enabled(START)
+}
+
+/// `bytes` as people read sizes: `18.5 GB`.
+fn size(bytes: u64) -> String {
+    photocraft_aisetup::human_bytes(bytes)
+}
+
+/// A download's size to a tenth of a gigabyte (`176.5 GB`), as the model lists give them; small
+/// ones as [`size`] does.
+fn download_size(bytes: u64) -> String {
+    if bytes >= 1_000_000_000 { format!("{:.1} GB", bytes as f64 / 1e9) } else { size(bytes) }
+}
+
+fn text<'a>(v: &'a Value, pointer: &str) -> &'a str {
+    v.pointer(pointer).and_then(Value::as_str).unwrap_or("")
+}
+
+fn number(v: &Value, pointer: &str) -> u64 {
+    v.pointer(pointer).and_then(Value::as_u64).unwrap_or(0)
+}
+
+fn list<'a>(v: &'a Value, pointer: &str) -> &'a [Value] {
+    v.pointer(pointer).and_then(Value::as_array).map_or(&[], Vec::as_slice)
+}
+
+/// Is a setup running?
+pub fn running(app: &PhotocraftApp) -> bool {
+    app.session.ai_setup.running()
+}
+
+/// The running setup as a fraction and a line of text: for the status bar and the AI Gen panel.
+pub fn progress_line(app: &PhotocraftApp) -> Option<(f32, String)> {
+    if !running(app) {
+        return None;
+    }
+    let status = app.ui.ai_setup.status.as_ref()?;
+    let (done, total) = (number(status, "/progress/bytesDone"), number(status, "/progress/bytesTotal"));
+    let fraction = if total > 0 { (done as f64 / total as f64) as f32 } else { 0.0 };
+    let message = text(status, "/progress/message");
+    let line = if total > 0 && done < total {
+        format!("{} {} / {}", tr("Setting up local AI:"), size(done), size(total))
+    } else if message.is_empty() {
+        tr("Setting up local AI…").to_string()
+    } else {
+        format!("{} {}", tr("Setting up local AI:"), tr(message))
+    };
+    Some((fraction.clamp(0.0, 1.0), line))
+}
+
+/// Has local AI been set up: by the wizard, by hand in the Preferences, or simply by a ComfyUI
+/// the user starts themselves, which a local generation in this session has shown to work?
+pub fn set_up(app: &PhotocraftApp) -> bool {
+    let ai = &app.session.prefs().integrations.ai;
+    let launch = !ai.comfy_launch.python.trim().is_empty() && !ai.comfy_launch.folder.trim().is_empty();
+    launch || ai.comfy_autostart || app.ui.ai_setup.local_worked || app.ui.ai_setup.status.as_ref().is_some_and(|s| text(s, "/state") == "done")
+}
+
+fn refresh_status(app: &mut PhotocraftApp) {
+    app.ui.ai_setup.status = app.session.execute("ai.setup.status", json!({})).ok();
+}
+
+fn refresh_manifest(app: &mut PhotocraftApp) {
+    let vram = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("vramGb")).cloned().unwrap_or(Value::Null);
+    app.ui.ai_setup.manifest = app.session.execute("ai.setup.manifest", json!({"vramGb": vram})).ok();
+}
+
+/// The model ids of a preset, from the manifest.
+fn preset_models(app: &PhotocraftApp, preset: &str) -> Vec<String> {
+    let Some(m) = &app.ui.ai_setup.manifest else { return Vec::new() };
+    list(m, &format!("/presets/{preset}/models")).iter().filter_map(Value::as_str).map(str::to_string).collect()
+}
+
+/// Look at this PC, in the background where the app has jobs.
+fn start_probe(app: &mut PhotocraftApp) {
+    // An answer that is there is kept until Check Again asks for a new one.
+    if app.ui.ai_setup.probe_job.is_some() || app.ui.ai_setup.probe.is_some() || !available(app) {
+        return;
+    }
+    let started = if app.background_jobs {
+        app.session.start("ai.setup.probe", json!({}))
+    } else {
+        app.session.execute("ai.setup.probe", json!({})).map(photocraft_engine::jobs::Started::Done)
+    };
+    match started {
+        Ok(photocraft_engine::jobs::Started::Done(found)) => probed(app, found),
+        Ok(photocraft_engine::jobs::Started::Job(id)) => app.ui.ai_setup.probe_job = Some(id.0),
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// Fill in what the probe suggests where nothing is chosen yet: the folders, and the address of
+/// a ComfyUI that is running.
+fn suggest(app: &mut PhotocraftApp) {
+    let s = &mut app.ui.ai_setup;
+    let Some(found) = s.probe.clone() else { return };
+    if s.engine_dir.trim().is_empty() {
+        s.engine_dir = text(&found, "/defaults/engineDir").to_string();
+    }
+    if s.models_dir.trim().is_empty() && !s.existing {
+        s.models_dir = text(&found, "/defaults/modelsDir").to_string();
+    }
+    if let Some(running) = list(&found, "/probe/comfy/running").first().and_then(Value::as_str).filter(|_| s.url.trim().is_empty()) {
+        s.url = running.to_string();
+    }
+}
+
+/// The probe answered: keep it.
+fn probed(app: &mut PhotocraftApp, found: Value) {
+    app.ui.ai_setup.probe = Some(found);
+    suggest(app);
+    refresh_manifest(app);
+}
+
+/// Open the wizard on the screen that fits where things stand.
+pub fn open(app: &mut PhotocraftApp) {
+    refresh_status(app);
+    if app.ui.ai_setup.manifest.is_none() {
+        refresh_manifest(app);
+    }
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let s = &mut app.ui.ai_setup;
+    (s.open, s.confirm_remove, s.remove_model) = (true, false, None);
+    s.note.clear();
+    // What the last setup chose is where this one starts.
+    if s.engine_dir.trim().is_empty() {
+        s.engine_dir = text(&status, "/record/engineDir").to_string();
+    }
+    if s.models_dir.trim().is_empty() {
+        s.models_dir = text(&status, "/record/modelsDir").to_string();
+    }
+    let recorded: Vec<String> = list(&status, "/record/models").iter().filter_map(Value::as_str).map(str::to_string).collect();
+    let state = text(&status, "/state").to_string();
+    if !recorded.is_empty() && s.models.is_empty() {
+        s.models = recorded;
+        s.preset = "custom".into();
+        s.existing = text(&status, "/record/route") == "existing";
+    }
+    s.page = match state.as_str() {
+        "running" => Page::Install,
+        _ => Page::Pc,
+    };
+    if app.ui.ai_setup.models.is_empty() {
+        let preset = app.ui.ai_setup.preset.clone();
+        app.ui.ai_setup.models = preset_models(app, &preset);
+    }
+    name_preset(app);
+    suggest(app);
+    if app.ui.ai_setup.url.trim().is_empty() {
+        app.ui.ai_setup.url = app.session.prefs().integrations.ai.comfy_url.clone();
+    }
+    start_probe(app);
+}
+
+/// The first launch after installing: offer the wizard once, when nothing is set up yet. The
+/// app shell calls this once the session has its network and its folders.
+pub fn offer_at_first_launch(app: &mut PhotocraftApp) {
+    if !available(app) {
+        return;
+    }
+    refresh_status(app);
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let offered = status.pointer("/record/offered").and_then(Value::as_bool).unwrap_or(true);
+    // Interrupted last time: offered again, so it can be continued.
+    let interrupted = matches!(text(&status, "/state"), "interrupted" | "paused" | "failed");
+    if interrupted || (!offered && !set_up(app)) {
+        open(app);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    app.session.ai_setup.mark_offered();
+}
+
+pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    if id != OPEN {
+        return None;
+    }
+    if !available(app) {
+        return Some(Err(tr("Setting up local AI needs the desktop app").to_string()));
+    }
+    if params.get("open").and_then(Value::as_bool) == Some(false) {
+        app.ui.ai_setup.open = false;
+        return Some(Ok(json!({"open": false})));
+    }
+    open(app);
+    match params.get("route").and_then(Value::as_str) {
+        Some("existing") => app.ui.ai_setup.existing = true,
+        Some("managed") => app.ui.ai_setup.existing = false,
+        _ => {}
+    }
+    if let Some(page) = params.get("page").and_then(Value::as_str).and_then(|key| Page::ALL.into_iter().find(|p| p.key() == key)) {
+        app.ui.ai_setup.page = page;
+    }
+    Some(Ok(json!({"open": true, "page": app.ui.ai_setup.page.key()})))
+}
+
+/// File › Set Up Local AI…, in a group of its own above File Info. Not in the web build, which
+/// has no disk to install to.
+pub fn insert_menu_items(app: &PhotocraftApp, items: &mut Vec<crate::menus::MenuItem>) {
+    if cfg!(target_arch = "wasm32") || items.iter().any(|i| i.id == OPEN) {
+        return;
+    }
+    let Some(at) = items.iter().position(|i| i.id == "file.fileInfo") else { return };
+    let path = vec!["File".to_string()];
+    let label = if set_up(app) { "Local AI Setup…" } else { "Set Up Local AI…" };
+    let item = |id: &str, label: &str, enabled| crate::menus::MenuItem {
+        id: id.into(),
+        label: label.into(),
+        path: path.clone(),
+        shortcut: None,
+        enabled,
+        checked: None,
+        color: None,
+    };
+    items.insert(at, item("---", "---", false));
+    items.insert(at, item(OPEN, label, available(app)));
+}
+
+/// What the Preferences page asks for: open the wizard (`open`), or on a screen that does one
+/// thing (`repair`, `remove`). The dialog is confirmed first, in [`window`].
+pub fn request_from_prefs(app: &mut PhotocraftApp, what: &str) {
+    app.ui.ai_setup.from_prefs = Some(what.to_string());
+}
+
+/// A line for the Preferences page: what is installed.
+pub fn summary(app: &PhotocraftApp) -> Value {
+    let Some(status) = &app.ui.ai_setup.status else { return json!({"available": available(app), "text": ""}) };
+    let installed = list(status, "/installedNow").len();
+    let engine = list(status, "/engines").first().map(|e| text(e, "/version").to_string());
+    let line = match (text(status, "/state"), engine) {
+        ("running", _) => tr("A setup is running.").to_string(),
+        ("interrupted" | "paused" | "failed", _) => tr("A setup was interrupted. Open the wizard to continue it.").to_string(),
+        (_, Some(version)) => format!("{} {version} · {installed} {} · {}", tr("Installed: ComfyUI"), tr("models"), text(status, "/record/modelsDir")),
+        ("done", None) => format!("{} · {installed} {}", tr("Using your own ComfyUI"), tr("of the recommended models")),
+        _ => tr("Not set up yet. The wizard installs ComfyUI and the recommended models for you.").to_string(),
+    };
+    json!({"available": available(app), "text": line, "installed": text(status, "/state") == "done", "managed": !list(status, "/engines").is_empty()})
+}
+
+// ---------- every frame ----------
+
+/// Per frame: follow the probe and the running setup, and react when one ends.
+pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    // The Preferences dialog asked: confirm it (its draft would otherwise overwrite what a
+    // setup writes), then open the wizard.
+    if let Some(what) = app.ui.ai_setup.from_prefs.take() {
+        let dialog = app.ui.dialogs.iter().find(|d| crate::prefs_ui::is_preferences(&d.fields)).map(|d| d.id);
+        match dialog.map(|id| crate::dialogs::confirm(app, id)) {
+            Some(Err(e)) => crate::notices::error(app, format!("{}: {e}", tr("Preferences"))),
+            _ => {
+                open(app);
+                match what.as_str() {
+                    "repair" => repair(app),
+                    "remove" => app.ui.ai_setup.confirm_remove = true,
+                    _ => {}
+                }
+            }
+        }
+    }
+    let now = ctx.input(|i| i.time);
+    for (job, is_probe) in [(app.ui.ai_setup.probe_job, true), (app.ui.ai_setup.server_job, false)] {
+        let Some(id) = job else { continue };
+        match app.session.jobs_with_recent().into_iter().rev().find(|j| j.id.0 == id) {
+            Some(j) if j.state == "running" => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
+            ended => {
+                let result = ended.and_then(|j| if j.state == "done" { j.result.ok_or_else(String::new) } else { Err(j.error.unwrap_or_default()) }.ok());
+                if is_probe {
+                    app.ui.ai_setup.probe_job = None;
+                    match result {
+                        Some(found) => probed(app, found),
+                        None => app.ui.ai_setup.note = tr("This PC could not be checked. Press Check Again.").to_string(),
+                    }
+                } else {
+                    app.ui.ai_setup.server_job = None;
+                    connected(app, result);
+                }
+            }
+        }
+    }
+    // A setup that has just ended is no longer running: its result is collected here, where its
+    // settings are applied, whether or not the wizard is open.
+    #[cfg(not(target_arch = "wasm32"))]
+    photocraft_engine::ai_setup_cmds::poll(&mut app.session);
+    if running(app) {
+        if now - app.ui.ai_setup.status_at >= POLL_SECONDS {
+            app.ui.ai_setup.status_at = now;
+            refresh_status(app);
+        }
+        // Quarter-second steps: enough for a progress bar, and no load on an hour of downloads.
+        ctx.request_repaint_after(std::time::Duration::from_secs_f64(POLL_SECONDS));
+    }
+    let seq = app.session.ai_setup.seq();
+    if seq != app.ui.ai_setup.seen_seq {
+        app.ui.ai_setup.seen_seq = seq;
+        finished(app, ctx);
+    }
+}
+
+/// A setup ended (or something was removed): show how.
+fn finished(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    refresh_status(app);
+    refresh_manifest(app);
+    app.ui.ai_setup.plan_key.clear();
+    forget_test_image(ctx);
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let Some(result) = status.get("result").filter(|r| !r.is_null()) else { return };
+    let (ok, cancelled) = (result.get("ok").and_then(Value::as_bool) == Some(true), result.get("cancelled").and_then(Value::as_bool) == Some(true));
+    if ok {
+        app.ui.ai_setup.page = Page::Ready;
+        app.ui.status = tr("Local AI is set up").to_string();
+        app.ui.status_error = false;
+        // Said where it will be seen: the window may have been closed for the download.
+        if !app.ui.ai_setup.open {
+            crate::notices::post(app, tr("Local AI is ready"), vec![tr("Open Window › AI Gen to generate your first image.").to_string()], false, None);
+        }
+    } else if !cancelled {
+        app.ui.ai_setup.page = Page::Install;
+        if !app.ui.ai_setup.open {
+            crate::notices::error(app, format!("{}: {}", tr("Local AI setup stopped"), text(result, "/error")));
+        }
+    }
+}
+
+// ---------- actions ----------
+
+fn params(app: &PhotocraftApp) -> Value {
+    let s = &app.ui.ai_setup;
+    let mut p = json!({"models": s.models, "modelsDir": s.models_dir});
+    if s.existing {
+        p["route"] = json!("existing");
+        p["url"] = json!(s.url.trim());
+        let server = s.server.clone().unwrap_or(Value::Null);
+        p["serverFiles"] = server.get("folders").cloned().unwrap_or(json!({}));
+        if let Some(launch) = server.get("launch").filter(|l| l.is_object()) {
+            p["launch"] = launch.clone();
+        }
+        // A server on another computer has no folder here to download into.
+        if server.get("local").and_then(Value::as_bool) == Some(false) {
+            p["models"] = json!([]);
+            p["modelsDir"] = Value::Null;
+        }
+    } else {
+        p["route"] = json!("managed");
+        p["engineDir"] = json!(s.engine_dir);
+        p["variant"] = json!(s.probe.as_ref().map_or("nvidia", |v| text(v, "/variant")));
+    }
+    p
+}
+
+/// Ask the engine what the choices would download, when they changed.
+fn replan(app: &mut PhotocraftApp) {
+    let p = params(app);
+    // A token saved since, or a file removed, changes the plan as much as the choices do.
+    let signed_in = app.ui.ai_setup.status.as_ref().and_then(|s| s.get("token")).and_then(Value::as_bool).unwrap_or(false);
+    let key = format!("{p}|{signed_in}|{}", app.session.ai_setup.seq());
+    if key == app.ui.ai_setup.plan_key {
+        return;
+    }
+    app.ui.ai_setup.plan_key = key;
+    match app.session.execute("ai.setup.plan", p) {
+        Ok(plan) => {
+            app.ui.ai_setup.plan = Some(plan);
+            app.ui.ai_setup.plan_note.clear();
+        }
+        Err(e) => {
+            app.ui.ai_setup.plan = None;
+            app.ui.ai_setup.plan_note = e.to_string();
+        }
+    }
+}
+
+/// Something was removed: the engine counts that as an ending, but it is not a setup that
+/// finished. Take it as seen, and read what is there now.
+fn removed(app: &mut PhotocraftApp) {
+    app.ui.ai_setup.seen_seq = app.session.ai_setup.seq();
+    refresh_status(app);
+    refresh_manifest(app);
+}
+
+fn install(app: &mut PhotocraftApp) {
+    match app.session.execute(START, params(app)) {
+        Ok(status) => {
+            let s = &mut app.ui.ai_setup;
+            (s.status, s.page) = (Some(status), Page::Install);
+            s.note.clear();
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// Continue the setup the record remembers.
+fn resume(app: &mut PhotocraftApp) {
+    let existing = app.ui.ai_setup.status.as_ref().is_some_and(|s| text(s, "/record/route") == "existing");
+    let p = if existing {
+        json!({"url": app.session.prefs().integrations.ai.comfy_url, "serverFiles": app.ui.ai_setup.server.as_ref().and_then(|s| s.get("folders")).cloned()})
+    } else {
+        json!({})
+    };
+    match app.session.execute(START, p) {
+        Ok(status) => {
+            let s = &mut app.ui.ai_setup;
+            (s.status, s.page) = (Some(status), Page::Install);
+            s.note.clear();
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+fn repair(app: &mut PhotocraftApp) {
+    match app.session.execute("ai.setup.repair", json!({})) {
+        Ok(status) => {
+            let s = &mut app.ui.ai_setup;
+            (s.status, s.page) = (Some(status), Page::Install);
+            s.note.clear();
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+fn remove(app: &mut PhotocraftApp, models: bool) {
+    match app.session.execute("ai.setup.remove", json!({"engine": true, "models": models})) {
+        Ok(freed) => {
+            let s = &mut app.ui.ai_setup;
+            s.note = format!("{} {}", tr("Local AI was removed. Space freed:"), text(&freed, "/freedText"));
+            (s.confirm_remove, s.page) = (false, Page::Pc);
+            removed(app);
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// Delete one installed model's files (a file another installed model uses stays).
+fn remove_model(app: &mut PhotocraftApp, id: &str) {
+    app.ui.ai_setup.remove_model = None;
+    match app.session.execute("ai.setup.remove", json!({"models": [id]})) {
+        Ok(freed) => {
+            app.ui.ai_setup.models.retain(|m| m != id);
+            app.ui.ai_setup.note = format!("{} {}", tr("The model's files were deleted. Space freed:"), text(&freed, "/freedText"));
+            removed(app);
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// Store the typed token, and save it with the API keys.
+fn save_token(app: &mut PhotocraftApp) {
+    let token = std::mem::take(&mut app.ui.ai_setup.token);
+    match app.session.execute("ai.setup.setToken", json!({"token": token})) {
+        Ok(_) => {
+            if let Some(save) = app.services.save_ai_keys.as_mut()
+                && let Err(e) = save(&app.session.ai.keys_json())
+            {
+                app.ui.ai_setup.note = format!("{}: {e}", tr("The token could not be saved"));
+            }
+            refresh_status(app);
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// Use my ComfyUI › Connect: read the model files of the ComfyUI at the address, and how it
+/// was started when it runs on this computer.
+fn connect(app: &mut PhotocraftApp) {
+    let url = app.ui.ai_setup.url.trim().to_string();
+    app.ui.ai_setup.server = None;
+    app.ui.ai_setup.note.clear();
+    let p = json!({"url": url, "start": false});
+    let started = if app.background_jobs {
+        app.session.start("ai.comfyModels", p)
+    } else {
+        app.session.execute("ai.comfyModels", p).map(photocraft_engine::jobs::Started::Done)
+    };
+    match started {
+        Ok(photocraft_engine::jobs::Started::Done(found)) => connected(app, Some(found)),
+        Ok(photocraft_engine::jobs::Started::Job(id)) => app.ui.ai_setup.server_job = Some(id.0),
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+fn strings(v: &Value, pointer: &str) -> Vec<String> {
+    list(v, pointer).iter().filter_map(Value::as_str).filter(|s| !s.trim().is_empty()).map(str::to_string).collect()
+}
+
+/// The same folder, however it is written (`C:\x\models\` and `c:/x/models`).
+fn same_folder(a: &str, b: &str) -> bool {
+    let key = |s: &str| s.trim().replace('\\', "/").trim_end_matches('/').to_lowercase();
+    key(a) == key(b)
+}
+
+/// Did the probe find a ComfyUI on this PC (running, or installed by ComfyUI Desktop)?
+fn detected(app: &PhotocraftApp) -> bool {
+    app.ui.ai_setup.probe.as_ref().is_some_and(|p| !list(p, "/probe/comfy/running").is_empty() || p.pointer("/probe/comfy/installed").is_some_and(Value::is_object))
+}
+
+/// Does the first screen ask which ComfyUI to use? When one was found and nothing is set up
+/// (or setting up) yet.
+fn offer_choice(app: &PhotocraftApp) -> bool {
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    detected(app) && list(&status, "/engines").is_empty() && !matches!(text(&status, "/state"), "done" | "running")
+}
+
+/// Use my ComfyUI learnt where it reads models (`found`, not empty): the folder chosen stays when
+/// it is one of them, or when the user typed it in; none, or one the wizard suggested earlier
+/// that is not among them, becomes the first, where ComfyUI saves new models itself.
+fn follow_folders(s: &mut AiSetupUi, found: Vec<String>) {
+    let Some(first) = found.first().cloned() else { return };
+    let current = s.models_dir.clone();
+    let listed = |folders: &[String]| folders.iter().any(|f| same_folder(f, &current));
+    if current.trim().is_empty() || (!listed(&found) && listed(&s.folders)) {
+        s.models_dir = first;
+    }
+    s.folders = found;
+}
+
+/// Use my ComfyUI: its screen, with its models folder filled in when it is known, and connected
+/// at once when it has an address.
+fn use_existing(app: &mut PhotocraftApp) {
+    let found = app.ui.ai_setup.probe.as_ref().map(|p| strings(p, "/probe/comfy/models")).unwrap_or_default();
+    let s = &mut app.ui.ai_setup;
+    // The app's own models folder is not the user's ComfyUI's; one chosen for this route before
+    // (last time's, say) is.
+    if !s.existing {
+        s.models_dir.clear();
+    }
+    follow_folders(s, found);
+    (s.existing, s.page) = (true, Page::Location);
+    s.note.clear();
+    if !s.url.trim().is_empty() {
+        connect(app);
+    }
+}
+
+/// A private ComfyUI: where it goes. Coming from Use my ComfyUI, the models go to the app's own
+/// folder again; a folder chosen for this route stays.
+fn use_managed(app: &mut PhotocraftApp) {
+    let default = app.ui.ai_setup.probe.as_ref().map(|p| text(p, "/defaults/modelsDir").to_string()).unwrap_or_default();
+    let s = &mut app.ui.ai_setup;
+    if s.existing || s.models_dir.trim().is_empty() {
+        s.models_dir = default;
+    }
+    (s.existing, s.page) = (false, Page::Location);
+    s.note.clear();
+}
+
+fn connected(app: &mut PhotocraftApp, found: Option<Value>) {
+    let url = app.ui.ai_setup.url.trim().to_string();
+    let Some(found) = found else {
+        app.ui.ai_setup.note = format!("{} {url}. {}", tr("ComfyUI is not answering at"), tr("Start it, or check the address, then press Connect."));
+        return;
+    };
+    let (_, local) = photocraft_aigen::launch::port_of(&url);
+    // How it was started, so the app can start it from now on. Not knowing is fine.
+    let launch = if local { app.session.execute("ai.server.find", json!({"url": url})).ok() } else { None };
+    // Where it keeps its models: as it says itself, else as its settings give them.
+    let mut folders = if local { strings(&found, "/modelsFolders") } else { Vec::new() };
+    if folders.is_empty() {
+        folders = launch.as_ref().map(|l| strings(l, "/modelsFolders")).unwrap_or_default();
+    }
+    let s = &mut app.ui.ai_setup;
+    follow_folders(s, folders);
+    let launch = launch.map(|mut l| {
+        if let Some(o) = l.as_object_mut() {
+            o.remove("modelsFolders");
+        }
+        l
+    });
+    s.server = Some(json!({"folders": found.get("folders").cloned().unwrap_or(json!({})), "launch": launch, "local": local}));
+}
+
+/// Tick or untick a model, keeping the preset tab honest.
+fn toggle_model(app: &mut PhotocraftApp, id: &str, on: bool) {
+    let s = &mut app.ui.ai_setup;
+    s.models.retain(|m| m != id);
+    if on {
+        s.models.push(id.to_string());
+    }
+    name_preset(app);
+}
+
+/// Which preset the ticked models are, if they are one.
+fn name_preset(app: &mut PhotocraftApp) {
+    let chosen = app.ui.ai_setup.models.clone();
+    let same = |preset: &str| {
+        let mut a = preset_models(app, preset);
+        let mut b = chosen.clone();
+        a.sort();
+        b.sort();
+        a == b
+    };
+    app.ui.ai_setup.preset = ["starter", "recommended", "everything"].into_iter().find(|p| same(p)).unwrap_or("custom").to_string();
+}
+
+// ---------- the test image ----------
+
+fn test_image_id() -> egui::Id {
+    egui::Id::new("ai-setup-test-image")
+}
+
+fn forget_test_image(ctx: &egui::Context) {
+    ctx.data_mut(|d| d.remove::<egui::TextureHandle>(test_image_id()));
+}
+
+/// The last setup's test image as a texture, decoded once.
+fn test_image(app: &PhotocraftApp, ctx: &egui::Context) -> Option<egui::TextureHandle> {
+    if let Some(tex) = ctx.data(|d| d.get_temp::<egui::TextureHandle>(test_image_id())) {
+        return Some(tex);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use photocraft_codecs::{ChannelLayout, SampleType};
+        let bytes = &app.session.ai_setup.last()?.test.as_ref()?.bytes;
+        let img = photocraft_codecs::decode(bytes).ok()?.convert(ChannelLayout::Rgba, SampleType::U8);
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        // Shown at a few hundred points: anything absurd is not a test image.
+        if w == 0 || h == 0 || w.saturating_mul(h) > 64 << 20 || img.data().len() != w * h * 4 {
+            return None;
+        }
+        let tex = ctx.load_texture("ai-setup-test", egui::ColorImage::from_rgba_unmultiplied([w, h], img.data()), egui::TextureOptions::LINEAR);
+        ctx.data_mut(|d| d.insert_temp(test_image_id(), tex.clone()));
+        Some(tex)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = app;
+        None
+    }
+}
+
+// ---------- drawing ----------
+
+/// The status bar's readout while a setup runs: a click opens the wizard on its progress.
+pub fn status_progress(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let Some((fraction, line)) = progress_line(app) else { return };
+    let t = Tokens::get(ui.ctx());
+    let (bar, _) = ui.allocate_exact_size(vec2(90.0, 6.0), Sense::hover());
+    crate::jobs_ui::bar(ui, bar, Some(fraction), &t);
+    let label = ui.add(egui::Label::new(RichText::new(line).color(t.text_dim).size(12.0)).sense(Sense::click()));
+    if label.on_hover_text(tr("Local AI is being set up. Click to see its progress.")).clicked() {
+        app.ui.ai_setup.open = true;
+        app.ui.ai_setup.page = Page::Install;
+    }
+}
+
+/// A rounded row: the cards of the first screen, the model checklist and the install list.
+fn row_frame(ui: &mut egui::Ui, height: f32) -> Rect {
+    let t = Tokens::get(ui.ctx());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::hover());
+    ui.painter().rect_filled(rect, t.radius, t.field);
+    ui.painter().rect_stroke(rect, t.radius, Stroke::new(1.0, t.card_border), StrokeKind::Inside);
+    rect
+}
+
+fn level_icon(level: &str, t: &Tokens) -> (&'static str, Color32) {
+    match level {
+        "ok" => ("check", t.accent),
+        "warn" => ("triangle-alert", t.warning),
+        "stop" => ("x", t.danger),
+        _ => ("info", t.text_dim),
+    }
+}
+
+/// A row with an icon, a title, a line under it and a short reading at the right.
+fn info_row(ui: &mut egui::Ui, icon: (&str, Color32), title: &str, detail: &str, value: &str) {
+    let t = Tokens::get(ui.ctx());
+    let width = ui.available_width();
+    let value_width = if value.is_empty() { 0.0 } else { ui.painter().layout_no_wrap(value.to_string(), crate::theme::mono(12.0), t.text_dim).size().x + 16.0 };
+    let detail_galley =
+        (!detail.is_empty()).then(|| ui.painter().layout(detail.to_string(), egui::FontId::proportional(12.0), t.text_faint, width - 62.0 - value_width));
+    let height = 22.0 + detail_galley.as_ref().map_or(0.0, |g| g.size().y + 3.0) + 22.0;
+    let rect = row_frame(ui, height.max(46.0));
+    crate::icons::paint(ui, Rect::from_min_size(rect.min + vec2(14.0, (rect.height() - 18.0) / 2.0), vec2(18.0, 18.0)), icon.0, 16.0, icon.1);
+    let x = rect.left() + 46.0;
+    let title_y = if detail_galley.is_some() { rect.top() + 11.0 } else { rect.center().y - 9.0 };
+    ui.painter().text(pos2(x, title_y), egui::Align2::LEFT_TOP, title, crate::theme::medium(13.5), t.text);
+    if let Some(galley) = detail_galley {
+        ui.painter().galley(pos2(x, title_y + 21.0), galley, t.text_faint);
+    }
+    if !value.is_empty() {
+        ui.painter().text(pos2(rect.right() - 14.0, rect.center().y), egui::Align2::RIGHT_CENTER, value, crate::theme::mono(12.0), t.text_dim);
+    }
+    ui.add_space(6.0);
+}
+
+fn heading(ui: &mut egui::Ui, title: &str, sub: &str) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new(tr(title)).font(crate::theme::semibold(20.0)).color(t.text));
+    ui.add_space(4.0);
+    ui.add(egui::Label::new(RichText::new(tr(sub)).color(t.text_dim).size(13.0)).wrap());
+    ui.add_space(12.0);
+}
+
+/// A note in the danger colour, wrapped and selectable: something to act on, or to copy.
+fn problem(ui: &mut egui::Ui, message: &str) {
+    if message.is_empty() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    ui.add(egui::Label::new(RichText::new(message).color(t.danger).size(12.0)).wrap().selectable(true));
+    ui.add_space(4.0);
+}
+
+/// A link that reads as one: opens `url` in the browser.
+fn link(app: &mut PhotocraftApp, ui: &mut egui::Ui, label: &str, url: &str) {
+    let t = Tokens::get(ui.ctx());
+    let r = ui.add(egui::Label::new(RichText::new(label).color(t.text_dim).size(11.5).underline()).sense(Sense::click()));
+    if r.on_hover_text(url).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        crate::links::open(app, ui.ctx(), url);
+    }
+}
+
+fn sidebar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let (page, existing, busy) = (app.ui.ai_setup.page, app.ui.ai_setup.existing, running(app));
+    ui.add_space(6.0);
+    for (i, step) in Page::ALL.into_iter().enumerate() {
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 40.0), Sense::click());
+        let current = step == page;
+        if current {
+            ui.painter().rect_filled(rect, t.radius, t.field);
+        } else if resp.hovered() && step < page && !busy {
+            ui.painter().rect_filled(rect, t.radius, t.hover);
+        }
+        let centre = pos2(rect.left() + 24.0, rect.center().y);
+        if current {
+            ui.painter().circle_filled(centre, 11.0, t.accent);
+        } else {
+            ui.painter().circle_stroke(centre, 11.0, Stroke::new(1.0, t.field_border));
+        }
+        let number_color = if current { t.primary_text } else { t.text_faint };
+        if step < page {
+            crate::icons::paint(ui, Rect::from_center_size(centre, vec2(14.0, 14.0)), "check", 12.0, t.text_dim);
+        } else {
+            ui.painter().text(centre, egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(11.5), number_color);
+        }
+        let color = if current { t.text } else { t.text_dim };
+        ui.painter().text(pos2(rect.left() + 46.0, rect.center().y), egui::Align2::LEFT_CENTER, tr(step.label(existing)), crate::theme::medium(13.5), color);
+        // Back to a screen already seen; forward only through Next, which checks each one.
+        if resp.clicked() && step < page && !busy && page != Page::Ready {
+            app.ui.ai_setup.page = step;
+            app.ui.ai_setup.note.clear();
+        }
+        ui.add_space(2.0);
+    }
+}
+
+fn page_pc(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    heading(ui, "Checking your PC", "Nothing is changed in this step. PhotoCraft looks at what you have and says what will work.");
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let state = text(&status, "/state").to_string();
+    // What is already here, before what could be.
+    if matches!(state.as_str(), "interrupted" | "paused" | "failed") {
+        let detail = match text(&status, "/record/error") {
+            "" => tr("What arrived is kept. Continuing downloads only what is missing.").to_string(),
+            why => why.to_string(),
+        };
+        info_row(ui, ("info", t.warning), tr("A setup was interrupted"), &detail, "");
+        ui.horizontal(|ui| {
+            if widgets::primary_button(ui, tr("Continue Setup"), 130.0).clicked() {
+                resume(app);
+            }
+            ui.label(RichText::new(tr("or start over with the steps below")).color(t.text_faint).size(11.5));
+        });
+        ui.add_space(8.0);
+    } else if state == "done" {
+        let installed = list(&status, "/installedNow").len();
+        let managed = !list(&status, "/engines").is_empty();
+        let title = if managed {
+            format!("{} {}", tr("Local AI is set up: ComfyUI"), text(&status, "/record/comfyVersion"))
+        } else {
+            tr("Local AI is set up with your own ComfyUI").to_string()
+        };
+        let detail = format!("{installed} {} · {}", tr("models installed"), text(&status, "/record/modelsDir"));
+        info_row(ui, ("check", t.accent), &title, &detail, "");
+        ui.horizontal(|ui| {
+            if widgets::secondary_button(ui, tr("Add Models…"), 110.0).clicked() {
+                app.ui.ai_setup.existing = !managed;
+                app.ui.ai_setup.page = if managed { Page::Models } else { Page::Location };
+            }
+            if widgets::secondary_button(ui, tr("Repair"), 80.0)
+                .on_hover_text(tr("Check every file against its checksum, and download again what is damaged or missing"))
+                .clicked()
+            {
+                repair(app);
+            }
+            if managed && widgets::secondary_button(ui, tr("Remove Local AI…"), 140.0).clicked() {
+                app.ui.ai_setup.confirm_remove = true;
+            }
+        });
+        ui.add_space(8.0);
+    }
+    if app.ui.ai_setup.confirm_remove {
+        let engine = list(&status, "/engines").first().map(|e| text(e, "/folder").to_string()).unwrap_or_default();
+        info_row(
+            ui,
+            ("triangle-alert", t.warning),
+            tr("Remove local AI?"),
+            &format!(
+                "{} {engine}. {}",
+                tr("This deletes the engine in"),
+                tr("Your own files in the models folder are never touched. Cloud models keep working.")
+            ),
+            "",
+        );
+        ui.horizontal(|ui| {
+            if widgets::secondary_button(ui, tr("Remove Engine and Models"), 190.0).clicked() {
+                remove(app, true);
+            }
+            if widgets::secondary_button(ui, tr("Remove Engine Only"), 150.0)
+                .on_hover_text(tr("Keeps the downloaded model files, to use with another ComfyUI or a later setup"))
+                .clicked()
+            {
+                remove(app, false);
+            }
+            if widgets::secondary_button(ui, tr("Cancel"), 80.0).clicked() {
+                app.ui.ai_setup.confirm_remove = false;
+            }
+        });
+        ui.add_space(8.0);
+    }
+    match (&app.ui.ai_setup.probe, app.ui.ai_setup.probe_job) {
+        (Some(probe), _) => {
+            // With the app's own engine installed, the row about finding a ComfyUI has been
+            // answered above.
+            let own = !list(&status, "/engines").is_empty();
+            for check in list(probe, "/checks").iter().filter(|c| !(own && text(c, "/id") == "comfy")) {
+                info_row(ui, level_icon(text(check, "/level"), &t), tr(text(check, "/title")), tr(text(check, "/detail")), tr(text(check, "/value")));
+            }
+        }
+        (None, Some(_)) => {
+            ui.horizontal(|ui| {
+                ui.spinner();
+                ui.label(RichText::new(tr("Looking at this PC…")).color(t.text_dim));
+            });
+        }
+        (None, None) => {}
+    }
+    problem(ui, &app.ui.ai_setup.note.clone());
+}
+
+/// A big button: a title, a line under it, and a badge beside the title. Filled when it is the
+/// one recommended.
+fn choice_button(ui: &mut egui::Ui, rect: Rect, title: &str, sub: &str, badge: &str, primary: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let resp = ui.allocate_rect(rect, Sense::click());
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title));
+    let enabled = ui.is_enabled();
+    let down = resp.is_pointer_button_down_on();
+    let (fill, fg, dim) = if primary {
+        let fill = if down {
+            t.primary_bg.gamma_multiply(0.85)
+        } else if resp.hovered() {
+            t.primary_bg.gamma_multiply(0.93)
+        } else {
+            t.primary_bg
+        };
+        (fill, t.primary_text, t.primary_text.gamma_multiply(0.85))
+    } else {
+        (if resp.hovered() || down { t.hover } else { t.field }, t.text, t.text_dim)
+    };
+    let fade = |c: Color32| if enabled { c } else { c.gamma_multiply(0.45) };
+    ui.painter().rect_filled(rect, t.radius, fade(fill));
+    if !primary {
+        let edge = if resp.hovered() && enabled { t.text_dim } else { t.field_border };
+        ui.painter().rect_stroke(rect, t.radius, Stroke::new(1.0, edge), StrokeKind::Inside);
+    }
+    if resp.has_focus() {
+        ui.painter().rect_stroke(rect.expand(2.0), t.radius + 2.0, Stroke::new(2.0, t.accent), StrokeKind::Outside);
+    }
+    let inner = rect.shrink2(vec2(16.0, 12.0));
+    let painter = ui.painter_at(rect);
+    let heading = painter.layout_no_wrap(title.to_string(), crate::theme::semibold(14.0), fade(fg));
+    let heading_size = heading.size();
+    painter.galley(inner.min, heading, fade(fg));
+    if !badge.is_empty() {
+        let label = painter.layout_no_wrap(badge.to_string(), crate::theme::medium(10.5), fade(fill));
+        let pill = Rect::from_min_size(
+            pos2(inner.left() + heading_size.x + 8.0, inner.top() + (heading_size.y - label.size().y - 4.0) / 2.0),
+            label.size() + vec2(12.0, 4.0),
+        );
+        painter.rect_filled(pill, pill.height() / 2.0, fade(fg));
+        painter.galley(pill.min + vec2(6.0, 2.0), label, fade(fill));
+    }
+    let line = painter.layout(sub.to_string(), egui::FontId::proportional(11.5), fade(dim), inner.width());
+    painter.galley(pos2(inner.left(), inner.top() + heading_size.y + 5.0), line, fade(dim));
+    resp
+}
+
+/// The first screen's question when a ComfyUI was found: keep using it, or install a new one.
+fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let can_install = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("canInstall")).and_then(Value::as_bool).unwrap_or(false);
+    let area = ui.available_rect_before_wrap();
+    let gap = 12.0;
+    let width = ((area.width() - gap) / 2.0).max(0.0);
+    let height = area.height().clamp(0.0, 80.0);
+    let mine = Rect::from_min_size(area.min, vec2(width, height));
+    let new = Rect::from_min_size(pos2(area.left() + width + gap, area.top()), vec2(width, height));
+    // Each in a Ui of its own: side by side, and the second greyed where it can't install.
+    let mut left = ui.new_child(UiBuilder::new().max_rect(mine));
+    let r = choice_button(&mut left, mine, tr("Continue with My ComfyUI"), tr("Keeps your ComfyUI and its models. Only missing model files are downloaded."), "", false);
+    if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        use_existing(app);
+    }
+    let mut right = ui.new_child(UiBuilder::new().max_rect(new));
+    if !can_install {
+        right.disable();
+    }
+    let r = choice_button(
+        &mut right,
+        new,
+        tr("Continue with New ComfyUI"),
+        tr("A private copy with its own Python, set up for PhotoCraft. Yours is left as it is."),
+        tr("Recommended"),
+        true,
+    );
+    if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system")).clicked() {
+        use_managed(app);
+    }
+}
+
+/// Use my ComfyUI: the folders it reads models from, to pick one with a click; or, when none
+/// was found, where such a folder usually is.
+fn folder_choices(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let folders = app.ui.ai_setup.folders.clone();
+    if folders.is_empty() {
+        ui.add(
+            egui::Label::new(
+                RichText::new(tr(
+                    "Not sure which folder? It is the one named models, with checkpoints, diffusion_models and vae in it. ComfyUI Desktop usually keeps it in Documents\\ComfyUI\\models, the portable build in ComfyUI_windows_portable\\ComfyUI\\models. With ComfyUI running, Connect finds it.",
+                ))
+                .color(t.text_faint)
+                .size(11.5),
+            )
+            .wrap(),
+        );
+        ui.add_space(12.0);
+        return;
+    }
+    let heading = if folders.len() == 1 { tr("Found in your ComfyUI's settings:") } else { tr("Your ComfyUI reads models from these folders. Any of them will do:") };
+    ui.label(RichText::new(heading).color(t.text_dim).size(11.5));
+    ui.add_space(4.0);
+    for (i, folder) in folders.iter().enumerate() {
+        let chosen = same_folder(&app.ui.ai_setup.models_dir, folder);
+        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), Sense::click());
+        if resp.hovered() {
+            ui.painter().rect_filled(rect, t.radius_sm, t.hover);
+        }
+        let centre = pos2(rect.left() + 12.0, rect.center().y);
+        ui.painter().circle_stroke(centre, 6.0, Stroke::new(1.2, if chosen { t.accent } else { t.text_faint }));
+        if chosen {
+            ui.painter().circle_filled(centre, 3.2, t.accent);
+        }
+        let painter = ui.painter_at(rect);
+        let note = (i == 0 && folders.len() > 1)
+            .then(|| painter.layout_no_wrap(tr("where ComfyUI saves new models").to_string(), egui::FontId::proportional(11.5), t.text_faint));
+        let room = rect.width() - 30.0 - note.as_ref().map_or(0.0, |n| n.size().x + 12.0);
+        let color = if chosen { t.text } else { t.text_dim };
+        // A long path loses its middle, so the note and the folder's own name stay in view.
+        let mut shown = folder.clone();
+        let mut path = painter.layout_no_wrap(shown.clone(), crate::theme::mono(12.0), color);
+        let chars: Vec<char> = folder.chars().collect();
+        let mut cut = 0;
+        while path.size().x > room && cut + 8 < chars.len() {
+            cut += 2;
+            let keep = chars.len() - cut;
+            let head: String = chars.iter().take(keep * 2 / 5).collect();
+            let tail: String = chars.iter().skip(chars.len() - (keep - keep * 2 / 5)).collect();
+            shown = format!("{head}\u{2026}{tail}");
+            path = painter.layout_no_wrap(shown.clone(), crate::theme::mono(12.0), color);
+        }
+        let path_width = path.size().x;
+        painter.galley(pos2(rect.left() + 26.0, rect.center().y - path.size().y / 2.0), path, color);
+        if let Some(note) = note {
+            painter.galley(pos2(rect.left() + 26.0 + path_width + 12.0, rect.center().y - note.size().y / 2.0), note, t.text_faint);
+        }
+        let resp = if shown == *folder { resp } else { resp.on_hover_text(folder) };
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            app.ui.ai_setup.models_dir = folder.clone();
+        }
+    }
+    // A folder it doesn't read: what is downloaded there would not show up in it.
+    let chosen = app.ui.ai_setup.models_dir.clone();
+    if !chosen.trim().is_empty() && !folders.iter().any(|f| same_folder(f, &chosen)) {
+        ui.add_space(2.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(tr("Your ComfyUI doesn't read models from the folder above, so files downloaded there won't show up in it.")).color(t.warning).size(11.5),
+            )
+            .wrap(),
+        );
+    }
+    ui.add_space(12.0);
+}
+
+/// A folder: a field, Browse, and the room on its drive.
+fn folder_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, engine: bool) {
+    let t = Tokens::get(ui.ctx());
+    let (title, about) = if engine {
+        ("Engine folder", "ComfyUI and its own Python. Nothing is added to PATH, and no administrator rights are needed.")
+    } else if app.ui.ai_setup.existing {
+        ("Models folder", "Your ComfyUI's models folder: missing files are downloaded into it.")
+    } else {
+        ("Models folder", "Model files are large. Any drive will do, and they stay when the engine is updated or removed.")
+    };
+    ui.label(RichText::new(tr(title)).font(crate::theme::medium(13.0)).color(t.text));
+    ui.add_space(3.0);
+    let mut pick = false;
+    ui.horizontal(|ui| {
+        let s = &mut app.ui.ai_setup;
+        let value = if engine { &mut s.engine_dir } else { &mut s.models_dir };
+        widgets::text_field(ui, egui::Id::new(("ai-setup-folder", engine)), value, tr("Choose a folder"), ui.available_width() - 96.0, false);
+        pick = widgets::secondary_button(ui, tr("Browse…"), 84.0).clicked();
+    });
+    ui.add_space(3.0);
+    ui.add(egui::Label::new(RichText::new(tr(about)).color(t.text_faint).size(11.5)).wrap());
+    if pick {
+        let current = if engine { app.ui.ai_setup.engine_dir.clone() } else { app.ui.ai_setup.models_dir.clone() };
+        let asked =
+            app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: Some(current).filter(|d| !d.trim().is_empty()) }, move |app, answer| {
+                if let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer {
+                    let s = &mut app.ui.ai_setup;
+                    *(if engine { &mut s.engine_dir } else { &mut s.models_dir }) = path;
+                }
+                Ok(Value::Null)
+            });
+        if let Err(e) = asked {
+            app.ui.ai_setup.note = format!("{}: {e}", tr("Could not open the folder dialog"));
+        }
+    }
+    ui.add_space(12.0);
+}
+
+/// What the plan says about room: needed against free, as a bar.
+fn room(ui: &mut egui::Ui, plan: &Value) {
+    let t = Tokens::get(ui.ctx());
+    let same = plan.get("sameDrive").and_then(Value::as_bool).unwrap_or(false);
+    let (engine, models) = (number(plan, "/engineBytes"), number(plan, "/modelsBytes"));
+    let bar = |ui: &mut egui::Ui, what: &str, need: u64, free: Option<u64>| {
+        let Some(free) = free else { return };
+        let fraction = if free > 0 { (need as f64 / free as f64).clamp(0.0, 1.0) as f32 } else { 1.0 };
+        let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
+        ui.painter().rect_filled(rect, 3.0, t.field);
+        let fill = if need > free { t.danger } else { t.accent };
+        ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height())), 3.0, fill);
+        ui.add_space(3.0);
+        ui.label(RichText::new(format!("{what}: {} {} · {} {}", size(need), tr("needed"), size(free), tr("free"))).color(t.text_dim).size(11.5));
+        ui.add_space(8.0);
+    };
+    if same {
+        bar(ui, tr("Engine and models"), engine.saturating_add(models), plan.get("modelsFree").and_then(Value::as_u64));
+    } else {
+        if plan.get("route").and_then(Value::as_str) == Some("managed") {
+            bar(ui, tr("Engine"), engine, plan.get("engineFree").and_then(Value::as_u64));
+        }
+        bar(ui, tr("Models"), models, plan.get("modelsFree").and_then(Value::as_u64));
+    }
+}
+
+fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    if app.ui.ai_setup.existing {
+        heading(
+            ui,
+            "Your ComfyUI",
+            "PhotoCraft connects to the ComfyUI you already have. It installs nothing, and only fetches the model files that are missing.",
+        );
+        ui.label(RichText::new(tr("Address")).font(crate::theme::medium(13.0)).color(t.text));
+        ui.add_space(3.0);
+        let busy = app.ui.ai_setup.server_job.is_some();
+        let mut go = false;
+        ui.horizontal(|ui| {
+            widgets::text_field(ui, egui::Id::new("ai-setup-url"), &mut app.ui.ai_setup.url, "http://127.0.0.1:8188", ui.available_width() - 96.0, true);
+            go = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Connect"), 84.0)).inner.clicked();
+        });
+        if go {
+            connect(app);
+        }
+        ui.add_space(3.0);
+        let found = app.ui.ai_setup.server.clone();
+        let line = match (&found, busy) {
+            (_, true) => tr("Connecting…").to_string(),
+            (Some(server), _) => {
+                let count: usize = server.get("folders").and_then(Value::as_object).map_or(0, |f| f.values().filter_map(Value::as_array).map(Vec::len).sum());
+                let started = if server.get("launch").is_some_and(Value::is_object) { tr("PhotoCraft can start it for you from now on.") } else { "" };
+                format!("{} · {count} {} {started}", tr("Connected"), tr("model files."))
+            }
+            // Found installed but not running: open it, and that is all.
+            (None, false) if detected(app) && app.ui.ai_setup.probe.as_ref().is_some_and(|p| list(p, "/probe/comfy/running").is_empty()) => {
+                tr("Your ComfyUI Desktop is not running. Open it, then press Connect. (ComfyUI Desktop listens on port 8000, the portable build on 8188.)")
+                    .to_string()
+            }
+            (None, false) => tr("The portable build of ComfyUI listens on port 8188, ComfyUI Desktop on port 8000. Start it, then press Connect.").to_string(),
+        };
+        ui.add(egui::Label::new(RichText::new(line).color(t.text_faint).size(11.5)).wrap());
+        ui.add_space(12.0);
+        if found.as_ref().is_some_and(|s| s.get("local").and_then(Value::as_bool) == Some(false)) {
+            ui.add(
+                egui::Label::new(
+                    RichText::new(tr(
+                        "That ComfyUI runs on another computer, so there is no models folder here to download into. Its models are set up as they are.",
+                    ))
+                    .color(t.text_dim)
+                    .size(12.0),
+                )
+                .wrap(),
+            );
+        } else {
+            folder_row(app, ui, false);
+            folder_choices(app, ui);
+        }
+    } else {
+        heading(ui, "Where it goes", "Two folders: a small one for the engine, and one for the models, which can be on any drive.");
+        folder_row(app, ui, true);
+        folder_row(app, ui, false);
+    }
+    replan(app);
+    if let Some(plan) = app.ui.ai_setup.plan.clone() {
+        room(ui, &plan);
+        for p in list(&plan, "/problems") {
+            problem(ui, p.as_str().unwrap_or(""));
+        }
+    }
+    problem(ui, &app.ui.ai_setup.plan_note.clone());
+    problem(ui, &app.ui.ai_setup.note.clone());
+}
+
+/// How a licence reads beside a model: its name, and what it means for paid work.
+fn licence_note(model: &Value) -> String {
+    let name = text(model, "/licence/name");
+    match model.pointer("/licence/commercial").and_then(Value::as_bool) {
+        Some(true) => format!("{name} · {}", tr("commercial use allowed")),
+        Some(false) => format!("{name} · {}", tr("non-commercial use only")),
+        None => format!("{name} · {}", tr("read the licence for commercial use")),
+    }
+}
+
+fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
+    let t = Tokens::get(ui.ctx());
+    heading(ui, "Choose your models", "Each model is a few large files. Files that models share are downloaded once. You can add more later.");
+    let manifest = app.ui.ai_setup.manifest.clone().unwrap_or(Value::Null);
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let has_token = status.get("token").and_then(Value::as_bool).unwrap_or(false);
+    // Presets.
+    let mut chosen_preset = None;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for (key, label) in [("starter", "Starter"), ("recommended", "Recommended"), ("everything", "Everything")] {
+            let bytes = number(&manifest, &format!("/presets/{key}/bytes"));
+            if widgets::pill_tab(ui, &format!("{} · {}", tr(label), download_size(bytes)), app.ui.ai_setup.preset == key).clicked() {
+                chosen_preset = Some(key);
+            }
+        }
+        if app.ui.ai_setup.preset == "custom" {
+            widgets::pill_tab(ui, tr("Your choice"), true);
+        }
+    });
+    if let Some(key) = chosen_preset {
+        app.ui.ai_setup.preset = key.to_string();
+        app.ui.ai_setup.models = preset_models(app, key);
+    }
+    ui.add_space(8.0);
+    let vram = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("vramGb")).and_then(Value::as_u64);
+    // Files this app downloaded for its own engine are its to delete again.
+    let managed = !list(&status, "/engines").is_empty() && !running(app);
+    let mut any_gated = false;
+    egui::ScrollArea::vertical().id_salt("ai-setup-models").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+        for model in list(&manifest, "/models").to_vec() {
+            let id = text(&model, "/id").to_string();
+            let mut on = app.ui.ai_setup.models.contains(&id);
+            let gated = model.get("gated").and_then(Value::as_bool).unwrap_or(false);
+            let installed = model.get("installed").and_then(Value::as_bool).unwrap_or(false);
+            any_gated |= gated && on;
+            let rect = row_frame(ui, 82.0);
+            let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 9.0))).layout(Layout::top_down(Align::Min)));
+            inner.spacing_mut().item_spacing.y = 5.0;
+            inner.horizontal(|ui| {
+                if widgets::checkbox(ui, &mut on, text(&model, "/name")).changed() {
+                    toggle_model(app, &id, on);
+                }
+                let does: Vec<&str> = list(&model, "/does").iter().filter_map(Value::as_str).map(tr).collect();
+                ui.label(RichText::new(does.join(" · ")).color(t.text_faint).size(11.0));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let label = if installed { tr("installed").to_string() } else { download_size(number(&model, "/bytes")) };
+                    ui.label(RichText::new(label).font(crate::theme::mono(12.0)).color(if installed { t.accent_text } else { t.text_dim }));
+                });
+            });
+            inner.label(RichText::new(tr(text(&model, "/about"))).color(t.text_dim).size(11.5));
+            inner.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                link(app, ui, &licence_note(&model), text(&model, "/licence/url"));
+                match (text(&model, "/fit"), vram) {
+                    ("tooLarge", Some(gb)) => {
+                        ui.label(RichText::new(format!("{} {gb} GB", tr("too large for your card:"))).color(t.warning).size(11.5));
+                    }
+                    ("untested", Some(gb)) => {
+                        ui.label(RichText::new(format!("{} {gb} GB {}", tr("not tested on"), tr("cards"))).color(t.text_faint).size(11.5));
+                    }
+                    _ => {}
+                }
+                if gated && !has_token {
+                    ui.label(RichText::new(tr("needs a Hugging Face sign-in")).color(t.warning).size(11.5));
+                    link(app, ui, tr("Get access"), text(&model, "/page"));
+                }
+                if installed && managed {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if app.ui.ai_setup.remove_model.as_deref() == Some(id.as_str()) {
+                            if ui.add(egui::Label::new(RichText::new(tr("Keep")).color(t.text_dim).size(11.5).underline()).sense(Sense::click())).clicked() {
+                                app.ui.ai_setup.remove_model = None;
+                            }
+                            if ui.add(egui::Label::new(RichText::new(tr("Delete")).color(t.danger).size(11.5).underline()).sense(Sense::click())).clicked() {
+                                remove_model(app, &id);
+                            }
+                            ui.label(RichText::new(tr("Delete its files?")).color(t.text_dim).size(11.5));
+                        } else {
+                            let r =
+                                ui.add(egui::Label::new(RichText::new(tr("Delete files…")).color(t.text_faint).size(11.5).underline()).sense(Sense::click()));
+                            if r.on_hover_text(tr("Frees the space this model takes. A file another installed model uses is kept")).clicked() {
+                                app.ui.ai_setup.remove_model = Some(id.clone());
+                            }
+                        }
+                    });
+                }
+            });
+            ui.add_space(6.0);
+        }
+    });
+    // A gated model among the ticked ones: where its licence is accepted, and the token.
+    if any_gated {
+        ui.add_space(2.0);
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(tr("Hugging Face token")).color(t.text_dim).size(12.0));
+            let hint = if has_token { tr("Saved. Type a new one to replace it") } else { tr("Paste a read token") };
+            ui.add(egui::TextEdit::singleline(&mut app.ui.ai_setup.token).password(true).desired_width(230.0).hint_text(hint));
+            let typed = !app.ui.ai_setup.token.trim().is_empty();
+            if ui.add_enabled_ui(typed, |ui| widgets::secondary_button(ui, tr("Save"), 64.0)).inner.clicked() {
+                save_token(app);
+            }
+        });
+        let hint = "Accept the model's licence on its page (Get access), then paste a read token from your Hugging Face settings. It is sent only to huggingface.co. Without one, that model is skipped.";
+        ui.add(egui::Label::new(RichText::new(tr(hint)).color(t.text_faint).size(11.0)).wrap());
+    }
+    problem(ui, &app.ui.ai_setup.plan_note.clone());
+    problem(ui, &app.ui.ai_setup.note.clone());
+    replan(app);
+}
+
+fn eta(seconds: u64) -> String {
+    match seconds {
+        s if s < 90 => format!("{} {s} s", tr("about")),
+        s if s < 5400 => format!("{} {} min", tr("about"), (s + 30) / 60),
+        s => format!("{} {:.1} h", tr("about"), s as f64 / 3600.0),
+    }
+}
+
+fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
+    let t = Tokens::get(ui.ctx());
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let busy = running(app);
+    let state = text(&status, "/state").to_string();
+    let sub = if busy {
+        "The editor stays usable. You can close this window: the setup carries on, and the status bar shows how far it is."
+    } else {
+        "The setup is not running."
+    };
+    heading(ui, if busy { "Installing" } else { "Install" }, sub);
+    let progress = status.get("progress").cloned().unwrap_or(Value::Null);
+    let (done, total) = (number(&progress, "/bytesDone"), number(&progress, "/bytesTotal"));
+    if total > 0 {
+        let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
+        crate::jobs_ui::bar(ui, bar, Some((done as f64 / total as f64).clamp(0.0, 1.0) as f32), &t);
+        ui.add_space(4.0);
+        let speed = progress.get("speed").and_then(Value::as_f64).unwrap_or(0.0);
+        let mut line = format!("{} / {}", size(done), size(total));
+        if busy && speed > 1.0 {
+            line = format!("{line} · {}/s", size(speed as u64));
+        }
+        if let Some(seconds) = progress.get("etaSeconds").and_then(Value::as_u64).filter(|_| busy) {
+            line = format!("{line} · {} {}", eta(seconds), tr("left"));
+        }
+        let message = text(&progress, "/message");
+        if !message.is_empty() && done >= total {
+            line = format!("{line} · {}", tr(message));
+        }
+        ui.label(RichText::new(line).color(t.text_dim).size(12.0));
+        ui.add_space(8.0);
+    }
+    egui::ScrollArea::vertical().id_salt("ai-setup-steps").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+        for step in list(&progress, "/steps") {
+            let rect = row_frame(ui, 34.0);
+            let state = text(step, "/state");
+            let (icon, color) = match state {
+                "done" => ("check", t.accent),
+                "failed" => ("x", t.danger),
+                "skipped" => ("info", t.warning),
+                "active" => ("circle-dot", t.text),
+                _ => ("circle", t.text_faint),
+            };
+            crate::icons::paint(ui, Rect::from_min_size(rect.min + vec2(10.0, 9.0), vec2(16.0, 16.0)), icon, 14.0, color);
+            let (step_done, step_total) = (number(step, "/done"), number(step, "/total"));
+            let note = text(step, "/note");
+            let right = match (state, step_total) {
+                ("skipped" | "failed", _) => String::new(),
+                (_, 0) => String::new(),
+                ("done", total) => size(total),
+                (_, total) => format!("{} / {}", size(step_done), size(total)),
+            };
+            let right_width = if right.is_empty() { 0.0 } else { 150.0 };
+            let label =
+                if note.is_empty() || state == "done" { tr(text(step, "/label")).to_string() } else { format!("{} · {}", tr(text(step, "/label")), tr(note)) };
+            let label_rect = Rect::from_min_max(rect.min + vec2(36.0, 0.0), rect.max - vec2(right_width + 12.0, 0.0));
+            let mut child = ui.new_child(UiBuilder::new().max_rect(label_rect).layout(Layout::left_to_right(Align::Center)));
+            widgets::elided_label(&mut child, &label, label_rect.width()).on_hover_text(&label);
+            if !right.is_empty() {
+                ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, right, crate::theme::mono(11.5), t.text_dim);
+            }
+            if state == "active" && step_total > 0 {
+                let track = Rect::from_min_max(pos2(rect.left() + 36.0, rect.bottom() - 5.0), pos2(rect.right() - 12.0, rect.bottom() - 3.0));
+                ui.painter().rect_filled(track, 1.0, t.field_border);
+                let fraction = (step_done as f64 / step_total as f64).clamp(0.0, 1.0) as f32;
+                ui.painter().rect_filled(Rect::from_min_size(track.min, vec2(track.width() * fraction, track.height())), 1.0, t.accent);
+            }
+            ui.add_space(4.0);
+        }
+    });
+    if !busy {
+        let error = text(&status, "/result/error").to_string();
+        let recorded = text(&status, "/record/error").to_string();
+        match state.as_str() {
+            "paused" => {
+                ui.label(RichText::new(tr("Paused. What arrived is kept.")).color(t.text_dim));
+            }
+            "failed" | "interrupted" => problem(ui, if error.is_empty() { &recorded } else { &error }),
+            _ => {}
+        }
+    }
+    problem(ui, &app.ui.ai_setup.note.clone());
+}
+
+fn page_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let result = status.get("result").cloned().unwrap_or(Value::Null);
+    let ready = list(&result, "/ready").len();
+    let sub = if text(&result, "/route") == "existing" {
+        "PhotoCraft is connected to your ComfyUI, and its models are set up."
+    } else {
+        "The engine starts by itself when a local model needs it, and stops when you quit."
+    };
+    heading(ui, "Local AI is ready", sub);
+    let image = test_image(app, ui.ctx());
+    ui.horizontal_top(|ui| {
+        if let Some(tex) = &image {
+            let side = 250.0;
+            let [w, h] = tex.size();
+            let scale = side / (w.max(h).max(1) as f32);
+            let (rect, _) = ui.allocate_exact_size(vec2(w as f32 * scale, h as f32 * scale), Sense::hover());
+            ui.painter().image(tex.id(), rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+            ui.painter().rect_stroke(rect, t.radius_sm, Stroke::new(1.0, t.card_border), StrokeKind::Inside);
+            ui.add_space(14.0);
+        }
+        ui.vertical(|ui| {
+            if let Some(test) = result.get("testImage").filter(|v| v.is_object()) {
+                let seconds = test.get("seconds").and_then(Value::as_f64).unwrap_or(0.0);
+                ui.label(RichText::new(tr("Your first image")).font(crate::theme::medium(14.0)).color(t.text));
+                ui.label(
+                    RichText::new(format!("{} {} {} {seconds:.1} s", tr("Rendered with"), text(test, "/modelName"), tr("in"))).color(t.text_dim).size(12.5),
+                );
+                ui.label(RichText::new(tr("The first image takes longest: the model had to be loaded.")).color(t.text_faint).size(11.5));
+                ui.add_space(8.0);
+            }
+            let models = if ready == 1 {
+                tr("1 local model is listed in the AI Gen panel.").to_string()
+            } else {
+                format!("{ready} {}", tr("local models are listed in the AI Gen panel."))
+            };
+            ui.label(RichText::new(models).color(t.text).size(13.0));
+            ui.add_space(6.0);
+            for skipped in list(&result, "/skipped") {
+                let line = format!("{}: {}", text(skipped, "/name"), tr(text(skipped, "/skipped")));
+                ui.add(egui::Label::new(RichText::new(line).color(t.warning).size(12.0)).wrap());
+            }
+            let why = text(&result, "/testError");
+            if !why.is_empty() {
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(RichText::new(why).color(t.text_dim).size(12.0)).wrap().selectable(true));
+            }
+        });
+    });
+}
+
+fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    widgets::hairline(ui);
+    ui.add_space(10.0);
+    let (page, existing, busy) = (app.ui.ai_setup.page, app.ui.ai_setup.existing, running(app));
+    let probe = app.ui.ai_setup.probe.clone().unwrap_or(Value::Null);
+    let can_install = probe.get("canInstall").and_then(Value::as_bool).unwrap_or(false);
+    let plan = app.ui.ai_setup.plan.clone().unwrap_or(Value::Null);
+    let choosing = page == Page::Pc && offer_choice(app);
+    ui.horizontal(|ui| {
+        // Left: the other ways in, or what the screen adds up to.
+        match page {
+            Page::Pc => {
+                // With a ComfyUI found, the big buttons above ask which one; otherwise a link.
+                if choosing {
+                    ui.label(RichText::new(tr("Prefer cloud models?")).color(t.text_dim).size(12.0));
+                } else {
+                    ui.label(RichText::new(tr("Already use ComfyUI?")).color(t.text_dim).size(12.0));
+                    let r = ui.add(egui::Label::new(RichText::new(tr("Use my ComfyUI")).color(t.accent).size(12.0)).sense(Sense::click()));
+                    if r.on_hover_text(tr("Connect the ComfyUI you have. Nothing is installed; only missing model files are fetched"))
+                        .on_hover_cursor(egui::CursorIcon::PointingHand)
+                        .clicked()
+                    {
+                        use_existing(app);
+                    }
+                    ui.label(RichText::new("·").color(t.text_faint));
+                }
+                let r = ui.add(egui::Label::new(RichText::new(tr("Cloud models only")).color(t.accent).size(12.0)).sense(Sense::click()));
+                if r.on_hover_text(tr("Skip local models: add an API key for OpenAI, Google, xAI, Meta or Black Forest Labs instead"))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    app.ui.ai_setup.open = false;
+                    crate::ai_gen_ui::open_api_keys(app);
+                }
+            }
+            Page::Location if existing => {
+                let instead = ui.add_enabled_ui(can_install, |ui| widgets::secondary_button(ui, tr("Install New ComfyUI Instead"), 0.0)).inner;
+                if instead
+                    .on_hover_text(tr("A private copy with its own Python, set up for PhotoCraft. Your ComfyUI is left as it is"))
+                    .on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system"))
+                    .clicked()
+                {
+                    use_managed(app);
+                }
+            }
+            Page::Models => {
+                let download = number(&plan, "/downloadBytes");
+                let skipped = list(&plan, "/models").iter().filter(|m| m.get("skipped").is_some_and(|s| !s.is_null())).count();
+                let mut line = if download == 0 {
+                    tr("Nothing to download: everything ticked is here.").to_string()
+                } else {
+                    format!("{} {}", tr("To download:"), download_size(download))
+                };
+                if let Some(free) = plan.get("modelsFree").and_then(Value::as_u64) {
+                    line = format!("{line} · {} {}", size(free), tr("free"));
+                }
+                if skipped > 0 {
+                    line = format!("{line} · {skipped} {}", tr("skipped (needs sign-in)"));
+                }
+                ui.label(RichText::new(line).color(t.text_dim).size(12.0));
+            }
+            _ => {}
+        }
+        // Right: where to next.
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match page {
+            Page::Pc => {
+                // The big buttons above stand for Next.
+                if !choosing {
+                    let ready = app.ui.ai_setup.probe.is_some() && can_install;
+                    let next = ui.add_enabled_ui(ready, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
+                    if next
+                        .on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system. Use my ComfyUI, or cloud models, still work"))
+                        .clicked()
+                    {
+                        use_managed(app);
+                    }
+                }
+                if ui.add_enabled_ui(app.ui.ai_setup.probe_job.is_none(), |ui| widgets::secondary_button(ui, tr("Check Again"), 110.0)).inner.clicked() {
+                    app.ui.ai_setup.probe = None;
+                    app.ui.ai_setup.note.clear();
+                    start_probe(app);
+                }
+            }
+            Page::Location => {
+                let problems = !list(&plan, "/problems").is_empty() || app.ui.ai_setup.plan.is_none();
+                let connected = !existing || app.ui.ai_setup.server.is_some();
+                let next = ui.add_enabled_ui(!problems && connected, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
+                if next.on_disabled_hover_text(tr(if connected { "Choose folders that have the room" } else { "Connect to your ComfyUI first" })).clicked() {
+                    app.ui.ai_setup.page = Page::Models;
+                }
+                if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
+                    // What went wrong here (Connect, say) is not the first screen's to show.
+                    app.ui.ai_setup.note.clear();
+                    app.ui.ai_setup.page = Page::Pc;
+                }
+            }
+            Page::Models => {
+                let problems = !list(&plan, "/problems").is_empty() || app.ui.ai_setup.plan.is_none();
+                let label = if number(&plan, "/downloadBytes") == 0 { tr("Finish") } else { tr("Install") };
+                let go = ui.add_enabled_ui(!problems && !busy, |ui| widgets::primary_button(ui, label, 96.0)).inner;
+                let why = list(&plan, "/problems").first().and_then(Value::as_str).unwrap_or("Choose folders first").to_string();
+                if go.on_disabled_hover_text(why).clicked() {
+                    install(app);
+                }
+                if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
+                    app.ui.ai_setup.page = Page::Location;
+                }
+            }
+            Page::Install => {
+                if busy {
+                    if widgets::secondary_button(ui, tr("Pause"), 80.0)
+                        .on_hover_text(tr("Stop for now. What arrived is kept, and Continue picks up from there"))
+                        .clicked()
+                    {
+                        let _ = app.session.execute("ai.setup.cancel", json!({}));
+                    }
+                    if widgets::secondary_button(ui, tr("Close"), 80.0).on_hover_text(tr("The setup carries on in the background")).clicked() {
+                        app.ui.ai_setup.open = false;
+                    }
+                } else {
+                    let state = app.ui.ai_setup.status.as_ref().map_or("", |s| text(s, "/state")).to_string();
+                    if matches!(state.as_str(), "paused" | "failed" | "interrupted") && widgets::primary_button(ui, tr("Continue"), 110.0).clicked() {
+                        resume(app);
+                    }
+                    if state == "done" && widgets::primary_button(ui, tr("Next"), 96.0).clicked() {
+                        app.ui.ai_setup.page = Page::Ready;
+                    }
+                    if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
+                        app.ui.ai_setup.page = Page::Models;
+                    }
+                }
+            }
+            Page::Ready => {
+                if widgets::primary_button(ui, tr("Open AI Gen"), 120.0).clicked() {
+                    app.ui.ai_setup.open = false;
+                    let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+                }
+                if widgets::secondary_button(ui, tr("Add Models…"), 110.0).clicked() {
+                    app.ui.ai_setup.page = Page::Models;
+                }
+            }
+        });
+    });
+}
+
+/// The wizard window.
+pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    tick(app, ctx);
+    if !app.ui.ai_setup.open {
+        return;
+    }
+    let t = Tokens::get(ctx);
+    let screen = ctx.content_rect();
+    let (w, h) = (WIDTH.min(screen.width() - 24.0).max(520.0), HEIGHT.min(screen.height() - 24.0).max(360.0));
+    let mut close = false;
+    egui::Window::new(tr("PhotoCraft Setup: Local AI"))
+        .id(egui::Id::new("ai-setup"))
+        .title_bar(false)
+        .resizable(false)
+        .collapsible(false)
+        .fixed_size([w, h])
+        .default_pos(screen.center() - vec2(w, h) / 2.0)
+        .frame(egui::Frame::NONE.fill(t.card).stroke(Stroke::new(1.0, t.card_border)).corner_radius(t.radius_lg).shadow(egui::Shadow {
+            offset: [0, 12],
+            blur: 36,
+            spread: 0,
+            color: t.shadow,
+        }))
+        .show(ctx, |ui| {
+            let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+            // The title row.
+            let title = Rect::from_min_size(rect.min, vec2(w, 40.0));
+            crate::brand::paint_mark(ui, Rect::from_min_size(title.min + vec2(14.0, 10.0), vec2(20.0, 20.0)));
+            ui.painter().text(
+                pos2(title.left() + 44.0, title.center().y),
+                egui::Align2::LEFT_CENTER,
+                tr("PhotoCraft Setup: Local AI"),
+                crate::theme::medium(13.0),
+                t.text_dim,
+            );
+            let mut bar = ui.new_child(UiBuilder::new().max_rect(title.shrink2(vec2(10.0, 8.0))).layout(Layout::right_to_left(Align::Center)));
+            close = crate::icons::button(&mut bar, "x", 24.0, false, tr("Close")).clicked();
+            ui.painter().line_segment([title.left_bottom(), title.right_bottom()], Stroke::new(1.0, t.separator));
+            // The steps on the left.
+            let side = Rect::from_min_max(pos2(rect.left(), title.bottom()), pos2(rect.left() + SIDEBAR, rect.bottom()));
+            ui.painter().line_segment([side.right_top(), side.right_bottom()], Stroke::new(1.0, t.separator));
+            let mut steps = ui.new_child(UiBuilder::new().max_rect(side.shrink2(vec2(12.0, 10.0))).layout(Layout::top_down(Align::Min)));
+            sidebar(app, &mut steps);
+            // The screen in front, and under it where to next.
+            let content = Rect::from_min_max(pos2(side.right(), title.bottom()), rect.max).shrink2(vec2(28.0, 18.0));
+            let foot = Rect::from_min_max(pos2(content.left(), content.bottom() - 46.0), content.max);
+            // A ComfyUI was found: which one to use is asked above the footer, where it is seen.
+            let choice_height = if app.ui.ai_setup.page == Page::Pc && offer_choice(app) { CHOICE } else { 0.0 };
+            let body = Rect::from_min_max(content.min, pos2(content.right(), foot.top() - 8.0 - choice_height));
+            if choice_height > 0.0 {
+                let strip = Rect::from_min_max(pos2(content.left(), body.bottom() + 12.0), pos2(content.right(), foot.top() - 4.0));
+                let mut asked = ui.new_child(UiBuilder::new().max_rect(strip).layout(Layout::top_down(Align::Min)));
+                choice(app, &mut asked);
+            }
+            let mut page = ui.new_child(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
+            page.set_clip_rect(body.expand(2.0));
+            match app.ui.ai_setup.page {
+                Page::Pc => {
+                    egui::ScrollArea::vertical().id_salt("ai-setup-pc").auto_shrink([false, false]).show(&mut page, |ui| page_pc(app, ui));
+                }
+                Page::Location => {
+                    egui::ScrollArea::vertical().id_salt("ai-setup-location").auto_shrink([false, false]).show(&mut page, |ui| page_location(app, ui));
+                }
+                Page::Models => page_models(app, &mut page, (body.height() - 190.0).max(120.0)),
+                Page::Install => page_install(app, &mut page, (body.height() - 150.0).max(100.0)),
+                Page::Ready => page_ready(app, &mut page),
+            }
+            let mut bottom = ui.new_child(UiBuilder::new().max_rect(foot).layout(Layout::top_down(Align::Min)));
+            footer(app, &mut bottom);
+        });
+    if close {
+        app.ui.ai_setup.open = false;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[doc(hidden)]
+pub mod demo;
+#[cfg(test)]
+mod tests;

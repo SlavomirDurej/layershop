@@ -12,6 +12,7 @@ pub mod actions_edit_cmds;
 pub mod adjust_cmds;
 pub mod adjust_params;
 pub mod ai_cmds;
+pub mod ai_setup_cmds;
 pub mod align_cmds;
 mod allocation;
 pub mod analysis_cmds;
@@ -421,6 +422,9 @@ pub struct Session {
     pub authorize: Option<fn(&str, &serde_json::Value) -> Result<()>>,
     /// Generative AI: the network transport and API keys (see [`ai_cmds`]).
     pub ai: ai_cmds::AiRuntime,
+    /// The Local AI setup: what it needs from the app, and the one that is running (see
+    /// [`ai_setup_cmds`]).
+    pub ai_setup: ai_setup_cmds::AiSetup,
     /// Background jobs (see [`jobs`]).
     jobs: jobs::Jobs,
     /// Color Sampler points dropped by the last canvas-size change (crop, Canvas Size, Image Size,

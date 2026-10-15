@@ -31,7 +31,7 @@ crates/
   doc                        L1 document model (layers, masks, adjustments, effects, smart objects: pure data)
   ops paint algo text vector L2 history, brush engine, imaging algorithms, type engine, paths/shapes
   compose gpu format         L3 CPU compositor (the oracle), wgpu compositor, .pcraft native format
-  io plugins aigen           L4 document <-> PSD / flat formats; sandboxed WebAssembly plug-ins; generative image back ends (ComfyUI, OpenAI, Gemini)
+  io plugins aigen aisetup   L4 document <-> PSD / flat formats; sandboxed WebAssembly plug-ins; generative image back ends (ComfyUI, OpenAI, Gemini); Local AI setup (installs ComfyUI and model files)
   engine                     L5 Session + command registry (every action is a command)
   ui-egui automation         L6 egui shell (thin: all actions go through the engine); MCP server
   testkit                    test helpers

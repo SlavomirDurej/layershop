@@ -168,7 +168,7 @@ photocraft/
  L7  apps/*                         (binaries: wire everything together)
  L6  ui-egui · automation · platform
  L5  engine
- L4  tools · viewport · io · ml · plugins
+ L4  tools · viewport · io · ml · plugins · aigen · aisetup
  L3  compose · gpu · format
  L2  ops · algo · paint · text · vector
  L1  doc

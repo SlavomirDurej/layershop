@@ -12,9 +12,10 @@ back end you set up, and places the answer on a new layer.
 
 1. **Edit › Preferences › Generative AI…** (a section of its own in the Preferences dialog, under
    Integrations) has three pages:
-   - **Manage Models**. At the top, what is set up: **Cloud models** and **Local models**, each
-     with its count, what is worth knowing now (a provider without a key; whether ComfyUI
-     answers) and a tick box that offers that kind in the AI Gen panel or leaves it out.
+   - **Manage Models**. At the top, on one line, what is set up: **Cloud models** and **Local
+     models**, each with its count and a switch that offers that kind in the AI Gen panel or
+     leaves it out (what each kind is: in its tooltip). A provider without a key, or a server
+     that could not be read, is said on a line under it.
      **+ Add Model**, on the right, adds a cloud model, a local one by architecture, or one of
      the models made for inpainting. Below, every model in one list beside the selected one's
      settings: cloud models first, then local, each in your order, which is the order of the
@@ -263,6 +264,77 @@ selection changed; with a reference ("the scarf from image 2") a Draft takes 9 s
 the picture too, and with a hard-edged selection that shows as a seam along the selection's
 edge where the picture has detail. Feather the selection with those two models.
 
+## Setting up local AI (the wizard)
+
+**File › Set Up Local AI…** installs everything local models need, for someone who has never
+heard of ComfyUI: a private copy of ComfyUI with its own Python, and the model files. No
+terminal, no Python install, nothing added to `PATH`, no administrator rights. Desktop only, and
+installing the engine is Windows only for now ("Use my ComfyUI" works on any desktop).
+
+It opens from four places: the File menu; **Preferences › Generative AI › Local Server**
+(**Set Up Local AI…**, or **Add Models…**, **Repair** and **Remove Local AI…** once set up;
+the dialog is saved first); the line under Generate in the AI Gen panel, until local AI is set
+up; and by itself, once, on the first launch after installing (`--setup-ai` on the command line
+opens it at any launch; an app started with `--control` is not asked). It is a window, not a
+dialog: the editor stays usable beside it.
+
+| Step | Shows | Changes anything? |
+|---|---|---|
+| 1. Your PC | Windows version, graphics card and its memory, driver, free space, an existing ComfyUI, whether the download servers answer | No |
+| 2. Location | The engine folder (default `%LOCALAPPDATA%\LayerShop\engine`) and the models folder (default beside it; any drive), with the room needed against the room free | No |
+| 3. Models | Starter / Recommended / Everything, and a checklist: size, what each is for, its licence and whether that allows commercial work, "needs a Hugging Face sign-in", "not tested on cards this size" | No |
+| 4. Install | One row per file with its progress; overall size, speed and time left; Pause | Yes |
+| 5. Ready | The test image, how long it took, how many models the panel lists | Starts the engine |
+
+- **It carries on with the window closed.** The status bar shows how far it is (click it to
+  reopen the wizard), and so does the line under Generate.
+- **It can be stopped at any point**, by Pause, by closing the app or by a crash. What arrived is
+  kept: files are downloaded to `<name>.part` and continued from where they stopped; the next
+  launch offers **Continue Setup**. There is no separate resume code: a setup is always "plan
+  what is missing, then run the plan", so resuming, adding a model later and repairing are the
+  same thing.
+- **Every file is checked against a pinned sha256** before it takes its final name. A file that
+  arrives wrong is fetched once more, then refused with both checksums in the message.
+- **Shared files are downloaded once** (Ideogram 4 uses Qwen Image 2.1's text encoder), and the
+  totals count them once: Starter 18.5 GB, Recommended 51.5 GB, Everything 176.5 GB.
+- **Gated models** (FLUX.2 Klein 9B) need a Hugging Face sign-in: **Get access** opens the
+  model's page to accept its licence, and a read token pasted into the wizard is kept with the
+  API keys (never in the preferences) and sent only to `huggingface.co`. Without one, that model
+  is skipped and the rest installs.
+- **The engine** is ComfyUI's official Windows portable build, pinned by version and sha256
+  (0.39.0 today; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
+  builds, the last two untested). It is unpacked in pure Rust; the archive is refused whole if
+  any entry would land outside the engine folder. It gets a port of its own (8190 or the next
+  free one), so it never collides with a ComfyUI on 8188 or ComfyUI Desktop on 8000, and it is
+  started hidden when a local model needs it and stopped when the app quits.
+- **Use my ComfyUI** installs nothing: it connects to the ComfyUI at an address, reads how it
+  was started when it runs on this computer, scans its model files, and offers to download only
+  the recommended files it lacks into its models folder. When the first screen finds a ComfyUI
+  (running, or installed by ComfyUI Desktop), it asks with two big buttons in place of Next:
+  **Continue with My ComfyUI** or **Continue with New ComfyUI** (recommended); without one, Use
+  my ComfyUI is a link in the footer. Its screen has **Install New ComfyUI Instead** to change
+  one's mind.
+- **Its models folder is filled in.** The folders a ComfyUI reads models from come from the
+  ComfyUI itself when it runs (`GET /experiment/models`), else from how it is started: its base
+  folder or `--models-directory`, and the extra model paths files it reads (ComfyUI Desktop
+  passes one listing its shared models folder). The first, where ComfyUI saves new models
+  itself, is suggested; the others are a click away, and a folder it doesn't read is warned
+  about. With none found, the screen says where the folder usually is.
+- **Cloud models only** closes the wizard and opens the API Keys page.
+- **Remove Local AI…** deletes the engine, and if asked the model files the setup lists, and
+  says how much room that freed. Only what the setup installed is touched: files you put in the
+  models folder yourself stay, and a ComfyUI you set up yourself is never removed.
+- **Uninstalling the app** leaves the engine and the models where they are.
+
+What can go wrong is said where it happens: a drive without the room (found before anything is
+downloaded, with the drive and the amount), a folder path too long for Windows, a network that
+stays down (the setup pauses; Continue picks up), a gated file (skipped, the rest carries on),
+an antivirus holding a file, an engine that does not start (the last lines of `comfyui.log`), a
+test image that runs out of memory (not a failed install: a smaller model is suggested).
+
+The setup's own record (what was chosen, how far it got) is `ai-setup.json` in the settings
+folder: a file of its own, not a preference.
+
 ## Starting ComfyUI for you
 
 On the **Local Server** page, switch on **Start ComfyUI when a local model needs it and it isn't
@@ -287,6 +359,7 @@ stopped when PhotoCraft quits.
 - If you open ComfyUI Desktop while PhotoCraft's server holds the port, Desktop has to pick
   another port or wait. Stop PhotoCraft's with **Stop Server** first.
 - Agents (MCP / control channel) cannot change the launch settings: they name a program to run.
+  For the same reason they cannot run the setup wizard's installing commands.
 
 ## The recommended models
 
@@ -321,7 +394,10 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 | Ernie Image Turbo | local | 8 steps, CFG 1, 2 MP |
 | Ming Image 0.1 Design | local | 12 steps, CFG 1, 2 MP |
 
-**Leaving a kind out.** Untick **Cloud models** or **Local models** at the top of Manage Models
+**In the panel** the model list is in two sections, headed **Cloud API** and **Local Models**;
+the names are the models' own, and so is the tag in the name of the layer a generation lands on.
+
+**Leaving a kind out.** Switch off **Cloud models** or **Local models** at the top of Manage Models
 and the panel's model lists (Create and Edit) no longer offer that kind; the models stay set up.
 `integrations.ai.showCloud` / `showLocal` are the settings. A model of a kind that is left out
 still runs when `ai.generate` names it.
@@ -532,6 +608,12 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
+| `ai.setup.probe` | what this machine has for local models: system, graphics card and memory, drives, an existing ComfyUI, whether the download hosts answer; and the rows the wizard's first screen shows. Changes nothing; a background job |
+| `ai.setup.manifest {"vramGb"?}` | what the setup can install: models with their files, sizes, licences, whether each is installed and how it suits a card of that size; presets with shared files counted once |
+| `ai.setup.plan {"models"?, "route"?, "variant"?, "recheck"?}` | what a setup would download and the room it needs, given what is on disk. Changes nothing |
+| `ai.setup.status` | the setup that is running (steps, bytes, speed, time left) or how the last one ended; the setup's record; what is installed now |
+| `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair`, `ai.setup.remove`, `ai.setup.setToken` | install, stop, fix, delete, sign in. **Refused to agents**: they download and start a program, or delete files, and are the user's to run from the wizard. So is `ai.setup.plan` with a folder or a server listing of the agent's choosing |
+| `ai.setup.open {"page"?, "route"?, "open"?}` | a shell command (the running app): open the wizard, on a screen (`pc`, `location`, `models`, `install`, `ready`), or close it |
 
 `ai.models` returns every model with `listed` (offered in the panel) and, as `listed`, the ids
 the panel offers in its order.
@@ -560,3 +642,27 @@ as `ai.generate` names its params, so they can be passed straight back to it. In
   `inpaint image.png mask.png [strength]` after the output file to try an inpainting.
 - `crates/engine/src/ai_cmds.rs`: the commands. The app shell sets `Session::ai.transport`.
 - `crates/ui-egui/src/ai_gen_ui.rs`: the panel and the Preferences › Generative AI page.
+- `crates/aisetup` (L4, on top of `aigen`): the Local AI setup. `manifest.json` and
+  `manifest.rs` (what can be installed: the pinned ComfyUI builds and the model files, each
+  listed once), `probe.rs` (what the machine has), `plan.rs` (a pure function from manifest,
+  choices and disk to the steps; every step knows whether it is done), `fetch.rs` (the streaming
+  network seam and its redirect policy; `UreqFetch` on native), `download.rs` (one file: resume,
+  sha256, retries), `unpack.rs` (7z with the path and size guards), `runtime.rs` (the engine's
+  launch line, model paths, removal), `configure.rs` (the settings a setup leaves), `install.rs`
+  (the worker that runs a plan, two downloads at a time) and `state.rs` (the record that makes
+  a setup resumable). Everything but `UreqFetch` and the probe's system calls is tested without
+  a network: the tests run whole setups against a fake network and engine.
+  `cargo xtask ai-manifest` compares the manifest with what GitHub and Hugging Face serve now;
+  `cargo run -p photocraft-aisetup --example archive_contents -- <build.7z>` measures a new
+  ComfyUI build (unpacked size, longest path) from its header alone.
+  `cargo run --release -p photocraft-engine --example ai_setup -- <folder> install [model-id ...]`
+  runs a real setup without the app (the same `ai.setup.*` commands, its own folders, the app's
+  settings untouched); run again, it continues; `remove` deletes what it installed.
+- `crates/engine/src/ai_setup_cmds.rs`: the `ai.setup.*` commands. The app shell sets
+  `Session::ai_setup.env` (the downloader, the default folders, the record's file). A setup is
+  not a session job (those are cancelled by Esc): it has a worker of its own, and `poll` applies
+  its result to the preferences as they are when it ends.
+- `crates/ui-egui/src/ai_setup_ui.rs`: the wizard window, its state (`ai_setup` in the UI state
+  that `ui.inspect` returns) and its ways in. `ai_setup_ui::demo` is a stand-in network and
+  engine: `cargo run -p photocraft-ui-egui --example snapshot -- --ai-setup-demo
+  pc|location|models|install|ready|env` draws any screen offscreen without downloading anything.

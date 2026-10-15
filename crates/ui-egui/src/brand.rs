@@ -1,10 +1,53 @@
-//! The PhotoCraft brand mark at the left of the title bar: the app icon (the kitsune,
-//! `assets/app-icon/`, see its README), where Photoshop shows its "Ps" tile. The PNG carries the
-//! icon's rounded corners; it is decoded once per context into a mipmapped texture, so it stays
-//! crisp at the title bar's size on any display scale.
+//! The product's identity in the UI: its name, and the mark at the left of the title bar.
+//!
+//! This fork ships as LayerShop. The code and the translation catalogs it inherits say
+//! "PhotoCraft"; [`display`] is the one place that turns that into [`NAME`] on the way to the
+//! screen, so neither the catalogs nor upstream's strings need editing.
+//!
+//! The mark is the app icon (`assets/app-icon/`, see its README), where Photoshop shows its
+//! "Ps" tile. The PNG carries the icon's rounded corners; it is decoded once per context into a
+//! mipmapped texture, so it stays crisp at the title bar's size on any display scale.
+
+use std::collections::HashMap;
+use std::sync::{Mutex, OnceLock, PoisonError};
 
 use egui::{Color32, Context, Id, Rect, TextureHandle, TextureOptions, Ui, pos2};
 use photocraft_codecs::{ChannelLayout, SampleType};
+
+/// The product's name as users see it.
+pub const NAME: &str = "LayerShop";
+
+/// The name the UI strings and their translations were written with.
+const SOURCE_NAME: &str = "PhotoCraft";
+
+/// The credit the About window gives the project this one is built from. Shown as written: it
+/// does not pass through [`display`], which would put this build's own name in it.
+pub const BASED_ON: &str = "Based on PhotoCraft by the ArtCraft team.";
+
+/// At most this many distinct strings are rewritten and kept. UI strings that name the product
+/// number in the low hundreds; the cap is for text that turns out not to be a fixed UI string.
+const MAX_RENAMED: usize = 4096;
+
+/// `s` as this build shows it: with [`NAME`] where the string names the product. Strings that
+/// don't name it come back as they are. Each distinct string that does is rewritten once and
+/// kept for the life of the process, which is what lets this hand back a plain `&str` on the
+/// path every label takes every frame.
+pub fn display(s: &str) -> &str {
+    if NAME == SOURCE_NAME || !s.contains(SOURCE_NAME) {
+        return s;
+    }
+    static RENAMED: OnceLock<Mutex<HashMap<String, &'static str>>> = OnceLock::new();
+    let mut renamed = RENAMED.get_or_init(Default::default).lock().unwrap_or_else(PoisonError::into_inner);
+    if let Some(done) = renamed.get(s) {
+        return done;
+    }
+    if renamed.len() >= MAX_RENAMED {
+        return s;
+    }
+    let done: &'static str = Box::leak(s.replace(SOURCE_NAME, NAME).into_boxed_str());
+    renamed.insert(s.to_string(), done);
+    done
+}
 
 /// 128 px: sharp at 20 pt on a 3× display, and the mipmaps keep it clean at 1×.
 const ICON_PNG: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.photocraft.png");
@@ -53,6 +96,19 @@ pub fn mark_rect(ctx: &Context) -> Option<Rect> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn display_puts_the_products_name_in_ui_strings() {
+        assert_eq!(display("About PhotoCraft"), format!("About {NAME}"));
+        assert_eq!(display("PhotoCraft"), NAME);
+        // A translation keeps its own words around the name.
+        assert_eq!(display("Über PhotoCraft"), format!("Über {NAME}"));
+        // Strings that don't name the product are handed back untouched, not copied.
+        let plain = "Layer Style";
+        assert!(std::ptr::eq(display(plain), plain));
+        // The same string is rewritten once.
+        assert!(std::ptr::eq(display("Quit PhotoCraft"), display("Quit PhotoCraft")));
+    }
 
     #[test]
     fn the_icon_decodes_to_a_rounded_128_px_tile() {

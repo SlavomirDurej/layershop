@@ -1159,6 +1159,10 @@ pub struct UiState {
     /// Window › AI Gen: the chosen model, the prompt and its options (see `ai_gen_ui`).
     #[serde(default)]
     pub ai_gen: crate::ai_gen_ui::AiGenUi,
+    /// File › Set Up Local AI…: the wizard's screen, choices and what the engine last said (see
+    /// `ai_setup_ui`).
+    #[serde(default)]
+    pub ai_setup: crate::ai_setup_ui::AiSetupUi,
     /// Slice and Slice Select tools (see `slice_ui`).
     #[serde(default)]
     pub slices: crate::slice_ui::SliceUi,
@@ -1302,6 +1306,7 @@ impl Default for UiState {
             analysis: Default::default(),
             timeline: Default::default(),
             ai_gen: Default::default(),
+            ai_setup: Default::default(),
             slices: Default::default(),
             frame_tool: Default::default(),
             artboard_tool: Default::default(),

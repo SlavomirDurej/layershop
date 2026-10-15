@@ -352,6 +352,19 @@ fn enabled_models(app: &PhotocraftApp) -> Vec<Model> {
     app.session.prefs().integrations.ai.listed().into_iter().filter(|m| fits(m, changing)).cloned().collect()
 }
 
+/// The headings of the panel's model list, each with the index of the model it stands above:
+/// the cloud models, then the local ones (the order of [`Settings::listed`]). A kind with no
+/// model offered has no heading.
+fn model_headings(models: &[Model]) -> Vec<(usize, &'static str)> {
+    let first = |local: bool| models.iter().position(|m| m.provider.is_local() == local);
+    [(first(false), "Cloud API"), (first(true), "Local Models")].into_iter().filter_map(|(at, title)| Some((at?, tr_static(title)))).collect()
+}
+
+/// [`tr`] for a literal: the translation, or the literal itself.
+fn tr_static(s: &'static str) -> &'static str {
+    crate::i18n::t(s)
+}
+
 /// The model the panel would run: the one chosen for the task in front while it is still
 /// offered, else the first that is.
 fn current_model(app: &PhotocraftApp) -> Option<&Model> {
@@ -430,6 +443,26 @@ pub fn open_settings(app: &mut PhotocraftApp, model: &str) -> u64 {
     id
 }
 
+/// Open Preferences on Generative AI › API Keys: where the Local AI wizard's "Cloud models
+/// only" leads.
+pub fn open_api_keys(app: &mut PhotocraftApp) -> u64 {
+    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
+    if let Some(d) = app.ui.dialog_mut(id) {
+        d.fields.insert(PAGE.into(), json!("keys"));
+    }
+    id
+}
+
+/// The line under Generate that leads to the Local AI wizard: the setup's progress while one
+/// runs, else an offer until local AI is set up. `None` where there is nothing to set up (the
+/// browser), or nothing left to.
+fn setup_line(app: &PhotocraftApp) -> Option<String> {
+    if let Some((_, line)) = crate::ai_setup_ui::progress_line(app) {
+        return Some(line);
+    }
+    (crate::ai_setup_ui::available(app) && !crate::ai_setup_ui::set_up(app)).then(|| tr("Local models need a one-time setup: Set Up Local AI…").to_string())
+}
+
 /// Start a generation with the panel's model, prompt and options.
 pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
     let Some(model) = current_model(app).cloned() else {
@@ -477,6 +510,11 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
 pub fn finished(app: &mut PhotocraftApp, result: &Value) {
     app.ui.ai_gen.last_cost = result.get("cost").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0);
     app.ui.ai_gen.last_seed = result.get("seed").and_then(Value::as_u64).map(|s| s & SEED_MASK);
+    // A local model rendered: local AI works, and the offer to set it up has nothing to add.
+    let model = result.get("model").and_then(Value::as_str).unwrap_or("");
+    if app.session.prefs().integrations.ai.model(model).is_some_and(|m| !model.is_empty() && m.provider.is_local()) {
+        app.ui.ai_setup.local_worked = true;
+    }
 }
 
 /// Load what `layer` was generated with (`Layer::generation`) into the panel: the tab and task
@@ -616,7 +654,9 @@ pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let model = current_model(app);
     let kind = technique(ui, model);
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
-    rows + (rows_above(ui, model, kind) + rows_below(ui, model, kind)) as f32 * ROW
+    // The line that leads to the Local AI wizard, while there is one (it may wrap).
+    let setup = if setup_line(app).is_some() { 2.0 * (NOTE_SIZE + 4.0) } else { 0.0 };
+    rows + setup + (rows_above(ui, model, kind) + rows_below(ui, model, kind)) as f32 * ROW
 }
 
 /// Is the inpaint mask being painted with the panel's brush?
@@ -973,6 +1013,9 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         if widgets::secondary_button(ui, tr("Set Up Models…"), 140.0).clicked() {
             open_settings(app, "");
         }
+        if crate::ai_setup_ui::available(app) && widgets::secondary_button(ui, tr("Set Up Local AI…"), 140.0).clicked() {
+            crate::ai_setup_ui::open(app);
+        }
         return;
     }
     // A model removed or disabled since it was chosen falls back to the first one. Change keeps
@@ -986,10 +1029,10 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     // Model, and the shortcut to its settings.
     let mut settings = false;
     ui.horizontal(|ui| {
-        let names: Vec<String> = models.iter().map(|m| if m.provider.is_local() { m.name.clone() } else { format!("{} · {}", m.name, tr("cloud")) }).collect();
-        let options: Vec<(String, &str)> = models.iter().map(|m| m.id.clone()).zip(names.iter().map(String::as_str)).collect();
+        let options: Vec<(String, &str)> = models.iter().map(|m| (m.id.clone(), m.name.as_str())).collect();
+        let headings = model_headings(&models);
         ui.add_enabled_ui(!busy, |ui| {
-            widgets::dropdown(ui, "ai-gen-model", &mut chosen, &options, (width - 34.0).max(80.0));
+            widgets::dropdown_sectioned(ui, "ai-gen-model", &mut chosen, &options, &headings, (width - 34.0).max(80.0));
         });
         settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
     });
@@ -1068,10 +1111,12 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         Provider::Xai | Provider::Meta | Provider::Bfl => reported_price_note(app, &current),
         Provider::Comfy | Provider::Gemini => None,
     };
+    let setup = setup_line(app);
     let line_gap = ui.spacing().item_spacing.y;
     let notes_height: f32 = note
         .iter()
         .chain(price.iter().map(|(text, _)| text))
+        .chain(setup.iter())
         .map(|text| ui.painter().layout(text.clone(), egui::FontId::proportional(NOTE_SIZE), t.text_faint, width).size().y + line_gap)
         .sum();
 
@@ -1175,6 +1220,14 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     // OpenAI bills per image: what this one should cost, and what the last one did.
     if let Some((text, tip)) = price {
         ui.label(RichText::new(text).color(t.text_faint).size(NOTE_SIZE)).on_hover_text(tip);
+    }
+    // The way into the Local AI wizard: its progress while it runs, an offer until it has.
+    if let Some(text) = setup {
+        let line = ui.add(egui::Label::new(RichText::new(text).color(t.accent).size(NOTE_SIZE)).wrap().sense(egui::Sense::click()));
+        let tip = tr("Installs ComfyUI and the recommended models for you: no Python, no terminal. Also File › Set Up Local AI…");
+        if line.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            crate::ai_setup_ui::open(app);
+        }
     }
     if job.is_none()
         && why.is_none()
@@ -1322,6 +1375,9 @@ const JOB: &str = "__aiJob";
 const STARTED: &str = "__aiStarted";
 /// What the last Find Installation / Browse / Stop Server did (`{error, text}`).
 const LAUNCH_STATUS: &str = "__aiLaunchStatus";
+/// What the Local AI setup has installed (`{available, text, installed, managed}`), for the Local
+/// Server page's first block.
+const SETUP: &str = "__aiSetup";
 
 fn text_of(obj: &Map<String, Value>, key: &str) -> String {
     obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -1598,6 +1654,40 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             .color(t.text_dim),
     );
     ui.add_space(8.0);
+    // ----- having it all set up for you -----
+    let setup = f.get(SETUP).cloned().unwrap_or(Value::Null);
+    if setup.get("available").and_then(Value::as_bool) == Some(true) {
+        widgets::section_label(ui, tr("Local AI setup"));
+        ui.add_space(2.0);
+        ui.scope(|ui| {
+            ui.set_max_width(520.0);
+            ui.add(egui::Label::new(RichText::new(setup.get("text").and_then(Value::as_str).unwrap_or("")).color(t.text_faint).size(11.5)).wrap());
+        });
+        ui.add_space(4.0);
+        let installed = setup.get("installed").and_then(Value::as_bool).unwrap_or(false);
+        ui.horizontal(|ui| {
+            let open = if installed { tr("Add Models…") } else { tr("Set Up Local AI…") };
+            if widgets::secondary_button(ui, open, 150.0)
+                .on_hover_text(tr("Opens the setup wizard: it installs ComfyUI and the recommended models for you. These preferences are saved first"))
+                .clicked()
+            {
+                f.insert(ACTION.into(), json!("setup"));
+            }
+            if installed
+                && widgets::secondary_button(ui, tr("Repair"), 80.0)
+                    .on_hover_text(tr("Check every installed file against its checksum, and download again what is damaged or missing"))
+                    .clicked()
+            {
+                f.insert(ACTION.into(), json!("setupRepair"));
+            }
+            if setup.get("managed").and_then(Value::as_bool) == Some(true) && widgets::secondary_button(ui, tr("Remove Local AI…"), 150.0).clicked() {
+                f.insert(ACTION.into(), json!("setupRemove"));
+            }
+        });
+        ui.add_space(10.0);
+        widgets::section_label(ui, tr("Server"));
+        ui.add_space(2.0);
+    }
     egui::Grid::new("ai-server").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
         label(ui, "Address");
         ui.horizontal(|ui| {
@@ -1792,17 +1882,39 @@ fn restore_defaults(ai: &mut Map<String, Value>, f: &mut Map<String, Value>) -> 
     added
 }
 
-/// One line of the summary at the top of Manage Models: a switch for a kind of model (offered
-/// in the AI Gen panel or not), how many there are, and what is worth knowing about them now.
-fn kind_line(ui: &mut egui::Ui, ai: &mut Map<String, Value>, key: &str, title: &str, tip: &str, count: usize, (note, note_color): (&str, egui::Color32)) {
+/// A switch: on or off at a click, drawn as one in every theme (the shared toggle is a
+/// checkbox in the Pro themes).
+fn switch(ui: &mut egui::Ui, on: &mut bool) -> egui::Response {
     let t = Tokens::get(ui.ctx());
-    ui.horizontal_wrapped(|ui| {
-        let mut shown = ai.get(key).and_then(Value::as_bool).unwrap_or(true);
-        widgets::checkbox(ui, &mut shown, &format!("{}  {count}", tr(title))).on_hover_text(tr(tip));
-        ai.insert(key.into(), json!(shown));
-        let text = if shown { note.to_string() } else { format!("{} {note}", tr("Not offered in the AI Gen panel.")) };
-        ui.add(egui::Label::new(RichText::new(text).color(if shown { note_color } else { t.text_faint }).size(11.5)).wrap().selectable(true));
-    });
+    let (rect, mut resp) = ui.allocate_exact_size(vec2(30.0, 17.0), egui::Sense::click());
+    if resp.clicked() {
+        *on = !*on;
+        resp.mark_changed();
+    }
+    let how_on = ui.ctx().animate_bool(resp.id, *on);
+    let radius = rect.height() / 2.0;
+    ui.painter().rect_filled(rect, radius, if *on { t.accent } else { t.field_border });
+    if resp.hovered() {
+        ui.painter().rect_stroke(rect, radius, egui::Stroke::new(1.0, t.text_faint), egui::StrokeKind::Outside);
+    }
+    let x = egui::lerp((rect.left() + radius)..=(rect.right() - radius), how_on);
+    ui.painter().circle_filled(egui::pos2(x, rect.center().y), radius - 2.0, egui::Color32::WHITE);
+    resp
+}
+
+/// One kind of model in the summary at the top of Manage Models: its name, how many there are,
+/// and a switch that offers the kind in the AI Gen panel or leaves it out. What the kind is, and
+/// what is worth knowing about it now, is the tooltip.
+fn kind_switch(ui: &mut egui::Ui, ai: &mut Map<String, Value>, key: &str, title: &str, count: usize, tip: &str) {
+    let t = Tokens::get(ui.ctx());
+    let mut shown = ai.get(key).and_then(Value::as_bool).unwrap_or(true);
+    let name = ui.label(RichText::new(tr(title)).color(if shown { t.text } else { t.text_faint }));
+    let number = ui.label(RichText::new(count.to_string()).color(t.text_faint));
+    let toggle = switch(ui, &mut shown);
+    for resp in [name, number, toggle] {
+        resp.on_hover_text(tip);
+    }
+    ai.insert(key.into(), json!(shown));
 }
 
 /// Move the model at `from` to where the model at `to` is (both positions in the draft's list),
@@ -1849,6 +1961,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     }
     let mut filter = Filter::from_key(f.get(FILTER).and_then(Value::as_str).unwrap_or(""));
     let page = ui.available_width();
+    let page_right = ui.cursor().left() + page;
 
     // ----- what is set up, and Add Model -----
     let count = |local: bool| ai.get("models").and_then(Value::as_array).map_or(0, |ms| ms.iter().filter(|m| m.is_object() && is_local_model(m) == local).count());
@@ -1866,27 +1979,19 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         })
         .map(Provider::label)
         .collect();
-    let (cloud_note, cloud_color) = if missing.is_empty() {
-        (tr("Run by their provider with your API key, and billed by it for each image. Best quality; nothing to install.").to_string(), t.text_faint)
-    } else {
-        (format!("{}: {}", tr("No API key yet (add it on the API Keys page)"), missing.join(", ")), t.warning)
-    };
-    // What the last Connect / Scan said about the server, or where it is.
-    let (local_note, local_color) = match f.get(STATUS).and_then(Value::as_object) {
-        Some(status) => {
-            let error = status.get("error").and_then(Value::as_bool).unwrap_or(false);
-            (status.get("text").and_then(Value::as_str).unwrap_or("").to_string(), if error { t.danger } else { t.text_faint })
-        }
-        None => (format!("{} {}", tr("Run on this computer by ComfyUI, free of charge, at"), text_of(ai, "comfyUrl")), t.text_faint),
-    };
+    // What the last Connect / Scan said about the server.
+    let status = f.get(STATUS).and_then(Value::as_object).map(|status| {
+        (status.get("text").and_then(Value::as_str).unwrap_or("").to_string(), status.get("error").and_then(Value::as_bool).unwrap_or(false))
+    });
+    let off = tr("Switched off, they are left out of the AI Gen panel's model lists; they stay set up.");
+    let cloud_tip = format!("{} {off}", tr("Cloud models are run by their provider with your API key, and billed by it for each image. Best quality; nothing to install."));
+    let local_tip = format!("{} {}. {off}", tr("Local models are run on this computer by ComfyUI, free of charge, at"), text_of(ai, "comfyUrl"));
     let add_width = 132.0;
-    ui.horizontal_top(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width((page - add_width - 16.0).max(160.0));
-            kind_line(ui, ai, "showCloud", "Cloud models", "Offer cloud models in the AI Gen panel's model lists", clouds, (&cloud_note, cloud_color));
-            kind_line(ui, ai, "showLocal", "Local models", "Offer local models in the AI Gen panel's model lists", locals, (&local_note, local_color));
-        });
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+    ui.horizontal(|ui| {
+        kind_switch(ui, ai, "showCloud", "Cloud models", clouds, &cloud_tip);
+        ui.add_space(18.0);
+        kind_switch(ui, ai, "showLocal", "Local models", locals, &local_tip);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let add = widgets::primary_button(ui, &format!("+ {}", tr("Add Model")), add_width);
             egui::Popup::menu(&add).show(|ui| {
                 widgets::menu_scroll(ui, |ui| {
@@ -1906,6 +2011,20 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             });
         });
     });
+    // What needs doing before a model can run is said in the open, not in a tooltip: a provider
+    // without its key, a server that could not be read.
+    let problem = |ui: &mut egui::Ui, text: &str, color: egui::Color32| {
+        ui.scope(|ui| {
+            ui.set_max_width(page);
+            ui.add(egui::Label::new(RichText::new(text).color(color).size(11.5)).wrap().selectable(true));
+        });
+    };
+    if !missing.is_empty() {
+        problem(ui, &format!("{}: {}", tr("No API key yet (add it on the API Keys page)"), missing.join(", ")), t.warning);
+    }
+    if let Some((text, true)) = &status {
+        problem(ui, text, t.danger);
+    }
     ui.add_space(8.0);
 
     // ----- the filters -----
@@ -2093,6 +2212,13 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         reorder = widgets::secondary_button(ui, tr("Recommended Order"), 150.0)
             .on_hover_text(tr("Put the models in the recommended order: the best and newest first, cloud models before local ones. The selected model's arrows move one model up or down"))
             .clicked();
+        // What the server last said, on one line (all of it in the tooltip); an error is shown
+        // whole at the top of the page instead.
+        if let Some((text, false)) = &status {
+            let mut job = egui::text::LayoutJob::simple_singleline(text.clone(), egui::FontId::proportional(11.5), t.text_faint);
+            job.wrap = egui::text::TextWrapping::truncate_at_width((page_right - ui.cursor().left() - 8.0).max(0.0));
+            ui.add(egui::Label::new(job)).on_hover_text(text);
+        }
     });
     if reorder {
         let was = selected.and_then(|i| models.get(i)).cloned();
@@ -2393,6 +2519,7 @@ fn picked(f: &mut Map<String, Value>, path: &str) {
 /// follow a Connect / Scan that is running in the background.
 pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     f.insert(STARTED.into(), json!(app.session.ai.server.as_ref().is_some_and(|s| s.state() == photocraft_aigen::ServerState::Started)));
+    f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
     if let Some(job) = f.get(JOB).cloned() {
         let id = job.get("id").and_then(Value::as_u64).unwrap_or(0);
         let action = job.get("action").and_then(Value::as_str).unwrap_or("connect").to_string();
@@ -2418,7 +2545,11 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     let settings = draft(f);
     match action.as_str() {
         "find" => match app.session.execute("ai.server.find", json!({"settings": settings})) {
-            Ok(found) => {
+            Ok(mut found) => {
+                // The launch settings alone: where it keeps its models is not one of them.
+                if let Some(o) = found.as_object_mut() {
+                    o.remove("modelsFolders");
+                }
                 let complete = ["python", "folder"].iter().all(|k| found.get(*k).and_then(Value::as_str).is_some_and(|v| !v.is_empty()));
                 if let Some(ai) = f.get_mut("values").and_then(|v| v.pointer_mut("/integrations/ai")).and_then(Value::as_object_mut) {
                     ai.insert("comfyLaunch".into(), found);
@@ -2444,6 +2575,10 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
             Err(e) => launch_status(f, true, &e.to_string()),
         },
         "browsePython" | "browseScript" => browse(app, f, action == "browsePython"),
+        // The wizard is a window: the dialog is confirmed first, then it opens (see `ai_setup_ui`).
+        "setup" => crate::ai_setup_ui::request_from_prefs(app, "open"),
+        "setupRepair" => crate::ai_setup_ui::request_from_prefs(app, "repair"),
+        "setupRemove" => crate::ai_setup_ui::request_from_prefs(app, "remove"),
         _ => {
             // Opening the page only looks: it never starts a server.
             let params = json!({"settings": settings, "start": action != "peek"});
