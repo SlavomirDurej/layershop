@@ -16,7 +16,8 @@
   on the Ready page) a desktop shortcut, makes
   LayerShop the owner of `.pcraft`, and offers it under "Open with" for PSD/PSB and the image
   formats it reads (without taking over the user's default app for them), plus photocraft-cli.
-  `msiexec /qn` still installs silently.
+  `msiexec /qn` still installs silently. Uninstalling asks whether the local AI (engine and
+  models) and the settings go too (`photocraft.exe uninstall-cleanup`, below).
 -->
 <?define ProductName = "LayerShop" ?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
@@ -125,6 +126,26 @@
     <Property Id="WixShellExecTarget" Value="[#PhotocraftExe]" />
     <!-- Runs in the wizard's own (unelevated) process, so the app starts as the user, not as admin. -->
     <CustomAction Id="LaunchPhotocraft" BinaryRef="Wix4UtilCA_$(sys.BUILDARCHSHORT)" DllEntry="WixShellExec" Impersonate="yes" Return="ignore" />
+
+    <!-- Uninstalling (never on an upgrade): the app asks whether its local AI (the engine with its
+         own Python and the downloaded models, often tens of GB in %LOCALAPPDATA%\LayerShop) and
+         the user's settings go too, and removes what is ticked (apps/photocraft/src/uninstall.rs).
+         An immediate action runs as the user, before the program's files go. The user's folders
+         are passed because the action's environment need not be the user's; the "." after them
+         keeps their trailing backslash from escaping the closing quote.
+         A silent uninstall asks nothing and keeps everything, unless REMOVEDATA says otherwise:
+         msiexec /x ... /qn REMOVEDATA=ai (engine and models) or REMOVEDATA=all (settings too). -->
+    <Property Id="REMOVEDATA" Secure="yes" />
+    <CustomAction Id="AskAboutUserData" FileRef="PhotocraftExe" Execute="immediate" Return="ignore"
+        ExeCommand="--uninstall-cleanup --local &quot;[LocalAppDataFolder].&quot; --roaming &quot;[AppDataFolder].&quot;" />
+    <CustomAction Id="RemoveUserDataQuietly" FileRef="PhotocraftExe" Execute="immediate" Return="ignore"
+        ExeCommand="--uninstall-cleanup --local &quot;[LocalAppDataFolder].&quot; --roaming &quot;[AppDataFolder].&quot; --remove [REMOVEDATA]" />
+    <InstallExecuteSequence>
+      <Custom Action="AskAboutUserData" After="InstallInitialize"
+          Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND UILevel &gt; 2" />
+      <Custom Action="RemoveUserDataQuietly" After="AskAboutUserData"
+          Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND UILevel &lt;= 2 AND REMOVEDATA" />
+    </InstallExecuteSequence>
   </Package>
 
   <Fragment>

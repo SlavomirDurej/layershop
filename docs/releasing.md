@@ -31,6 +31,12 @@ also ProjectManager's Deploy buttons:
 The files are unsigned (`sign.ps1` skips without a certificate). The MSI keeps Preview 1's
 UpgradeCode and allows same-version upgrades, so each preview replaces the last.
 
+Uninstalling (not upgrading) runs `photocraft.exe --uninstall-cleanup` as the user, before the
+program's files go: a small window asks whether the local AI engine, the downloaded models and
+the settings go too, and removes what is ticked (`apps/photocraft/src/uninstall.rs`). A silent
+uninstall keeps everything unless `REMOVEDATA=ai` (engine and models) or `REMOVEDATA=all` is
+given. An install made by an earlier MSI is uninstalled by that MSI, which doesn't ask.
+
 ## Cutting a release
 
 1. **Bump the version** on `main`. The only place it lives is `[workspace.package] version`

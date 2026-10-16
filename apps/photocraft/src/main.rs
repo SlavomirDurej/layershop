@@ -50,6 +50,7 @@ mod services;
 #[cfg(any(target_os = "macos", target_os = "linux", test))]
 mod tablet;
 mod ui_state;
+mod uninstall;
 mod window_frame;
 
 use photocraft_engine::Session;
@@ -168,6 +169,11 @@ mod control_port_tests {
 }
 
 fn main() -> eframe::Result {
+    // The Windows installer, uninstalling: ask what of the app's data goes with it, and nothing
+    // else (before logging, which would write a file into the settings folder it may remove).
+    if std::env::args_os().nth(1).is_some_and(|a| a == "--uninstall-cleanup") {
+        std::process::exit(uninstall::run(uninstall::parse(std::env::args_os().skip(2))));
+    }
     // First, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
     crash_guard::install_hook();

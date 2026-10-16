@@ -351,7 +351,13 @@ dialog: the editor stays usable beside it.
 - **Remove Local AI…** deletes the engine, and if asked the model files the setup lists, and
   says how much room that freed. Only what the setup installed is touched: files you put in the
   models folder yourself stay, and a ComfyUI you set up yourself is never removed.
-- **Uninstalling the app** leaves the engine and the models where they are.
+- **Uninstalling the app** (the MSI) asks what goes with it: the engine (ComfyUI with its own
+  Python; no Python of the system's is ever installed), the models the setup downloaded (both
+  ticked), and the settings, presets, API keys and Hugging Face sign-in (not ticked), each with
+  its size. Model files in a folder the user chose go only where the setup put them; models
+  downloaded into the user's own ComfyUI are never touched. An upgrade asks nothing and keeps
+  everything; so does a silent uninstall unless `REMOVEDATA=ai|all`. The code:
+  `apps/photocraft/src/uninstall.rs` (`photocraft.exe --uninstall-cleanup`), run by the MSI.
 
 What can go wrong is said where it happens: a drive without the room (found before anything is
 downloaded, with the drive and the amount), a folder path too long for Windows, a network that
@@ -424,12 +430,6 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 **In the panel** the model list is in two sections, headed **Cloud API** and **Local Models**;
 the names are the models' own, and so is the tag in the name of the layer a generation lands on.
 
-**Leaving a kind out.** Switch off **Cloud models** or **Local models** at the top of Manage Models
-and the panel's model lists (Create and Edit) no longer offer that kind; the models stay set up.
-`integrations.ai.showCloud` / `showLocal` are the settings. A model of a kind that is left out
-still runs when `ai.generate` names it.
-
-Two of these differ from ComfyUI's templates: Z-Image Turbo's CFG is 2 (the template's is 1) and
 **Only models that can run are offered.** A ticked model is in the panel's list when it can run
 now: a cloud model once its provider's API key is there; a local one once local AI is ready (set
 up by the wizard or the Local Server page, or a ComfyUI has answered) and, when the server has
@@ -442,6 +442,12 @@ setup runs, local models wait: the panel says "Local AI is being set up", with i
 and offers **Set Up Local AI…** and **Add an API Key…** (or **Manage Models…**). `ai.generate`
 and `ai.models` are unchanged: an agent can still name any model.
 
+**Leaving a kind out.** Switch off **Cloud models** or **Local models** at the top of Manage Models
+and the panel's model lists (Create and Edit) no longer offer that kind; the models stay set up.
+`integrations.ai.showCloud` / `showLocal` are the settings. A model of a kind that is left out
+still runs when `ai.generate` names it.
+
+Two of these differ from ComfyUI's templates: Z-Image Turbo's CFG is 2 (the template's is 1) and
 Ideogram 4's is 5 (the template's is 7). The architecture presets and **Scan Server** use the
 same values, so a model added either way gets them.
 
