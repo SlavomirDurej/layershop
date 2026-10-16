@@ -466,6 +466,14 @@ impl Family {
 /// `references`, the Edit tab's rows).
 pub const MAX_REFERENCES: usize = 3;
 
+/// The model an edit runs when the user chose none, among `offered` (in the panel's order): a
+/// local Qwen Image 2.1, the recommended edit model (the user's call, 2026-10-16), ahead of the
+/// cloud models listed first; else the first offered.
+pub fn preferred_edit<'a>(offered: impl IntoIterator<Item = &'a Model>) -> Option<&'a Model> {
+    let offered: Vec<&Model> = offered.into_iter().collect();
+    offered.iter().copied().find(|m| m.provider.is_local() && m.family == Family::QwenImage21).or_else(|| offered.first().copied())
+}
+
 /// One image generator and its rendering parameters. Every field is stored for every model so
 /// the settings stay a flat record; a family or provider reads only the ones it needs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -820,6 +828,16 @@ impl Settings {
         if id.is_empty() { self.listed().into_iter().next() } else { self.models.iter().find(|m| m.id == id) }
     }
 
+    /// The model with this id, or for an empty id the edit model the panel offers first
+    /// ([`preferred_edit`] of [`Self::listed`]): what an edit runs when none was chosen. With no
+    /// model that edits, the first listed, so the edit is refused in words.
+    pub fn edit_model(&self, id: &str) -> Option<&Model> {
+        if !id.is_empty() {
+            return self.model(id);
+        }
+        preferred_edit(self.listed().into_iter().filter(|m| m.can_edit())).or_else(|| self.model(""))
+    }
+
     /// An id for a new model named `name` that no existing model has.
     pub fn unique_id(&self, name: &str) -> String {
         let mut slug: String = name.chars().map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' }).collect();
@@ -955,6 +973,20 @@ mod tests {
         // Every one generates from a prompt and is listed; the first is what an empty id means.
         assert!(s.models.iter().all(|m| m.enabled && m.can_generate() && !m.name.is_empty()));
         assert_eq!(s.model("").map(|m| m.api_model.as_str()), Some("gpt-image-2.5-sunburst"));
+        // An edit without a model is Qwen Image 2.1's, though the cloud models are listed first;
+        // without it, the first that edits (a cloud model; FLUX.3 Klein doesn't).
+        assert_eq!(s.edit_model("").map(|m| m.id.as_str()), Some("qwen-image-2-1"));
+        assert_eq!(s.edit_model("ming-image-0-1-design").map(|m| m.id.as_str()), Some("ming-image-0-1-design"));
+        let mut without = s.clone();
+        without.models.iter_mut().filter(|m| m.family == Family::QwenImage21).for_each(|m| m.enabled = false);
+        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("gpt-image-2-5-sunburst"));
+        without.show_cloud = false;
+        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("ming-image-0-1-design"));
+        assert_eq!(preferred_edit([]), None);
+        // Nothing that edits: the first listed, which refuses in words.
+        without.models.retain(|m| m.provider.is_local() && !m.can_edit());
+        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), without.model("").map(|m| m.id.as_str()));
+        assert!(without.edit_model("").is_some());
         // The settings the comparison was judged at.
         let by = |id: &str| s.model(id).unwrap();
         assert_eq!((by("z-image-turbo").steps, by("z-image-turbo").cfg, by("z-image-turbo").sampler.as_str()), (8, 2.0, "res_multistep"));

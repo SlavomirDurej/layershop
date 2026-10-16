@@ -30,7 +30,7 @@ pub use http::{MAX_RESPONSE_BYTES, Method, Part, Request, Response, Transport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::ComfyProcess;
 pub use launch::{Launch, LocalServer, ServerState};
-pub use model::{Family, MAX_REFERENCES, Model, Provider, Settings};
+pub use model::{Family, MAX_REFERENCES, Model, Provider, Settings, preferred_edit};
 pub use run::{Control, Generated, Job, Source, comfy_models, generate, random_seed, source_size};
 
 /// Why a generation failed.

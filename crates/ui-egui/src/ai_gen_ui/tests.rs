@@ -1073,6 +1073,13 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     }
     (app.ui.ai_gen.mode, app.ui.ai_gen.task) = (Mode::Edit, EditTask::Change);
     let q21 = Model { id: "q21".into(), ..Family::QwenImage21.preset() };
+    // None chosen: Change runs Qwen Image 2.1, the recommended edit model, though a cloud model
+    // is listed first; Create runs the first.
+    app.ui.ai_gen.edit_model = String::new();
+    assert_eq!(current_model(&app).map(|m| m.id.as_str()), Some("q21"));
+    app.ui.ai_gen.mode = Mode::Create;
+    assert_eq!(current_model(&app).map(|m| m.id.as_str()), Some("gpt-image-2"));
+    app.ui.ai_gen.mode = Mode::Edit;
     // No document, then one with nothing in it: Generate is off and says what is missing.
     app.ui.ai_gen.edit_model = "q21".into();
     draw_panel(&mut app);

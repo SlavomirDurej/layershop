@@ -470,11 +470,18 @@ fn tr_static(s: &'static str) -> &'static str {
 }
 
 /// The model the panel would run: the one chosen for the task in front while it is still
-/// offered, else the first that is.
+/// offered, else [`fallback`].
 fn current_model(app: &PhotocraftApp) -> Option<&Model> {
     let ui = &app.ui.ai_gen;
     let offered: Vec<&Model> = app.session.prefs().integrations.ai.listed().into_iter().filter(|m| fits(m, ui.changing()) && usable(app, m)).collect();
-    offered.iter().copied().find(|m| m.id == ui.chosen()).or_else(|| offered.first().copied())
+    offered.iter().copied().find(|m| m.id == ui.chosen()).or_else(|| fallback(offered, ui.changing()))
+}
+
+/// The model offered for the task in front when none chosen is: for Change Qwen Image 2.1, the
+/// recommended edit model ([`photocraft_aigen::preferred_edit`]), else the first offered.
+fn fallback<'a>(offered: impl IntoIterator<Item = &'a Model>, changing: bool) -> Option<&'a Model> {
+    let mut offered = offered.into_iter();
+    if changing { photocraft_aigen::preferred_edit(offered) } else { offered.next() }
 }
 
 /// The tabs across the top of the panel: equal shares of its width.
@@ -1169,11 +1176,12 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         nothing_ready(app, ui, changing);
         return;
     }
-    // A model removed or disabled since it was chosen falls back to the first one. Change keeps
-    // its own choice: it lists other models.
+    // A model removed or disabled since it was chosen (or none chosen yet) falls back to the
+    // first one, or for Change to Qwen Image 2.1. Change keeps its own choice: it lists other
+    // models.
     let mut chosen = app.ui.ai_gen.chosen().to_string();
     if !models.iter().any(|m| m.id == chosen) {
-        chosen = models.first().map(|m| m.id.clone()).unwrap_or_default();
+        chosen = fallback(&models, changing).map(|m| m.id.clone()).unwrap_or_default();
     }
     let width = ui.available_width();
 
