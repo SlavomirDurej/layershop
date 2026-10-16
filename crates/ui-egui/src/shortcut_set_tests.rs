@@ -117,7 +117,7 @@ fn export_and_summarize_write_the_dialogs_bindings() {
     let kys = String::from_utf8(written[0].1.clone()).unwrap();
     assert!(kys.contains("pc-id=\"edit.copy\"><shortcut>F9</shortcut></command>"), "{kys}");
     assert!(kys.contains("pc-id=\"tools.select.pencil\">F6</tool>"), "tools as <tool> rows: {kys}");
-    assert!(kys.contains(&crate::brand::display("KeyboardCustomization/PhotoCraft Defaults=")), "{kys}");
+    assert!(kys.contains(crate::brand::display("KeyboardCustomization/PhotoCraft Defaults=")), "{kys}");
     // The file reads back with the same bindings.
     let set = photocraft_engine::kys::parse(&kys).unwrap();
     assert!(set.commands.iter().any(|c| c.id.as_deref() == Some("edit.copy") && c.shortcuts == ["F9"]));
