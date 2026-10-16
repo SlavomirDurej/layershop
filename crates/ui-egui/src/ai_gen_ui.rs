@@ -166,6 +166,21 @@ pub struct AiGenUi {
     /// The floating panel is open. Only the themes that don't dock Properties (Studio, Classic)
     /// use it; in the Pro themes the panel is a tab of that dock group.
     pub floating: bool,
+    /// The model files the ComfyUI in the settings listed when last asked (`ai.comfyModels`,
+    /// without starting it): which local models can run. `None`: it has not answered in this
+    /// session. And that look, running in the background.
+    #[serde(skip)]
+    server_files: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    #[serde(skip)]
+    server_job: Option<u64>,
+    /// When the server was last asked (UI time; never: −∞), the setup endings seen then, and
+    /// whether the app had the focus last frame.
+    #[serde(skip)]
+    server_asked: f64,
+    #[serde(skip)]
+    server_seq: u64,
+    #[serde(skip)]
+    focused: bool,
 }
 
 impl Default for AiGenUi {
@@ -191,6 +206,11 @@ impl Default for AiGenUi {
             last_seed: None,
             last_cost: None,
             floating: false,
+            server_files: None,
+            server_job: None,
+            server_asked: f64::NEG_INFINITY,
+            server_seq: 0,
+            focused: true,
         }
     }
 }
@@ -345,11 +365,95 @@ fn fits(model: &Model, changing: bool) -> bool {
     if changing { model.can_edit() || model.can_inpaint() } else { model.can_generate() }
 }
 
-/// The models offered for the task in front: the ticked ones of the kinds the settings show,
-/// cloud models first, each kind in the order the settings give it ([`Settings::listed`]).
+/// The models offered for the task in front: the ticked ones of the kinds the settings show that
+/// can run now ([`usable`]), cloud models first, each kind in the order the settings give it
+/// ([`Settings::listed`]).
 fn enabled_models(app: &PhotocraftApp) -> Vec<Model> {
     let changing = app.ui.ai_gen.changing();
-    app.session.prefs().integrations.ai.listed().into_iter().filter(|m| fits(m, changing)).cloned().collect()
+    app.session.prefs().integrations.ai.listed().into_iter().filter(|m| fits(m, changing) && usable(app, m)).cloned().collect()
+}
+
+/// Where local models stand for the panel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Local {
+    /// The Local AI setup is installing them now.
+    Installing,
+    /// Nothing says a ComfyUI is there: local AI is not set up, and none has answered.
+    NotSetUp,
+    Ready,
+}
+
+fn local_state(app: &PhotocraftApp) -> Local {
+    if crate::ai_setup_ui::running(app) {
+        Local::Installing
+    } else if crate::ai_setup_ui::set_up(app) || app.ui.ai_gen.server_files.is_some() {
+        Local::Ready
+    } else {
+        Local::NotSetUp
+    }
+}
+
+/// Can `model` run now? A cloud model when its API key is there. A local one when local AI is
+/// ready (not being installed; set up, or a ComfyUI answered) and, once the server has said
+/// which files it has, its file is among them.
+fn usable(app: &PhotocraftApp, model: &Model) -> bool {
+    if app.session.ai.ready(model).is_err() {
+        return false;
+    }
+    !model.provider.is_local()
+        || (local_state(app) == Local::Ready && app.ui.ai_gen.server_files.as_ref().is_none_or(|files| photocraft_aigen::detect::on_server(files, model)))
+}
+
+/// The server is asked again at most this often when the app gets the focus back (seconds).
+const LOOK_AGAIN: f64 = 60.0;
+
+/// Ask the ComfyUI in the settings which model files it has, without starting it: when the
+/// panel is first shown, after a Local AI setup has ended, and when the app gets the focus back
+/// (at most once a minute). In the background where the app has jobs; how it ends is
+/// [`on_job_event`]'s, quietly (a ComfyUI that isn't running is not an error to report).
+fn look_at_server(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let now = ctx.input(|i| i.time);
+    let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+    let regained = focused && !app.ui.ai_gen.focused;
+    app.ui.ai_gen.focused = focused;
+    let seq = app.session.ai_setup.seq();
+    let s = &app.ui.ai_gen;
+    let due = s.server_asked == f64::NEG_INFINITY || seq != s.server_seq || (regained && now - s.server_asked >= LOOK_AGAIN);
+    if !due || s.server_job.is_some() || app.session.ai.transport.is_none() || crate::ai_setup_ui::running(app) {
+        return;
+    }
+    (app.ui.ai_gen.server_asked, app.ui.ai_gen.server_seq) = (now, seq);
+    let p = json!({"start": false});
+    let started = if app.background_jobs {
+        app.session.start("ai.comfyModels", p)
+    } else {
+        app.session.execute("ai.comfyModels", p).map(photocraft_engine::jobs::Started::Done)
+    };
+    match started {
+        Ok(photocraft_engine::jobs::Started::Done(found)) => server_answered(app, &found),
+        Ok(photocraft_engine::jobs::Started::Job(id)) => app.ui.ai_gen.server_job = Some(id.0),
+        // Not running, or not there: what was learnt before stays (its files are still there).
+        Err(_) => {}
+    }
+}
+
+fn server_answered(app: &mut PhotocraftApp, found: &Value) {
+    if let Some(files) = found.get("folders").and_then(|f| serde_json::from_value(f.clone()).ok()) {
+        app.ui.ai_gen.server_files = Some(files);
+    }
+}
+
+/// The end of a job: the panel's own look at the server is taken here, without a notice when it
+/// failed. Returns whether it was that.
+pub fn on_job_event(app: &mut PhotocraftApp, e: &photocraft_engine::jobs::JobEvent) -> bool {
+    if app.ui.ai_gen.server_job != Some(e.id.0) {
+        return false;
+    }
+    app.ui.ai_gen.server_job = None;
+    if let photocraft_engine::jobs::JobOutcome::Done(found) = &e.outcome {
+        server_answered(app, found);
+    }
+    true
 }
 
 /// The headings of the panel's model list, each with the index of the model it stands above:
@@ -369,7 +473,7 @@ fn tr_static(s: &'static str) -> &'static str {
 /// offered, else the first that is.
 fn current_model(app: &PhotocraftApp) -> Option<&Model> {
     let ui = &app.ui.ai_gen;
-    let offered: Vec<&Model> = app.session.prefs().integrations.ai.listed().into_iter().filter(|m| fits(m, ui.changing())).collect();
+    let offered: Vec<&Model> = app.session.prefs().integrations.ai.listed().into_iter().filter(|m| fits(m, ui.changing()) && usable(app, m)).collect();
     offered.iter().copied().find(|m| m.id == ui.chosen()).or_else(|| offered.first().copied())
 }
 
@@ -458,9 +562,72 @@ pub fn open_api_keys(app: &mut PhotocraftApp) -> u64 {
 /// browser), or nothing left to.
 fn setup_line(app: &PhotocraftApp) -> Option<String> {
     if let Some((_, line)) = crate::ai_setup_ui::progress_line(app) {
-        return Some(line);
+        return Some(format!("{line}. {}", tr("Local models appear here when it has finished.")));
     }
     (crate::ai_setup_ui::available(app) && !crate::ai_setup_ui::set_up(app)).then(|| tr("Local models need a one-time setup: Set Up Local AI…").to_string())
+}
+
+/// The panel when no model can run for the task in front: why, and the way to one. While the
+/// Local AI setup installs, that is what it says, with its progress.
+fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool) {
+    let t = Tokens::get(ui.ctx());
+    let keys = Provider::ALL.into_iter().any(|p| !p.is_local() && !app.session.ai.key(p).is_empty());
+    let local = local_state(app);
+    let (title, hint) = match local {
+        Local::Installing => {
+            let progress = crate::ai_setup_ui::progress_line(app).map(|(_, line)| format!("{line}. ")).unwrap_or_default();
+            let after = if keys {
+                tr("Its models appear here when it has finished; none of the cloud models with a key does this task.")
+            } else {
+                tr("Its models appear here when it has finished. You can keep working meanwhile, or add an API key to use a cloud model now.")
+            };
+            (tr("Local AI is being set up.").to_string(), format!("{progress}{after}"))
+        }
+        Local::NotSetUp if !keys => (
+            tr("No AI model is ready yet.").to_string(),
+            tr("Set up local AI to run models on this PC, or add an API key to use cloud models.").to_string(),
+        ),
+        _ if changing => (
+            tr("No model that changes a picture is ready.").to_string(),
+            tr("A change needs a model that follows an instruction (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.2, or a cloud model with an API key) or one made for inpainting (FLUX.1 Fill, or Qwen Image with the InstantX ControlNet). Scan Server in the settings adds the ones your ComfyUI has.").to_string(),
+        ),
+        _ => (
+            tr("No AI model is ready.").to_string(),
+            tr("Local models need their files on your ComfyUI; cloud models need an API key. Tick the ones to offer here in Manage Models.").to_string(),
+        ),
+    };
+    ui.add_space(4.0);
+    ui.label(RichText::new(title).color(t.text_dim));
+    ui.add_space(2.0);
+    ui.add(egui::Label::new(RichText::new(hint).color(t.text_faint).size(11.5)).wrap());
+    ui.add_space(8.0);
+    let setup = crate::ai_setup_ui::available(app);
+    match local {
+        Local::Installing => {
+            if widgets::primary_button(ui, tr("Show Progress"), 140.0).clicked() {
+                crate::ai_setup_ui::show_progress(app);
+            }
+            if !keys && widgets::secondary_button(ui, tr("Add an API Key…"), 140.0).clicked() {
+                open_api_keys(app);
+            }
+        }
+        Local::NotSetUp if !keys => {
+            if setup && widgets::primary_button(ui, tr("Set Up Local AI…"), 140.0).clicked() {
+                crate::ai_setup_ui::open(app);
+            }
+            if widgets::secondary_button(ui, tr("Add an API Key…"), 140.0).clicked() {
+                open_api_keys(app);
+            }
+        }
+        _ => {
+            if widgets::secondary_button(ui, tr("Manage Models…"), 140.0).clicked() {
+                open_settings(app, "");
+            }
+            if setup && local == Local::NotSetUp && widgets::secondary_button(ui, tr("Set Up Local AI…"), 140.0).clicked() {
+                crate::ai_setup_ui::open(app);
+            }
+        }
+    }
 }
 
 /// Start a generation with the panel's model, prompt and options.
@@ -977,6 +1144,8 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
 fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     let t = Tokens::get(ui.ctx());
     let top = ui.cursor().top();
+    // Which local models can run is the server's to say.
+    look_at_server(app, ui.ctx());
     let job = running(app);
     let busy = job.is_some();
     // What the user is there to do. A running generation keeps the tab and task it was started on.
@@ -997,25 +1166,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     }
     let models = enabled_models(app);
     if models.is_empty() {
-        let (title, hint) = if changing {
-            (
-                "No model that changes a picture is set up yet.",
-                "A change needs a model that follows an instruction (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.2, or a cloud model with an API key) or one made for inpainting (FLUX.1 Fill, or Qwen Image with the InstantX ControlNet). Scan Server in the settings adds the ones your ComfyUI has.",
-            )
-        } else {
-            ("No AI models are offered yet.", "Add local models run by ComfyUI or cloud models with an API key, and tick the ones to offer here.")
-        };
-        ui.add_space(4.0);
-        ui.label(RichText::new(tr(title)).color(t.text_dim));
-        ui.add_space(2.0);
-        ui.label(RichText::new(tr(hint)).color(t.text_faint).size(11.5));
-        ui.add_space(8.0);
-        if widgets::secondary_button(ui, tr("Set Up Models…"), 140.0).clicked() {
-            open_settings(app, "");
-        }
-        if crate::ai_setup_ui::available(app) && widgets::secondary_button(ui, tr("Set Up Local AI…"), 140.0).clicked() {
-            crate::ai_setup_ui::open(app);
-        }
+        nothing_ready(app, ui, changing);
         return;
     }
     // A model removed or disabled since it was chosen falls back to the first one. Change keeps

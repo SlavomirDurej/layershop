@@ -430,6 +430,18 @@ and the panel's model lists (Create and Edit) no longer offer that kind; the mod
 still runs when `ai.generate` names it.
 
 Two of these differ from ComfyUI's templates: Z-Image Turbo's CFG is 2 (the template's is 1) and
+**Only models that can run are offered.** A ticked model is in the panel's list when it can run
+now: a cloud model once its provider's API key is there; a local one once local AI is ready (set
+up by the wizard or the Local Server page, or a ComfyUI has answered) and, when the server has
+said which files it has, its file is among them. The panel asks the ComfyUI in the settings for
+its files, without starting it (`ai.comfyModels` with `start: false`), when it is first shown,
+after a Local AI setup ends, and when the app gets the focus back (at most once a minute); a
+server that isn't running is not reported as an error, and what it said last stays. While a
+setup runs, local models wait: the panel says "Local AI is being set up", with its progress and
+**Show Progress**, and cloud models with a key still work. With nothing that can run it says why
+and offers **Set Up Local AI…** and **Add an API Key…** (or **Manage Models…**). `ai.generate`
+and `ai.models` are unchanged: an agent can still name any model.
+
 Ideogram 4's is 5 (the template's is 7). The architecture presets and **Scan Server** use the
 same values, so a model added either way gets them.
 

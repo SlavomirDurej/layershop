@@ -449,6 +449,11 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
             true
         }
     });
+    // The AI Gen panel's own look at the ComfyUI server: quiet, a server that isn't running is
+    // not an error to report.
+    if crate::ai_gen_ui::on_job_event(app, &e) {
+        return;
+    }
     // A Free Transform commit's session ends with its job (then reported like any job).
     crate::transform_tool::on_job_event(app, &e);
     if crate::prefs_ui::on_recovery_event(app, &e) {

@@ -34,6 +34,11 @@ fn app() -> PhotocraftApp {
     let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
     app.session.ai.transport = Some(Arc::new(Fake));
     app.run("prefs.set", json!({"path": "integrations.ai.models", "value": []})).unwrap();
+    // Local AI works here (the fake server renders), and the panel has already asked it: each
+    // test lists its own models, whatever files the server has. What is offered when is
+    // `only_models_that_can_run_are_offered`'s.
+    app.ui.ai_setup.local_worked = true;
+    app.ui.ai_gen.server_asked = 0.0;
     app
 }
 
@@ -146,6 +151,9 @@ fn the_panel_draws_in_every_state() {
     add_model(&mut app, z_image("z"));
     add_model(&mut app, Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 1.5", "gpt-image-1.5", true) });
     add_model(&mut app, Model { id: "nb".into(), ..Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false) });
+    // Cloud models are offered once their key is there.
+    app.session.ai.set_key(Provider::Openai, "sk-test");
+    app.session.ai.set_key(Provider::Gemini, "g-test");
     app.ui.ai_gen.model = "gone".into();
     draw_panel(&mut app);
     assert_eq!(app.ui.ai_gen.model, "gpt");
@@ -1052,6 +1060,7 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
     add_model(&mut app, Model { id: "edit".into(), ..Family::QwenEdit.preset() });
     add_model(&mut app, Model { id: "gpt-image-2".into(), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) });
+    app.session.ai.set_key(Provider::Openai, "sk-test");
     app.ui.ai_gen.mode = Mode::Edit;
     app.ui.ai_gen.prompt = "make the sky stormy".into();
     // The models that edit are offered, local and cloud; one that only generates is not, and an
@@ -1180,6 +1189,7 @@ fn the_advanced_section_opens_the_settings_of_the_task_in_front() {
     add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
     add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
     add_model(&mut app, Model { id: "gpt".into(), inpaint: Some(true), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) });
+    app.session.ai.set_key(Provider::Openai, "sk-test");
     app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
     app.run("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
     let rows = |app: &PhotocraftApp| {
@@ -1509,6 +1519,7 @@ fn the_order_of_the_list_is_the_panels_and_each_kind_can_be_left_out_of_it() {
     add_model(&mut app, z_image("z"));
     add_model(&mut app, cloud("sunburst", "gpt-image-2.5-sunburst"));
     add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
+    app.session.ai.set_key(Provider::Openai, "sk-test");
     let panel = |app: &PhotocraftApp| enabled_models(app).into_iter().map(|m| m.id).collect::<Vec<_>>();
     // The panel groups them: cloud first, each kind in the order of the settings.
     assert_eq!(panel(&app), ["pro", "sunburst", "ernie", "z", "q21"]);
@@ -1589,4 +1600,110 @@ fn the_panels_model_list_is_in_sections_and_names_the_models_plainly() {
     let doc = &app.session.active().unwrap().doc;
     let name = doc.layers.iter().find(|l| l.id.0 == layer).map(|l| l.name.to_lowercase()).unwrap();
     assert!(name.starts_with("[z_image_turbo]") && !name.contains("local") && !name.contains("cloud"), "{name}");
+}
+
+/// A ComfyUI that has one model file: Z-Image Turbo as the recommended list names it.
+struct OneModel;
+
+impl Transport for OneModel {
+    fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+        let body: &[u8] = if r.url.ends_with("/models/diffusion_models") {
+            br#"["z_image_turbo_int8_convrot.safetensors"]"#
+        } else if r.url.contains("/models/") {
+            b"[]"
+        } else {
+            return Ok(Response { status: 404, body: Vec::new() });
+        };
+        Ok(Response { status: 200, body: body.to_vec() })
+    }
+}
+
+/// Nothing answers: no ComfyUI here.
+struct Nobody;
+
+impl Transport for Nobody {
+    fn send(&self, _: &Request) -> photocraft_aigen::Result<Response> {
+        Err(photocraft_aigen::Error::Network("connection refused".into()))
+    }
+}
+
+fn offered(app: &PhotocraftApp) -> Vec<String> {
+    enabled_models(app).into_iter().map(|m| m.name).collect()
+}
+
+#[test]
+fn only_models_that_can_run_are_offered() {
+    // A new installation: the recommended models are ticked, but nothing can run yet: no API
+    // key, no ComfyUI. The panel says so, and offers the ways to one.
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
+    app.session.ai.transport = Some(Arc::new(Nobody));
+    draw_panel(&mut app);
+    assert!(offered(&app).is_empty(), "{:?}", offered(&app));
+    assert_eq!(local_state(&app), Local::NotSetUp);
+    assert!(app.ui.notices.is_empty(), "a ComfyUI that isn't there is not an error");
+    assert_eq!(generate(&mut app).unwrap_err(), "No AI model is set up for this.");
+    // An OpenAI key: its models are offered, and only those.
+    app.session.ai.set_key(Provider::Openai, "sk-test");
+    let cloud = offered(&app);
+    assert_eq!(cloud, ["GPT Image 2.5 Sunburst", "GPT Image 2.5 Flare"]);
+    // A ComfyUI that answers, asked again when the app gets the focus back: the local models
+    // whose file it has are offered, after the cloud ones; the others are not.
+    app.session.ai.transport = Some(Arc::new(OneModel));
+    app.ui.ai_gen.server_asked = -LOOK_AGAIN - 1.0;
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    for focused in [false, true] {
+        let mut input = egui::RawInput::default();
+        input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(focused);
+        ctx.run_ui(input, |ui| panel(&mut app, ui, true)).textures_delta.clear();
+    }
+    assert_eq!(local_state(&app), Local::Ready);
+    assert_eq!(offered(&app), ["GPT Image 2.5 Sunburst", "GPT Image 2.5 Flare", "Z-Image Turbo"]);
+    // A server that stops answering leaves what it said: its files are still there.
+    app.session.ai.transport = Some(Arc::new(Nobody));
+    app.ui.ai_gen.server_asked = f64::NEG_INFINITY;
+    draw_panel(&mut app);
+    assert!(offered(&app).contains(&"Z-Image Turbo".to_string()));
+}
+
+#[test]
+fn while_local_ai_is_being_set_up_its_models_wait_and_the_panel_says_so() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
+    // The stand-in downloads never finish: the setup stays under way.
+    crate::ai_setup_ui::demo::install(&mut app, dir.path(), crate::ai_setup_ui::demo::Scale::Real);
+    app.ui.ai_setup.local_worked = true;
+    app.session.execute("ai.setup.start", json!({"route": "managed", "models": ["qwen-image-2-1"], "testImage": false})).unwrap();
+    assert!(crate::ai_setup_ui::running(&app));
+    draw_panel(&mut app);
+    assert_eq!(local_state(&app), Local::Installing);
+    assert!(offered(&app).is_empty(), "{:?}", offered(&app));
+    // A cloud model with its key still works meanwhile; the line under Generate says what waits.
+    app.session.ai.set_key(Provider::Gemini, "g-test");
+    assert_eq!(offered(&app), ["Nano Banana 2", "Nano Banana Pro"]);
+    draw_panel(&mut app);
+    // The status the panel reads is the wizard's; once it has some, the line names the progress.
+    let line = setup_line(&app).unwrap_or_default();
+    assert!(line.is_empty() || line.contains("Local models appear here when it has finished"), "{line}");
+    app.session.execute("ai.setup.cancel", json!({})).unwrap();
+    let began = std::time::Instant::now();
+    while crate::ai_setup_ui::running(&app) {
+        assert!(began.elapsed() < std::time::Duration::from_secs(20));
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn the_panels_own_look_at_the_server_ends_quietly() {
+    use photocraft_engine::jobs::{JobEvent, JobId, JobOutcome};
+    let mut app = app();
+    let event = |id: u64, outcome: JobOutcome| JobEvent { id: JobId(id), command: "ai.comfyModels".into(), label: "Connect to ComfyUI".into(), document: None, outcome };
+    // Someone else's job is not the panel's.
+    assert!(!on_job_event(&mut app, &event(4, JobOutcome::Failed("refused".into()))));
+    app.ui.ai_gen.server_job = Some(9);
+    assert!(on_job_event(&mut app, &event(9, JobOutcome::Failed("refused".into()))));
+    assert!(app.ui.ai_gen.server_job.is_none() && app.ui.ai_gen.server_files.is_none() && app.ui.notices.is_empty());
+    app.ui.ai_gen.server_job = Some(10);
+    assert!(on_job_event(&mut app, &event(10, JobOutcome::Done(json!({"folders": {"diffusion_models": ["a.safetensors"]}})))));
+    assert_eq!(app.ui.ai_gen.server_files.as_ref().unwrap()["diffusion_models"], ["a.safetensors"]);
 }
