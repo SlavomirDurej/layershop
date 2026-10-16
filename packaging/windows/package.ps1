@@ -1,11 +1,13 @@
 <#
 .SYNOPSIS
-  Build, sign and package PhotoCraft for Windows.
+  Build, sign and package LayerShop (this fork of PhotoCraft) for Windows.
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
-    photocraft-<version>-windows-<arch>.msi            per-machine installer (WiX v5)
-    photocraft-<version>-windows-<arch>-portable.zip   photocraft.exe + photocraft-cli.exe + portable.txt
+    layershop-<version>-windows-<arch>.msi             per-machine installer (WiX v5)
+    layershop-<version>-windows-<arch>-portable.zip    photocraft.exe + photocraft-cli.exe + portable.txt
+
+  The release assets carry the LayerShop name ($AssetName); the binaries keep their machine names.
 
   The binaries link the C runtime statically (+crt-static), so neither the MSI nor the portable
   zip needs the Visual C++ redistributable. Signing is delegated to sign.ps1 (skipped with a
@@ -26,6 +28,8 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+# Release asset file names start with this (the product name, lowercase).
+$AssetName = 'layershop'
 
 function Invoke-Native([string] $What, [scriptblock] $Block) {
   Write-Output "==> $What"
@@ -54,7 +58,7 @@ New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 if (-not $env:PHOTOCRAFT_BUILD_SHA) { $env:PHOTOCRAFT_BUILD_SHA = (git -C $Root rev-parse HEAD 2>$null) }
 if (-not $env:PHOTOCRAFT_BUILD_DATE) { $env:PHOTOCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
 
-Write-Output "PhotoCraft $Version for Windows $Arch ($Target)"
+Write-Output "LayerShop $Version for Windows $Arch ($Target)"
 
 if (-not $SkipBuild) {
   # Static CRT: no VC++ redistributable needed. Scoped to the target so host build scripts and
@@ -92,14 +96,18 @@ Copy-Item (Join-Path $Bin 'photocraft.exe'), (Join-Path $Bin 'photocraft-cli.exe
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photocraft.exe') (Join-Path $Stage 'photocraft-cli.exe')
 
 # ---- MSI ---------------------------------------------------------------------------------------
-# The setup wizard's art, drawn here from the app icon so the MSI shows PhotoCraft rather than
+# The setup wizard's art, drawn here from the app icon so the MSI shows LayerShop rather than
 # WiX's stock bitmaps: a 493x58 banner across the top of the inner pages (the page title is drawn
 # over its left side, so that stays white) and a 493x312 backdrop for the Welcome and Finish pages
 # (their text sits on the right; the left 164 px are ours). Both must be 24-bit BMPs.
+# The left panel is the icon's own background colour, so the icon's tile melts into it. The right
+# side is the Windows dialog grey, not white: Windows Installer can't draw a checkbox transparently,
+# so on white the Finish page's "Launch" checkbox sat on a visible grey box.
 function New-InstallerArt([string] $IconPng, [string] $BannerOut, [string] $DialogOut) {
   Add-Type -AssemblyName System.Drawing
-  $paper = [System.Drawing.ColorTranslator]::FromHtml('#efe9dc')
+  $paper = [System.Drawing.ColorTranslator]::FromHtml('#1b1f26')
   $accent = [System.Drawing.ColorTranslator]::FromHtml('#2f7bf5')
+  $dialogGrey = [System.Drawing.ColorTranslator]::FromHtml('#f0f0f0')
   $icon = [System.Drawing.Image]::FromFile($IconPng)
   try {
     foreach ($spec in @(@($BannerOut, 493, 58), @($DialogOut, 493, 312))) {
@@ -112,11 +120,17 @@ function New-InstallerArt([string] $IconPng, [string] $BannerOut, [string] $Dial
         if ($spec[2] -eq 58) {
           $g.DrawImage($icon, 493 - 46 - 8, 6, 46, 46)
         } else {
+          $g.Clear($dialogGrey)
           $panel = New-Object System.Drawing.SolidBrush $paper
           $stripe = New-Object System.Drawing.SolidBrush $accent
           $g.FillRectangle($panel, 0, 0, 164, 312)
           $g.FillRectangle($stripe, 160, 0, 4, 312)
-          $g.DrawImage($icon, 18, 64, 124, 124)
+          # The icon without its tile's 1 px light border (24 px cropped off each side of the
+          # 256 px source, same scale), so only the layers sit on the panel.
+          $crop = 24; $scale = 124 / $icon.Width
+          $src = New-Object System.Drawing.RectangleF $crop, $crop, ($icon.Width - 2 * $crop), ($icon.Height - 2 * $crop)
+          $dst = New-Object System.Drawing.RectangleF (18 + $crop * $scale), (64 + $crop * $scale), ($src.Width * $scale), ($src.Height * $scale)
+          $g.DrawImage($icon, $dst, $src, [System.Drawing.GraphicsUnit]::Pixel)
           $panel.Dispose(); $stripe.Dispose()
         }
       } finally { $g.Dispose() }
@@ -129,7 +143,7 @@ $Banner = Join-Path $Stage 'installer-banner.bmp'
 $Dialog = Join-Path $Stage 'installer-dialog.bmp'
 New-InstallerArt (Join-Path $Root 'assets\app-icon\hicolor\256x256\apps\ai.storyteller.photocraft.png') $Banner $Dialog
 
-$Msi = Join-Path $Dist "photocraft-$Version-windows-$Arch.msi"
+$Msi = Join-Path $Dist "$AssetName-$Version-windows-$Arch.msi"
 & (Join-Path $PSScriptRoot 'check-icons.ps1')
 Invoke-Native 'wix build' {
   wix build (Join-Path $PSScriptRoot 'photocraft.wxs') -arch $Arch `
@@ -147,7 +161,7 @@ Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Ms
 & (Join-Path $PSScriptRoot 'sign.ps1') $Msi
 
 # ---- portable zip ------------------------------------------------------------------------------
-$Portable = Join-Path $TargetDir "windows-package\photocraft-$Version-windows-$Arch-portable"
+$Portable = Join-Path $TargetDir "windows-package\$AssetName-$Version-windows-$Arch-portable"
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
@@ -166,7 +180,7 @@ if ($env:CRAFT_FONTS_DIR) {
 # portable.txt beside photocraft.exe switches on portable mode: settings, presets and recovery
 # files go to PhotoCraftData\ next to the exe instead of %APPDATA% (#228; see app_dirs.rs).
 Copy-Item (Join-Path $PSScriptRoot 'portable.txt') $Portable
-$Zip = Join-Path $Dist "photocraft-$Version-windows-$Arch-portable.zip"
+$Zip = Join-Path $Dist "$AssetName-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $Portable -DestinationPath $Zip
 

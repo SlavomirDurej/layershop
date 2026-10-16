@@ -1,66 +1,114 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!--
-  PhotoCraft MSI (WiX Toolset v5: `dotnet tool install -g wix`, plus the UI and Util extensions:
+  LayerShop MSI (WiX Toolset v5: `dotnet tool install -g wix`, plus the UI and Util extensions:
   `wix extension add -g WixToolset.UI.wixext/5.0.2 WixToolset.Util.wixext/5.0.2`). Built by package.ps1:
 
     wix build photocraft.wxs -arch x64 -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext
       -culture en-US -loc photocraft.en-us.wxl -d Version=1.2.3 -d DisplayVersion=1.2.3-rc.1
       -d BinDir=... -d IconPath=... -d BannerBmp=... -d DialogBmp=... -o out.msi
 
+  This fork ships as LayerShop (crates/ui-egui/src/brand.rs): everything the user sees here says
+  LayerShop. The binaries, ProgIds and file formats keep their PhotoCraft machine names.
+
   Per-machine install with a setup wizard that names the version: Welcome, install folder
-  (Program Files\PhotoCraft by default, remembered for upgrades), Ready, a progress page, and a
-  Finish page with a ticked "Launch PhotoCraft" box. Installs a Start Menu shortcut, makes
-  PhotoCraft the owner of `.pcraft`, and offers it under "Open with" for PSD/PSB and the image
+  (Program Files\LayerShop by default, remembered for upgrades), Ready, a progress page, and a
+  Finish page with a ticked "Launch LayerShop" box. Installs a Start Menu shortcut and (unless unticked
+  on the Ready page) a desktop shortcut, makes
+  LayerShop the owner of `.pcraft`, and offers it under "Open with" for PSD/PSB and the image
   formats it reads (without taking over the user's default app for them), plus photocraft-cli.
   `msiexec /qn` still installs silently.
 -->
+<?define ProductName = "LayerShop" ?>
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <!-- UpgradeCode is the one LayerShop 0.9.0 Preview 1 shipped with (still named PhotoCraft
+       then), so this installer replaces that one. -->
   <Package
-      Name="PhotoCraft"
-      Manufacturer="Learning Machines LLC"
+      Name="$(var.ProductName)"
+      Manufacturer="Slavomir Durej"
       Version="$(var.Version)"
       UpgradeCode="D9660F32-2D0A-4ABE-B73D-17BE25F1542C"
       Scope="perMachine"
       Compressed="yes"
       Language="1033">
-    <SummaryInformation Description="PhotoCraft image editor" Manufacturer="Learning Machines LLC" />
+    <SummaryInformation Description="$(var.ProductName) image editor" Manufacturer="Slavomir Durej" />
     <!-- Same-version upgrades let successive pre-releases of one X.Y.Z replace each other
          (MSI versions are numeric, so 1.2.3-rc.1 and 1.2.3-rc.2 are both 1.2.3). -->
     <MajorUpgrade AllowSameVersionUpgrades="yes"
-        DowngradeErrorMessage="A newer version of PhotoCraft is already installed." />
+        DowngradeErrorMessage="A newer version of $(var.ProductName) is already installed." />
     <MediaTemplate EmbedCab="yes" CompressionLevel="high" />
 
     <!-- MSI caches this icon using its Id as the filename. Advertised shortcuts to an
          .exe need an .exe icon identifier (ICE50), even when the source is an ICO. -->
     <Icon Id="PhotocraftIcon.exe" SourceFile="$(var.IconPath)" />
     <Property Id="ARPPRODUCTICON" Value="PhotocraftIcon.exe" />
-    <Property Id="ARPURLINFOABOUT" Value="https://getartcraft.com/apps/photocraft" />
-    <Property Id="ARPURLUPDATEINFO" Value="https://getartcraft.com/apps/photocraft" />
-    <Property Id="ARPHELPLINK" Value="https://discord.gg/artcraft" />
+    <Property Id="ARPURLINFOABOUT" Value="https://layershop.aardvarkstudios.net" />
+    <Property Id="ARPURLUPDATEINFO" Value="https://layershop.aardvarkstudios.net" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/SlavomirDurej/photocraft/issues" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="PhotoCraft" />
+      <Directory Id="INSTALLFOLDER" Name="$(var.ProductName)" />
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
-    <!-- An upgrade installs where the user put the previous version (written by PhotocraftApp). -->
+    <!-- An upgrade installs where the user put the previous version (written by PhotocraftApp).
+         Its own key, so Preview 1's Program Files\PhotoCraft isn't reused. -->
     <Property Id="INSTALLFOLDER">
-      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\PhotoCraft" Name="InstallDir" Type="raw" />
+      <RegistrySearch Id="PreviousInstallFolder" Root="HKLM" Key="Software\$(var.ProductName)" Name="InstallDir" Type="raw" />
     </Property>
 
-    <Feature Id="Main" Title="PhotoCraft" Level="1">
+    <Feature Id="Main" Title="$(var.ProductName)" Level="1">
       <ComponentGroupRef Id="PhotocraftFiles" />
+      <ComponentRef Id="DesktopShortcut" />
     </Feature>
 
+    <!-- Desktop shortcut: on by default, unticked on the Ready page to skip it (silent installs:
+         INSTALLDESKTOPSHORTCUT=""). Secure, so the ticked value reaches the elevated install. -->
+    <Property Id="INSTALLDESKTOPSHORTCUT" Value="1" Secure="yes" />
+    <StandardDirectory Id="DesktopFolder">
+      <Component Id="DesktopShortcut" Guid="3E23381A-E0CE-4C3D-A404-0278D9D67F72" Condition="INSTALLDESKTOPSHORTCUT">
+        <Shortcut Id="DesktopShortcut" Name="$(var.ProductName)" Description="$(var.ProductName) image editor"
+            Target="[#PhotocraftExe]" WorkingDirectory="INSTALLFOLDER" Icon="PhotocraftIcon.exe" IconIndex="0" />
+        <RegistryValue Root="HKLM" Key="Software\$(var.ProductName)" Name="DesktopShortcut" Value="1" Type="integer" KeyPath="yes" />
+      </Component>
+    </StandardDirectory>
+
     <!-- The setup wizard: WixUI_InstallDir without its licence page (the code is MIT OR
-         Apache-2.0; there is nothing to accept). A later NewDialog on the same button wins. -->
+         Apache-2.0; there is nothing to accept). A later NewDialog on the same button wins.
+         A fresh install's Ready page is our own ReadyDlg (Cancel before Install); repair and
+         remove keep the stock VerifyReadyDlg. -->
     <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
     <UI>
       <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="2" Condition="NOT Installed" />
       <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="2" />
+      <Publish Dialog="InstallDirDlg" Control="Next" Event="NewDialog" Value="ReadyDlg" Order="5"
+          Condition="NOT Installed AND (WIXUI_DONTVALIDATEPATH OR WIXUI_INSTALLDIR_VALID=&quot;1&quot;)" />
       <Publish Dialog="ExitDialog" Control="Finish" Event="DoAction" Value="LaunchPhotocraft"
           Condition="WIXUI_EXITDIALOGOPTIONALCHECKBOX = 1 AND NOT Installed" />
+
+      <!-- The stock Ready page's install case with its buttons reordered: Back, Cancel, then
+           Install at the right edge, where Next sat on the pages before it. -->
+      <Dialog Id="ReadyDlg" Width="370" Height="270" Title="!(loc.VerifyReadyDlg_Title)" TrackDiskSpace="yes">
+        <Control Id="Install" Type="PushButton" ElevationShield="yes" X="280" Y="243" Width="80" Height="17" Default="yes" Text="!(loc.VerifyReadyDlgInstall)">
+          <Publish Event="EndDialog" Value="Return" Condition="OutOfDiskSpace &lt;&gt; 1" />
+          <Publish Event="SpawnDialog" Value="OutOfRbDiskDlg" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND (PROMPTROLLBACKCOST=&quot;P&quot; OR NOT PROMPTROLLBACKCOST)" />
+          <Publish Event="EndDialog" Value="Return" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" />
+          <Publish Event="EnableRollback" Value="False" Condition="OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 0 AND PROMPTROLLBACKCOST=&quot;D&quot;" />
+          <Publish Event="SpawnDialog" Value="OutOfDiskDlg" Condition="(OutOfDiskSpace = 1 AND OutOfNoRbDiskSpace = 1) OR (OutOfDiskSpace = 1 AND PROMPTROLLBACKCOST=&quot;F&quot;)" />
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="200" Y="243" Width="56" Height="17" Cancel="yes" Text="!(loc.WixUICancel)">
+          <Publish Event="SpawnDialog" Value="CancelDlg" />
+        </Control>
+        <Control Id="Back" Type="PushButton" X="144" Y="243" Width="56" Height="17" Text="!(loc.WixUIBack)">
+          <Publish Event="NewDialog" Value="InstallDirDlg" />
+        </Control>
+        <Control Id="Title" Type="Text" X="15" Y="15" Width="300" Height="15" Transparent="yes" NoPrefix="yes" Text="!(loc.VerifyReadyDlgInstallTitle)" />
+        <Control Id="Text" Type="Text" X="25" Y="70" Width="320" Height="34" Text="!(loc.VerifyReadyDlgInstallText)" />
+        <Control Id="DesktopShortcut" Type="CheckBox" X="25" Y="110" Width="320" Height="17" Property="INSTALLDESKTOPSHORTCUT" CheckBoxValue="1" Text="Create a &amp;desktop shortcut" />
+        <Control Id="BannerBitmap" Type="Bitmap" X="0" Y="0" Width="370" Height="44" TabSkip="no" Text="!(loc.VerifyReadyDlgBannerBitmap)" />
+        <Control Id="BannerLine" Type="Line" X="0" Y="44" Width="370" Height="0" />
+        <Control Id="BottomLine" Type="Line" X="0" Y="234" Width="370" Height="0" />
+      </Dialog>
     </UI>
     <!-- Our own art, generated by package.ps1 from the app icon (not WiX's stock bitmaps). -->
     <WixVariable Id="WixUIBannerBmp" Value="$(var.BannerBmp)" />
@@ -71,8 +119,8 @@
     <Property Id="PhotocraftVersion" Value="$(var.DisplayVersion)" />
 
     <!-- Finish page: say where to find the app, and offer to start it (ticked by default). -->
-    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="PhotoCraft $(var.DisplayVersion) is installed. You can start it any time from the Start menu." />
-    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch PhotoCraft" />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT" Value="$(var.ProductName) $(var.DisplayVersion) is installed. You can start it any time from the Start menu." />
+    <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOXTEXT" Value="Launch $(var.ProductName)" />
     <Property Id="WIXUI_EXITDIALOGOPTIONALCHECKBOX" Value="1" />
     <Property Id="WixShellExecTarget" Value="[#PhotocraftExe]" />
     <!-- Runs in the wizard's own (unelevated) process, so the app starts as the user, not as admin. -->
@@ -83,13 +131,13 @@
     <ComponentGroup Id="PhotocraftFiles" Directory="INSTALLFOLDER">
       <Component Id="PhotocraftApp" Guid="A6DE41B7-A80F-4C59-A17E-BB68065BF67E">
         <File Id="PhotocraftExe" Source="$(var.BinDir)\photocraft.exe" KeyPath="yes">
-          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="PhotoCraft"
-              Description="PhotoCraft image editor" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
+          <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="$(var.ProductName)"
+              Description="$(var.ProductName) image editor" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
               Icon="PhotocraftIcon.exe" IconIndex="0" />
         </File>
 
-        <!-- .pcraft: PhotoCraft's own format; PhotoCraft is its default app. -->
-        <ProgId Id="Photocraft.Document" Description="PhotoCraft Document" Icon="PhotocraftExe" IconIndex="0">
+        <!-- .pcraft: PhotoCraft's own format; LayerShop is its default app. -->
+        <ProgId Id="Photocraft.Document" Description="$(var.ProductName) Document" Icon="PhotocraftExe" IconIndex="0">
           <Extension Id="pcraft" ContentType="application/x-photocraft">
             <Verb Id="open" Command="Open" TargetFile="PhotocraftExe" Argument="&quot;%1&quot;" />
           </Extension>
@@ -121,7 +169,7 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\.ico\OpenWithProgids" Name="Photocraft.Image" Value="" Type="string" />
 
         <!-- "Open with" app list and the Run dialog (Win+R "photocraft"). -->
-        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe" Name="FriendlyAppName" Value="PhotoCraft" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe" Name="FriendlyAppName" Value="$(var.ProductName)" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe\shell\open\command" Value="&quot;[#PhotocraftExe]&quot; &quot;%1&quot;" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe\SupportedTypes" Name=".pcraft" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe\SupportedTypes" Name=".psd" Value="" Type="string" />
@@ -145,7 +193,7 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe\SupportedTypes" Name=".qoi" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\photocraft.exe\SupportedTypes" Name=".ico" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\photocraft.exe" Value="[#PhotocraftExe]" Type="string" />
-        <RegistryValue Root="HKLM" Key="Software\PhotoCraft" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\$(var.ProductName)" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
 
       <Component Id="PhotocraftCli">
