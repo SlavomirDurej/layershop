@@ -35,6 +35,10 @@ pub struct Head {
     pub size: Option<u64>,
     /// The sha256 Hugging Face reports for the file (`X-Linked-ETag`), when it does.
     pub sha256: Option<String>,
+    /// Why Hugging Face refused it (`X-Error-Code`, e.g. `GatedRepo`), when it did.
+    pub error_code: Option<String>,
+    /// Its words for it (`X-Error-Message`).
+    pub error_message: Option<String>,
 }
 
 /// How a download began: told to the [`Sink`] before the first byte.
@@ -147,7 +151,7 @@ pub fn status_error(status: u16, url: &str) -> Error {
     let host = url.split_once("://").map_or(url, |(_, r)| r).split('/').next().unwrap_or("").to_string();
     match status {
         401 | 403 => Error::Access(format!(
-            "{host} refused the file ({status}). It is a gated model: accept its licence on the model's page, then paste a Hugging Face token (Get access), or skip this model."
+            "{host} refused the file ({status}). It is a gated model: sign in with Hugging Face and accept its licence on the model's page (the Models step shows how), or leave it out."
         )),
         404 | 410 => Error::Server(format!("{host} no longer has the file ({status}). The model may have moved: check for a newer version of the app.")),
         429 => Error::Network(format!("{host} is asking for fewer requests ({status}).")),
@@ -287,6 +291,8 @@ impl Fetch for UreqFetch {
                 continue;
             }
             out.size = out.size.or_else(|| header(&response, "content-length").and_then(|v| v.parse().ok()));
+            out.error_code = header(&response, "x-error-code").map(|v| clip(&v, 80));
+            out.error_message = header(&response, "x-error-message").map(|v| clip(&v, 400));
             break;
         }
         Ok(out)

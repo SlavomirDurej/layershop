@@ -26,6 +26,8 @@ sha2 = "0.11"
 sevenz-rust2 = { version = "0.24", default-features = false }
 # Free space on the drive a folder is on (MIT OR Apache-2.0).
 fs4 = { version = "1", default-features = false, features = ["sync"] }
+# PKCE's verifier and the sign-in's state for Sign in with Hugging Face (MIT OR Apache-2.0).
+getrandom = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

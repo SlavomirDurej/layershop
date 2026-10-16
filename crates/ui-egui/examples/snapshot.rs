@@ -12,7 +12,9 @@
 //! `--ai-setup-demo pc|location|models|install|ready` puts a screen of the Local AI setup wizard
 //! in front, against a stand-in network and engine (nothing is downloaded); `installed` and
 //! `installed-models` show a setup that is there already; `pc-comfy` and `location-comfy` a
-//! machine with ComfyUI Desktop; `env` gives the app the stand-in with the wizard closed.
+//! machine with ComfyUI Desktop; `models-hf`, `models-licence`, `models-ready`, `sign-in` and
+//! `sign-in-licence` a gated model ticked; `close` the question Close asks while a setup runs;
+//! `env` gives the app the stand-in with the wizard closed.
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //! `--custom-titlebar` draws the Windows/Linux title bar (caption buttons in the top bar).
 //!
@@ -100,7 +102,9 @@ fn main() {
             if let Some(page) = &ai_setup_demo
                 && !photocraft_ui_egui::ai_setup_ui::demo::show(&mut app, &demo_dir_in, page)
             {
-                eprintln!("--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-comfy, location-comfy or env");
+                eprintln!(
+                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-comfy, location-comfy, models-hf, models-licence, models-ready, sign-in, sign-in-licence, close or env"
+                );
                 std::process::exit(2);
             }
             app

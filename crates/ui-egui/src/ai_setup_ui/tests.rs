@@ -442,3 +442,161 @@ fn a_local_generation_that_worked_ends_the_offer() {
         assert!(!set_up(&fresh), "{odd}");
     }
 }
+
+/// A frame with the app's window focused, or not (the user away in the browser).
+fn draw_focused(app: &mut PhotocraftApp, ctx: &egui::Context, focused: bool) {
+    let mut input = egui::RawInput::default();
+    input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(focused);
+    ctx.run_ui(input, |ui| window(app, ui.ctx())).textures_delta.clear();
+}
+
+/// An app whose stand-in has FLUX.2 Klein 9B (gated) ticked beside Qwen Image 2.1, on the Models
+/// screen; the token its file opens to; and what the app saved as its keys file.
+fn gated_app() -> (PhotocraftApp, tempfile::TempDir, std::sync::Arc<std::sync::Mutex<String>>, std::sync::Arc<std::sync::Mutex<String>>) {
+    let (mut app, dir) = app(demo::Scale::Small);
+    let accepted = demo::install(&mut app, dir.path(), demo::Scale::Gated);
+    let saved = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let sink = saved.clone();
+    app.services.save_ai_keys = Some(Box::new(move |text: &str| {
+        *sink.lock().unwrap() = text.to_string();
+        Ok(())
+    }));
+    open(&mut app);
+    // The user's own ComfyUI (the stand-in), which has none of the files: no engine to download,
+    // so a setup runs to its end in moments.
+    let s = &mut app.ui.ai_setup;
+    (s.existing, s.url) = (true, "http://127.0.0.1:8188".into());
+    s.server = Some(json!({"folders": {}, "launch": null, "local": true}));
+    s.models_dir = dir.path().join("models").to_string_lossy().into_owned();
+    s.models = vec!["qwen-image-2-1".into(), "flux-2-klein-9b".into()];
+    s.page = Page::Models;
+    (app, dir, accepted, saved)
+}
+
+#[test]
+fn a_gated_model_is_sign_in_then_licence_then_ready_and_installs_only_then() {
+    let (mut app, dir, accepted, saved) = gated_app();
+    let c = ctx();
+    draw(&mut app, &c);
+    // Not signed in: the plan says FLUX.2 Klein needs it, and its row asks to sign in.
+    assert_eq!(needs_sign_in(&app).iter().map(|m| text(m, "/id").to_string()).collect::<Vec<_>>(), ["flux-2-klein-9b"]);
+    assert_eq!(access_of(&app, "flux-2-klein-9b"), "signIn");
+    assert!(hf_flag(&app, "canSignIn") && !hf_flag(&app, "signedIn"));
+    // Install asks first, and starts nothing.
+    install_clicked(&mut app);
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::SignIn));
+    assert!(!running(&app));
+    draw(&mut app, &c);
+    // Install in the question does nothing yet.
+    sign_in_answered(&mut app, widgets::ButtonRole::Default);
+    assert!(app.ui.ai_setup.ask == Some(Ask::SignIn) && !running(&app));
+    // Signed in (as Sign in with Hugging Face leaves it): saved with the keys, step 2.
+    *accepted.lock().unwrap() = "someone-elses".into();
+    demo::sign_in(&mut app);
+    draw(&mut app, &c);
+    assert!(saved.lock().unwrap().contains(demo::TOKEN), "the keys file has the sign-in");
+    refresh_hf(&mut app);
+    check_access(&mut app);
+    assert_eq!(access_of(&app, "flux-2-klein-9b"), "licence");
+    assert_eq!(text(app.ui.ai_setup.hf.as_ref().unwrap(), "/user"), "pixel-painter");
+    draw(&mut app, &c);
+    // The licence is accepted in the browser; back in the app, it is asked again by itself.
+    *accepted.lock().unwrap() = demo::TOKEN.into();
+    draw_focused(&mut app, &c, false);
+    assert_eq!(access_of(&app, "flux-2-klein-9b"), "licence", "not while away");
+    draw_focused(&mut app, &c, true);
+    assert_eq!(access_of(&app, "flux-2-klein-9b"), "ready");
+    // Install, from the question: everything installs, FLUX.2 Klein too.
+    sign_in_answered(&mut app, widgets::ButtonRole::Default);
+    assert!(app.ui.ai_setup.ask.is_none() && app.ui.ai_setup.page == Page::Install, "{}", app.ui.ai_setup.note);
+    finish(&mut app, &c);
+    let result = app.ui.ai_setup.status.as_ref().unwrap()["result"].clone();
+    assert_eq!(result["ok"], true, "{result}");
+    assert!(dir.path().join("models").join("diffusion_models").join("flux-2-klein-9b-fp8.safetensors").is_file());
+    // Nothing the wizard shows or reports carries a token.
+    let state = serde_json::to_string(&app.ui).unwrap();
+    assert!(!state.contains(demo::TOKEN) && !state.contains("hf_demo_refresh"));
+    // Signing out forgets it, and saves that.
+    app.ui.ai_setup.page = Page::Models;
+    sign_out(&mut app);
+    assert!(!hf_flag(&app, "signedIn") && !saved.lock().unwrap().contains(demo::TOKEN));
+}
+
+#[test]
+fn install_without_leaves_the_gated_model_out() {
+    let (mut app, dir, _accepted, _saved) = gated_app();
+    let c = ctx();
+    draw(&mut app, &c);
+    install_clicked(&mut app);
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::SignIn));
+    sign_in_answered(&mut app, widgets::ButtonRole::Alternate);
+    assert!(app.ui.ai_setup.ask.is_none() && !app.ui.ai_setup.models.contains(&"flux-2-klein-9b".to_string()));
+    assert_eq!(app.ui.ai_setup.models, ["qwen-image-2-1"]);
+    finish(&mut app, &c);
+    assert_eq!(app.ui.ai_setup.status.as_ref().unwrap()["result"]["ok"], true);
+    assert!(!dir.path().join("models").join("diffusion_models").join("flux-2-klein-9b-fp8.safetensors").exists());
+    // Cancel just closes the question.
+    let (mut other, _dir2, _a, _s) = gated_app();
+    draw(&mut other, &c);
+    install_clicked(&mut other);
+    sign_in_answered(&mut other, widgets::ButtonRole::Cancel);
+    assert!(other.ui.ai_setup.ask.is_none() && !running(&other) && other.ui.ai_setup.models.len() == 2);
+}
+
+#[test]
+fn the_access_token_is_the_fallback_and_a_token_on_this_pc_is_never_used_unasked() {
+    let (mut app, _dir, accepted, saved) = gated_app();
+    let c = ctx();
+    draw(&mut app, &c);
+    // Whatever is on this PC, nothing is signed in until the user says so.
+    assert!(!hf_flag(&app, "signedIn") && app.session.ai.hf_token().is_empty());
+    // The token, pasted: saved with the keys, checked like a sign-in.
+    *accepted.lock().unwrap() = "hf_pasted".into();
+    app.ui.ai_setup.token_open = true;
+    draw(&mut app, &c);
+    app.ui.ai_setup.token = "hf_pasted".into();
+    save_token(&mut app);
+    assert!(saved.lock().unwrap().contains("hf_pasted") && !app.ui.ai_setup.token_open);
+    draw(&mut app, &c);
+    assert_eq!(access_of(&app, "flux-2-klein-9b"), "ready");
+    assert_eq!(text(app.ui.ai_setup.hf.as_ref().unwrap(), "/via"), "token");
+    install_clicked(&mut app);
+    assert!(app.ui.ai_setup.ask.is_none() && running(&app), "ready: Install installs at once");
+    finish(&mut app, &c);
+}
+
+#[test]
+fn closing_while_downloading_asks_and_the_status_bar_brings_it_back() {
+    let (mut app, _dir) = app(demo::Scale::Real);
+    let c = ctx();
+    open(&mut app);
+    app.ui.ai_setup.models = vec!["qwen-image-2-1".into()];
+    app.ui.ai_setup.page = Page::Models;
+    draw(&mut app, &c);
+    install(&mut app);
+    assert!(running(&app));
+    // Close (or the title bar's ×) asks; Cancel goes back to the wizard.
+    app.ui.ai_setup.ask = Some(Ask::Close);
+    draw(&mut app, &c);
+    close_answered(&mut app, widgets::ButtonRole::Cancel);
+    assert!(app.ui.ai_setup.open && app.ui.ai_setup.ask.is_none() && running(&app));
+    // Keep downloading: the window closes, the setup carries on, and the status bar shows it.
+    close_answered(&mut app, widgets::ButtonRole::Default);
+    assert!(!app.ui.ai_setup.open && running(&app));
+    draw(&mut app, &c);
+    assert!(progress_line(&app).is_some());
+    // Clicking the status bar's readout brings the wizard back, on the install step.
+    app.ui.ai_setup.page = Page::Models;
+    show_progress(&mut app);
+    assert!(app.ui.ai_setup.open && app.ui.ai_setup.page == Page::Install);
+    // Stop Download: it pauses, what arrived is kept, and the window closes.
+    close_answered(&mut app, widgets::ButtonRole::Alternate);
+    assert!(!app.ui.ai_setup.open);
+    finish(&mut app, &c);
+    assert_eq!(app.ui.ai_setup.status.as_ref().unwrap()["state"], "paused");
+    // Not running: × closes without asking.
+    app.ui.ai_setup.open = true;
+    app.ui.ai_setup.ask = Some(Ask::Close);
+    draw(&mut app, &c);
+    assert!(!app.ui.ai_setup.open && app.ui.ai_setup.ask.is_none(), "nothing to decide once it has stopped");
+}

@@ -309,7 +309,11 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
         }
     }
 
-    for key in manifest.file_keys(selected.iter().copied()) {
+    // Gated files first: they start while a sign-in is fresh (its access token lasts hours, and
+    // a large setup can take longer).
+    let mut keys = manifest.file_keys(selected.iter().copied());
+    keys.sort_by_key(|key| !manifest.files.get(*key).is_some_and(|f| f.gated));
+    for key in keys {
         let Some(file) = manifest.files.get(key) else { continue };
         let (folder, name) = split_key(key).ok_or_else(|| Error::Config(format!("`{key}` is not a model file")))?;
         let path = layout.model_file(key)?;
@@ -508,6 +512,9 @@ mod tests {
         // Signed in: everything.
         let p = plan(m, &Choices { token: true, ..choices(&recommended) }, &Fake::default()).unwrap();
         assert!(p.steps.iter().all(|s| s.skipped.is_none()) && p.installable().len() == 3);
+        // Signed in, the gated file comes first: it starts while the sign-in is fresh.
+        let first = p.steps.iter().find(|s| matches!(s.step, Step::FetchFile(_))).unwrap();
+        assert_eq!(first.step.key(), "file:diffusion_models/flux-2-klein-9b-fp8.safetensors");
         assert_eq!(p.models_bytes, m.download_bytes(m.preset("recommended")));
     }
 

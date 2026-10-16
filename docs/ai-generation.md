@@ -282,12 +282,14 @@ dialog: the editor stays usable beside it.
 |---|---|---|
 | 1. Your PC | Windows version, graphics card and its memory, driver, free space, an existing ComfyUI, whether the download servers answer | No |
 | 2. Location | The engine folder (default `%LOCALAPPDATA%\LayerShop\engine`) and the models folder (default beside it; any drive), with the room needed against the room free | No |
-| 3. Models | Starter / Recommended / Everything, and a checklist: size, what each is for, its licence and whether that allows commercial work, "needs a Hugging Face sign-in", "not tested on cards this size" | No |
+| 3. Models | Starter / Recommended / Everything, and a checklist: size, what each is for, its licence and whether that allows commercial work, a gated model's two steps (Sign in with Hugging Face, Accept the licence), "not tested on cards this size" | No |
 | 4. Install | One row per file with its progress; overall size, speed and time left; Pause | Yes |
 | 5. Ready | The test image, how long it took, how many models the panel lists | Starts the engine |
 
-- **It carries on with the window closed.** The status bar shows how far it is (click it to
-  reopen the wizard), and so does the line under Generate.
+- **It carries on with the window closed.** Close (or the window's ×) while it runs asks
+  **Keep Downloading** (the window closes, the setup goes on) or **Stop Download** (it pauses;
+  what arrived is kept). The status bar shows how far it is, and clicking it (the bar or its
+  words) brings the wizard back on the Install step; so does the line under Generate.
 - **It can be stopped at any point**, by Pause, by closing the app or by a crash. What arrived is
   kept: files are downloaded to `<name>.part` and continued from where they stopped; the next
   launch offers **Continue Setup**. There is no separate resume code: a setup is always "plan
@@ -297,10 +299,35 @@ dialog: the editor stays usable beside it.
   arrives wrong is fetched once more, then refused with both checksums in the message.
 - **Shared files are downloaded once** (Ideogram 4 uses Qwen Image 2.1's text encoder), and the
   totals count them once: Starter 18.5 GB, Recommended 51.5 GB, Everything 176.5 GB.
-- **Gated models** (FLUX.2 Klein 9B) need a Hugging Face sign-in: **Get access** opens the
-  model's page to accept its licence, and a read token pasted into the wizard is kept with the
-  API keys (never in the preferences) and sent only to `huggingface.co`. Without one, that model
-  is skipped and the rest installs.
+- **Gated models** (FLUX.2 Klein 9B: Black Forest Labs' FLUX Non-Commercial License) can be
+  downloaded only by someone signed in to Hugging Face who accepted the licence on the model's
+  page. Its row says where the user stands and the one thing to do next: **Step 1 of 2: Sign in
+  with Hugging Face** → **Step 2 of 2: Accept the licence** (opens the model's page; **Check
+  again**, and coming back to the app checks by itself) → **Ready to download**. Install with
+  it ticked and not ready asks first (**Install**, **Install Without FLUX.2 Klein 9B**,
+  **Cancel**): it is never silently left out.
+  - **Sign in with Hugging Face** is OAuth 2 with PKCE as a public app (no client secret):
+    the browser opens Hugging Face's page and comes back to a one-shot listener on
+    `127.0.0.1:<any free port>`; a `state` that is not the one sent is refused, and it gives up
+    after five minutes (or Cancel). Scopes `openid profile gated-repos`: who the user is, and the
+    public gated repos they were granted, nothing private. The access token lasts hours and is
+    renewed with the refresh token before it expires (the access check just before Install
+    renews it; gated files are downloaded first, while it is fresh). The app's client id is
+    `photocraft_aisetup::hf::CLIENT_ID` (`LAYERSHOP_HF_CLIENT_ID` overrides it to try an app);
+    empty, Sign in is unavailable and the token is the way in.
+  - Where a model stands is one `HEAD` of its gated file with the token: 2xx (or the redirect
+    to the CDN) ready, 401 not signed in (Hugging Face answers a token it doesn't take the same
+    way, `X-Error-Code: GatedRepo`), 403 signed in without the licence. Nothing is downloaded.
+  - **Use an access token instead** (collapsed) is the fallback, for organisation token
+    policies or a sign-in that fails: a read token, checked with `/api/whoami-v2`. A token
+    already on this PC (`HF_TOKEN`, or `huggingface_hub`'s token file) is offered as **Use the
+    Hugging Face sign-in found on this PC**, and used only on that click.
+  - The sign-in (access and refresh token, expiry, username) is kept in `ai-keys.json` with the
+    API keys: never in the preferences, never in what a command returns or `ui.inspect`
+    reports, never logged. Every request with a token goes to `https://huggingface.co/` only;
+    the downloads drop it on the CDN redirect. **Sign out** forgets it here; **Connected apps**
+    links to Hugging Face's settings, where the app is revoked. **How does this work?** links to
+    <https://layershop.aardvarkstudios.net/hugging-face/>.
 - **The engine** is ComfyUI's official Windows portable build, pinned by version and sha256
   (0.39.0 today; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
   builds, the last two untested). It is unpacked in pure Rust; the archive is refused whole if
@@ -612,7 +639,9 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.setup.manifest {"vramGb"?}` | what the setup can install: models with their files, sizes, licences, whether each is installed and how it suits a card of that size; presets with shared files counted once |
 | `ai.setup.plan {"models"?, "route"?, "variant"?, "recheck"?}` | what a setup would download and the room it needs, given what is on disk. Changes nothing |
 | `ai.setup.status` | the setup that is running (steps, bytes, speed, time left) or how the last one ended; the setup's record; what is installed now |
-| `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair`, `ai.setup.remove`, `ai.setup.setToken` | install, stop, fix, delete, sign in. **Refused to agents**: they download and start a program, or delete files, and are the user's to run from the wizard. So is `ai.setup.plan` with a folder or a server listing of the agent's choosing |
+| `ai.setup.hfStatus` | the Hugging Face sign-in: signed in or not, as whom, how (`oauth`, `token`), whether Sign in is available and a token is on this PC. Never a token |
+| `ai.setup.hfAccess {"models"?}` | where each gated model stands (`signIn`, `licence`, `ready`): one `HEAD` of its gated file. Renews a sign-in about to expire. A background job |
+| `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair`, `ai.setup.remove`, `ai.setup.hfSignIn`, `ai.setup.hfSignOut`, `ai.setup.setToken`, `ai.setup.hfUseFound` | install, stop, fix, delete, sign in and out of Hugging Face, an access token, the token found on this PC. **Refused to agents**: they download and start a program, delete files, or sign in, and are the user's to do from the wizard. So is `ai.setup.plan` with a folder or a server listing of the agent's choosing |
 | `ai.setup.open {"page"?, "route"?, "open"?}` | a shell command (the running app): open the wizard, on a screen (`pc`, `location`, `models`, `install`, `ready`), or close it |
 
 `ai.models` returns every model with `listed` (offered in the panel) and, as `listed`, the ids
@@ -649,8 +678,9 @@ as `ai.generate` names its params, so they can be passed straight back to it. In
   network seam and its redirect policy; `UreqFetch` on native), `download.rs` (one file: resume,
   sha256, retries), `unpack.rs` (7z with the path and size guards), `runtime.rs` (the engine's
   launch line, model paths, removal), `configure.rs` (the settings a setup leaves), `install.rs`
-  (the worker that runs a plan, two downloads at a time) and `state.rs` (the record that makes
-  a setup resumable). Everything but `UreqFetch` and the probe's system calls is tested without
+  (the worker that runs a plan, two downloads at a time), `state.rs` (the record that makes
+  a setup resumable) and `hf.rs` (Hugging Face for the gated models: Sign in with PKCE and its
+  loopback listener, refresh, userinfo / whoami, the access check, the token found on this PC). Everything but `UreqFetch` and the probe's system calls is tested without
   a network: the tests run whole setups against a fake network and engine.
   `cargo xtask ai-manifest` compares the manifest with what GitHub and Hugging Face serve now;
   `cargo run -p photocraft-aisetup --example archive_contents -- <build.7z>` measures a new
@@ -665,4 +695,5 @@ as `ai.generate` names its params, so they can be passed straight back to it. In
 - `crates/ui-egui/src/ai_setup_ui.rs`: the wizard window, its state (`ai_setup` in the UI state
   that `ui.inspect` returns) and its ways in. `ai_setup_ui::demo` is a stand-in network and
   engine: `cargo run -p photocraft-ui-egui --example snapshot -- --ai-setup-demo
-  pc|location|models|install|ready|env` draws any screen offscreen without downloading anything.
+  pc|location|models|install|ready|env` draws any screen offscreen without downloading anything
+  (also `models-hf`, `models-licence`, `models-ready`, `sign-in`, `sign-in-licence`, `close`).

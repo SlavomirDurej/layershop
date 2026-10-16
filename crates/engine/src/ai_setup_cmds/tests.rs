@@ -14,7 +14,7 @@ mod native {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
-    const COMMANDS: [&str; 9] = [
+    const COMMANDS: [&str; 14] = [
         "ai.setup.probe",
         "ai.setup.manifest",
         "ai.setup.plan",
@@ -24,6 +24,11 @@ mod native {
         "ai.setup.repair",
         "ai.setup.remove",
         "ai.setup.setToken",
+        "ai.setup.hfStatus",
+        "ai.setup.hfAccess",
+        "ai.setup.hfSignIn",
+        "ai.setup.hfSignOut",
+        "ai.setup.hfUseFound",
     ];
 
     fn sha(bytes: &[u8]) -> String {
@@ -55,11 +60,22 @@ mod native {
         served: AtomicU64,
         /// Hold every download until this is cleared.
         hold: AtomicBool,
+        /// A gated file (by address) and the token whose owner accepted its licence: other tokens
+        /// get 403, no token 401, as Hugging Face answers.
+        gated: std::sync::Mutex<HashMap<String, String>>,
     }
 
     impl Fetch for FakeNet {
-        fn head(&self, url: &str, _: Option<&str>) -> photocraft_aisetup::Result<Head> {
-            Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None })
+        fn head(&self, url: &str, token: Option<&str>) -> photocraft_aisetup::Result<Head> {
+            if let Some(accepted) = self.gated.lock().unwrap().get(url) {
+                let status = match token {
+                    None => 401,
+                    Some(t) if t == accepted => 200,
+                    Some(_) => 403,
+                };
+                return Ok(Head { status, error_code: (status != 200).then(|| "GatedRepo".to_string()), ..Head::default() });
+            }
+            Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None, ..Head::default() })
         }
 
         fn fetch(&self, request: &photocraft_aisetup::fetch::Request<'_>, sink: &mut dyn Sink, cancelled: &dyn Fn() -> bool) -> photocraft_aisetup::Result<()> {
@@ -117,6 +133,7 @@ mod native {
                 engine_dir: dir.path().join("engine").to_string_lossy().into_owned(),
                 models_dir: dir.path().join("models").to_string_lossy().into_owned(),
                 manifest: Some(manifest.clone()),
+                hf_client_id: String::new(),
             });
             Self { dir, net, manifest, s }
         }
@@ -208,6 +225,8 @@ mod native {
             json!({"models": {"a": 1}, "engine": true}),
             json!({"launch": "python"}),
             json!({"url": "ftp://x", "route": "existing", "models": []}),
+            json!({"cancel": "yes"}),
+            json!({"product": 7}),
         ];
         // The probe takes no parameters and really looks at this machine: once is enough.
         for id in COMMANDS.into_iter().filter(|id| *id != "ai.setup.probe") {
@@ -237,6 +256,9 @@ mod native {
             ("ai.setup.setToken", json!({})),
             ("ai.setup.setToken", json!({"token": "a\nb"})),
             ("ai.setup.manifest", json!({"vramGb": "lots"})),
+            ("ai.setup.hfAccess", json!({"models": "all"})),
+            ("ai.setup.hfAccess", json!({"models": ["no-such-model"]})),
+            ("ai.setup.hfSignIn", json!({"cancel": "yes"})),
         ] {
             assert!(matches!(rig.run(id, params.clone()), Err(EngineError::BadParams { .. })), "{id} {params}");
         }
@@ -415,7 +437,8 @@ mod native {
     #[test]
     fn the_hugging_face_token_is_kept_with_the_keys_and_out_of_the_preferences() {
         let mut rig = Rig::new();
-        assert_eq!(rig.run("ai.setup.status", json!({})).unwrap()["token"], std::env::var("HF_TOKEN").is_ok_and(|t| !t.trim().is_empty()));
+        // A token in the environment is never used unasked.
+        assert_eq!(rig.run("ai.setup.status", json!({})).unwrap()["token"], false);
         assert_eq!(rig.run("ai.setup.setToken", json!({"token": " hf_secret123 "})).unwrap()["set"], true);
         assert_eq!(rig.s.ai.hf_token(), "hf_secret123");
         assert_eq!(rig.run("ai.setup.status", json!({})).unwrap()["token"], true);
@@ -433,6 +456,150 @@ mod native {
         assert_eq!(other.ai.hf_token(), "hf_secret123");
         assert_eq!(rig.run("ai.setup.setToken", json!({"token": ""})).unwrap()["set"], false);
         assert!(!rig.s.ai.keys_json().contains("hf_secret123"));
+    }
+
+    /// The bundled manifest's FLUX.2 Klein 9B (gated) and Qwen Image 2.1, their files small.
+    fn gated_manifest() -> Manifest {
+        let mut m = Manifest::bundled().unwrap().clone();
+        m.models.retain(|x| ["qwen-image-2-1", "flux-2-klein-9b"].contains(&x.id.as_str()));
+        let used: Vec<String> = m.models.iter().flat_map(|x| x.files.clone()).collect();
+        m.files.retain(|key, _| used.contains(key));
+        for (key, file) in &mut m.files {
+            let bytes = contents(key);
+            (file.size, file.sha256) = (bytes.len() as u64, sha(&bytes));
+        }
+        m.presets.retain(|name, _| name == "starter");
+        m
+    }
+
+    /// Hugging Face's sign-in endpoints beside the ComfyUI of [`FakeComfy`].
+    struct HubAndComfy {
+        token_answer: std::sync::Mutex<String>,
+        seen: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Transport for HubAndComfy {
+        fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+            self.seen.lock().unwrap().push(r.url.clone());
+            let answer = |body: &str| Ok(Response { status: if body.is_empty() { 400 } else { 200 }, body: body.as_bytes().to_vec() });
+            match r.url.as_str() {
+                photocraft_aisetup::hf::TOKEN_URL => answer(&self.token_answer.lock().unwrap()),
+                photocraft_aisetup::hf::USERINFO_URL => answer(r#"{"preferred_username":"pixel-painter"}"#),
+                _ => FakeComfy.send(r),
+            }
+        }
+    }
+
+    #[test]
+    fn signing_in_with_hugging_face_unlocks_the_gated_model_and_signing_out_forgets_it() {
+        use photocraft_aisetup::hf::{self, Credentials};
+        let mut rig = Rig::new();
+        let manifest = Arc::new(gated_manifest());
+        let klein_url = manifest.files["diffusion_models/flux-2-klein-9b-fp8.safetensors"].url.clone();
+        let files = manifest.files.iter().map(|(key, f)| (f.url.clone(), contents(key))).collect();
+        let net = Arc::new(FakeNet { files, ..FakeNet::default() });
+        net.gated.lock().unwrap().insert(klein_url, "hf_oauth_first".into());
+        let hub = Arc::new(HubAndComfy {
+            token_answer: std::sync::Mutex::new(r#"{"access_token":"hf_oauth_first","expires_in":28800,"refresh_token":"hf_refresh_1"}"#.into()),
+            seen: std::sync::Mutex::new(Vec::new()),
+        });
+        rig.s.ai.transport = Some(hub.clone());
+        if let Some(env) = rig.s.ai_setup.env.as_mut() {
+            (env.manifest, env.fetch) = (Some(manifest.clone()), net.clone());
+        }
+        // Without an app to sign in as, Sign in is unavailable and says what to do instead.
+        let e = rig.run("ai.setup.hfSignIn", json!({"product": "LayerShop"})).unwrap_err().to_string();
+        assert!(e.contains("access token"), "{e}");
+        assert_eq!(rig.run("ai.setup.hfStatus", json!({})).unwrap()["canSignIn"], false);
+        if let Some(env) = rig.s.ai_setup.env.as_mut() {
+            env.hf_client_id = "test-client-id".into();
+        }
+        let models = json!({"models": ["qwen-image-2-1", "flux-2-klein-9b"]});
+        // Not signed in: the plan says Klein needs it, and access says sign in.
+        let plan = rig.run("ai.setup.plan", models.clone()).unwrap();
+        assert_eq!(plan["needsSignIn"][0]["id"], "flux-2-klein-9b");
+        assert!(plan["needsSignIn"][0]["page"].as_str().unwrap().starts_with("https://huggingface.co/"));
+        let access = rig.run("ai.setup.hfAccess", models.clone()).unwrap();
+        assert_eq!((access["models"][0]["access"].as_str(), access["signedIn"].as_bool()), (Some("signIn"), Some(false)));
+        let status = rig.run("ai.setup.hfStatus", json!({})).unwrap();
+        assert_eq!((status["signedIn"].as_bool(), status["signingIn"].as_bool()), (Some(false), Some(false)));
+        assert_eq!(status["links"]["help"], "https://layershop.aardvarkstudios.net/hugging-face/");
+        assert_eq!(rig.run("ai.setup.hfStatus", json!({})).unwrap()["canSignIn"], true);
+        {
+            let started = rig.run("ai.setup.hfSignIn", json!({"product": "LayerShop"})).unwrap();
+            let url = started["url"].as_str().unwrap().to_string();
+            assert!(rig.s.ai_setup.signing_in());
+            assert_eq!(rig.run("ai.setup.hfSignIn", json!({})).unwrap()["started"], false, "one at a time");
+            let port: u16 = url.split("127.0.0.1%3A").nth(1).and_then(|r| r.split("%2F").next()).unwrap().parse().unwrap();
+            let state = url.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+            let mut browser = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+            std::io::Write::write_all(&mut browser, format!("GET /callback?code=c0de&state={state} HTTP/1.1\r\n\r\n").as_bytes()).unwrap();
+            let seq = rig.s.ai_setup.hf_seq();
+            let began = Instant::now();
+            while rig.s.ai_setup.hf_seq() == seq {
+                poll(&mut rig.s);
+                assert!(began.elapsed() < Duration::from_secs(10), "the sign-in did not end");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        assert!(rig.s.ai.take_keys_dirty(), "the app is told to save the keys");
+        let status = rig.run("ai.setup.hfStatus", json!({})).unwrap();
+        assert_eq!((status["signedIn"].as_bool(), status["user"].as_str(), status["via"].as_str()), (Some(true), Some("pixel-painter"), Some("oauth")));
+        // Signed in, the licence not accepted with this account: 403.
+        net.gated.lock().unwrap().values_mut().for_each(|t| *t = "someone-elses".into());
+        assert_eq!(rig.run("ai.setup.hfAccess", models.clone()).unwrap()["models"][0]["access"], "licence");
+        // Accepted: ready, and the plan includes it.
+        net.gated.lock().unwrap().values_mut().for_each(|t| *t = "hf_oauth_first".into());
+        assert_eq!(rig.run("ai.setup.hfAccess", models.clone()).unwrap()["models"][0]["access"], "ready");
+        assert_eq!(rig.run("ai.setup.plan", models.clone()).unwrap()["models"][1]["skipped"], Value::Null);
+        // Hours later, about to expire: the check renews it first, and the new one opens the file.
+        let mut c = rig.s.ai.hf();
+        c.expires_at = hf::unix_now() + 60;
+        rig.s.ai.set_hf(&c);
+        *hub.token_answer.lock().unwrap() = r#"{"access_token":"hf_oauth_fresh","expires_in":28800,"refresh_token":"hf_refresh_2"}"#.into();
+        net.gated.lock().unwrap().values_mut().for_each(|t| *t = "hf_oauth_fresh".into());
+        let _ = rig.s.ai.take_keys_dirty();
+        assert_eq!(rig.run("ai.setup.hfAccess", models.clone()).unwrap()["models"][0]["access"], "ready");
+        let renewed = rig.s.ai.hf();
+        assert_eq!((renewed.access.as_str(), renewed.refresh.as_str(), renewed.user.as_str()), ("hf_oauth_fresh", "hf_refresh_2", "pixel-painter"));
+        assert!(rig.s.ai.take_keys_dirty());
+        // No command, preference or debug line carries a token; only Hugging Face was sent one.
+        for readable in [
+            rig.s.prefs_to_json(),
+            rig.run("ai.setup.status", json!({})).unwrap().to_string(),
+            rig.run("ai.setup.hfStatus", json!({})).unwrap().to_string(),
+            rig.run("ai.setup.hfAccess", models.clone()).unwrap().to_string(),
+            format!("{:?}", rig.s.ai),
+        ] {
+            for secret in ["hf_oauth_fresh", "hf_refresh_2", "hf_oauth_first", "hf_refresh_1"] {
+                assert!(!readable.contains(secret), "{secret} in {readable}");
+            }
+        }
+        assert!(hub.seen.lock().unwrap().iter().all(|u| u.starts_with("https://huggingface.co/")));
+        // The keys file keeps all of it, and loads back.
+        let mut other = Session::new();
+        other.ai.load_keys_json(&rig.s.ai.keys_json());
+        assert_eq!(other.ai.hf(), renewed);
+        // Signing out forgets it here.
+        let out = rig.run("ai.setup.hfSignOut", json!({})).unwrap();
+        assert_eq!(out["connectedApps"], "https://huggingface.co/settings/connected-applications");
+        assert!(!rig.s.ai.hf().signed_in() && !rig.s.ai.keys_json().contains("hf_oauth_fresh") && rig.s.ai.take_keys_dirty());
+        assert_eq!(rig.run("ai.setup.hfAccess", models).unwrap()["models"][0]["access"], "signIn");
+        // A sign-in Hugging Face won't renew any more is signed out, and says why.
+        rig.s.ai.set_hf(&Credentials { expires_at: 1, ..renewed });
+        hub.token_answer.lock().unwrap().clear();
+        let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-2-klein-9b"]})).unwrap();
+        assert_eq!(access["models"][0]["access"], "signIn");
+        assert!(access["note"].as_str().unwrap().contains("Sign in again") && !rig.s.ai.hf().signed_in(), "{access}");
+    }
+
+    #[test]
+    fn a_token_from_an_older_keys_file_counts_as_pasted() {
+        let mut s = Session::new();
+        s.ai.load_keys_json(r#"{"openai":"sk-x","huggingface":"hf_old","huggingfaceVia":"bogus","huggingfaceExpires":"soon","x":"\u0007"}"#);
+        let c = s.ai.hf();
+        assert_eq!((c.access.as_str(), c.via, c.expires_at, c.refresh.as_str()), ("hf_old", photocraft_aisetup::hf::Via::Token, 0, ""));
+        assert!(!s.ai.take_keys_dirty(), "loading is not a change to save");
     }
 
     #[test]
@@ -461,7 +628,12 @@ fn every_setup_command_is_registered_with_its_parameters_documented() {
             "ai.setup.cancel",
             "ai.setup.repair",
             "ai.setup.remove",
-            "ai.setup.setToken"
+            "ai.setup.setToken",
+            "ai.setup.hfStatus",
+            "ai.setup.hfAccess",
+            "ai.setup.hfSignIn",
+            "ai.setup.hfSignOut",
+            "ai.setup.hfUseFound"
         ]
     );
     for spec in specs() {

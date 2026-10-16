@@ -409,6 +409,7 @@ fn main() -> eframe::Result {
                     engine_dir: engine.to_string_lossy().into_owned(),
                     models_dir: models.to_string_lossy().into_owned(),
                     manifest: None,
+                    hf_client_id: photocraft_aisetup::hf::client_id(),
                 });
             }
             if setup_ai {

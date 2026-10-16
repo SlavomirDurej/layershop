@@ -59,6 +59,10 @@ fn run() -> Result<(), String> {
     std::fs::create_dir_all(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
 
     let mut s = Session::new();
+    // Running this with HF_TOKEN set is asking for it to be used (the app never uses it unasked).
+    if let Some(token) = std::env::var("HF_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
+        s.ai.set_hf_token(&token);
+    }
     s.ai.transport = Some(Arc::new(UreqTransport::new()));
     s.ai.server = Some(Arc::new(ComfyProcess::new(Some(folder.join("comfyui.log")))));
     s.ai_setup.env = Some(SetupEnv {
@@ -67,6 +71,7 @@ fn run() -> Result<(), String> {
         engine_dir: folder.join("engine").to_string_lossy().into_owned(),
         models_dir: folder.join("models").to_string_lossy().into_owned(),
         manifest: None,
+        hf_client_id: photocraft_aisetup::hf::client_id(),
     });
     let call = |s: &mut Session, id: &str, params: Value| s.execute(id, params).map_err(|e| e.to_string());
 

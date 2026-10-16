@@ -330,7 +330,7 @@ mod tests {
 
     impl Fetch for Fake {
         fn head(&self, _: &str, _: Option<&str>) -> Result<Head> {
-            Ok(Head { status: 200, size: Some(self.data.len() as u64), sha256: None })
+            Ok(Head { status: 200, size: Some(self.data.len() as u64), sha256: None, ..Head::default() })
         }
 
         fn fetch(&self, request: &Request<'_>, sink: &mut dyn Sink, _: &dyn Fn() -> bool) -> Result<()> {

@@ -10,12 +10,18 @@
 //! - `ai.setup.plan` says what a choice of models and folders would download and how much room
 //!   it needs.
 //! - `ai.setup.status` reports the setup that is running, or how the last one ended.
-//! - `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair`, `ai.setup.remove` and
-//!   `ai.setup.setToken` install, stop, fix, delete and sign in.
+//! - `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair` and `ai.setup.remove` install, stop,
+//!   fix and delete.
+//! - Hugging Face, for the gated models: `ai.setup.hfStatus` (signed in, as whom),
+//!   `ai.setup.hfAccess` (where each gated model stands: sign in, accept the licence, ready),
+//!   `ai.setup.hfSignIn` (Sign in with Hugging Face, in the browser), `ai.setup.hfSignOut`,
+//!   `ai.setup.setToken` (an access token, the fallback) and `ai.setup.hfUseFound` (the sign-in
+//!   found on this PC, on the user's click).
 //!
-//! The first four only read, and are open to agents. The rest download and start a program, or
-//! delete files: they are the user's to decide, and the automation guard refuses them
-//! (`photocraft_automation::workspace`), as it refuses changing the launch settings.
+//! The reading ones (probe, manifest, plan, status, hfStatus, hfAccess) are open to agents. The
+//! rest download and start a program, delete files, or sign in and out: they are the user's to
+//! decide, and the automation guard refuses them (`photocraft_automation::workspace`), as it
+//! refuses changing the launch settings. No command ever reports a token.
 //!
 //! A setup runs for as long as the downloads take, so it is not a background job of the session
 //! (those are cancelled by Esc and repaint the window while they run): it has a worker of its
@@ -102,7 +108,8 @@ mod native {
     use photocraft_aigen::Launch;
     use photocraft_aisetup::fetch::Fetch;
     use photocraft_aisetup::install::{self, Handle, Job, Progress, TestImage};
-    use photocraft_aisetup::plan::{self, Choices, Layout, PlannedModel, RealDisk, Route};
+    use photocraft_aisetup::hf::{self, Credentials};
+    use photocraft_aisetup::plan::{self, Choices, Layout, PlannedModel, RealDisk, Route, Step};
     use photocraft_aisetup::state::{self, Phase, SetupState};
     use photocraft_aisetup::{configure, download, probe, runtime};
 
@@ -118,6 +125,9 @@ mod native {
         pub models_dir: String,
         /// What can be installed, when it is not what this build was made with (`None`).
         pub manifest: Option<Arc<Manifest>>,
+        /// The OAuth app Sign in with Hugging Face signs in as (the app passes
+        /// [`hf::client_id`]). Empty: Sign in is unavailable, and an access token is the way in.
+        pub hf_client_id: String,
     }
 
     /// How the last setup ended, for the wizard's last screen.
@@ -149,6 +159,12 @@ mod native {
         last: Option<Finished>,
         /// Counts the setups that ended, so the shell can tell a new ending from one it has seen.
         seq: u64,
+        /// Sign in with Hugging Face, while the browser is out.
+        sign_in: Option<hf::SignIn>,
+        /// Why the last sign-in did not work (empty: it did, or it was cancelled).
+        sign_in_error: String,
+        /// Counts the changes to the Hugging Face sign-in (signed in, out, a token saved).
+        hf_seq: u64,
     }
 
     impl std::fmt::Debug for AiSetup {
@@ -171,6 +187,20 @@ mod native {
         /// How many setups have ended in this session.
         pub fn seq(&self) -> u64 {
             self.seq
+        }
+
+        /// Is Sign in with Hugging Face waiting for the browser?
+        pub fn signing_in(&self) -> bool {
+            self.sign_in.is_some()
+        }
+
+        /// How many times the Hugging Face sign-in has changed in this session.
+        pub fn hf_seq(&self) -> u64 {
+            self.hf_seq
+        }
+
+        fn hf_changed(&mut self) {
+            self.hf_seq = self.hf_seq.saturating_add(1);
         }
 
         /// The running setup's progress.
@@ -217,6 +247,7 @@ mod native {
     /// ended for the wizard. Returns whether one ended. The shell calls this every frame while a
     /// setup runs, and saves the preferences when [`AiSetup::seq`] has moved.
     pub fn poll(s: &mut Session) -> bool {
+        poll_sign_in(s);
         let Some(result) = s.ai_setup.handle.as_mut().and_then(Handle::take) else { return false };
         let progress = s.ai_setup.handle.take().map(|h| h.progress()).unwrap_or_default();
         let (route, url) = (s.ai_setup.record().choices.route, s.prefs().integrations.ai.comfy_url.clone());
@@ -244,6 +275,21 @@ mod native {
         s.ai_setup.last = Some(finished);
         s.ai_setup.seq = s.ai_setup.seq.saturating_add(1);
         true
+    }
+
+    /// A sign-in that has ended: what it brought is stored with the keys, or why it failed kept.
+    fn poll_sign_in(s: &mut Session) {
+        let Some(result) = s.ai_setup.sign_in.as_ref().and_then(hf::SignIn::take) else { return };
+        s.ai_setup.sign_in = None;
+        s.ai_setup.sign_in_error = match result {
+            Ok(credentials) => {
+                s.ai.set_hf(&credentials);
+                String::new()
+            }
+            Err(photocraft_aisetup::Error::Cancelled) => String::new(),
+            Err(e) => e.to_string(),
+        };
+        s.ai_setup.hf_changed();
     }
 
     fn failed(route: Route, url: String, error: String, cancelled: bool, progress: Progress) -> Finished {
@@ -436,7 +482,17 @@ mod native {
                 ));
             }
         }
+        // The ticked gated models whose files are still to come: what needs a Hugging Face sign-in.
+        let needs_sign_in: Vec<Value> = hf::gated(&m, &choices.models)
+            .into_iter()
+            .filter(|model| {
+                let gated_file = |k: &&String| m.files.get(*k).is_some_and(|f| f.gated);
+                model.files.iter().filter(gated_file).any(|k| planned.steps.iter().any(|st| st.step == Step::FetchFile(k.clone()) && !st.done))
+            })
+            .map(|model| json!({"id": model.id, "name": model.name, "page": model.page, "licence": model.licence.name}))
+            .collect();
         Ok(json!({
+            "needsSignIn": needs_sign_in,
             "route": choices.route, "models": planned.models, "steps": planned.steps,
             "downloadBytes": planned.download_bytes, "engineBytes": planned.engine_bytes, "modelsBytes": planned.models_bytes,
             "engineDir": choices.engine_dir, "modelsDir": choices.models_dir, "variant": choices.variant,
@@ -508,7 +564,17 @@ mod native {
         if choices.route == Route::Existing {
             photocraft_aigen::comfy::base_url(&url).map_err(|e| bad(cmd, e.to_string()))?;
         }
-        let token = Some(s.ai.hf_token()).filter(|t| !t.is_empty());
+        // A Hugging Face sign-in about to expire is renewed first (rarely needed: the wizard checks
+        // access just before Install, and that renews it).
+        let mut signed = s.ai.hf();
+        let now = hf::unix_now();
+        if signed.needs_refresh(now)
+            && let Ok(fresh) = hf::refresh(transport.as_ref(), &env.hf_client_id, &signed, now)
+        {
+            s.ai.set_hf(&fresh);
+            signed = fresh;
+        }
+        let token = Some(signed.access).filter(|t| !t.is_empty());
         let job = Job { manifest: (*m).clone(), choices, settings, token, port, url, launch };
         let setup = Arc::new(install::Env {
             fetch: env.fetch.clone(),
@@ -641,7 +707,136 @@ mod native {
             return Err(bad(cmd, "that is not a Hugging Face token"));
         }
         s.ai.set_hf_token(token);
+        s.ai_setup.hf_changed();
         Ok(json!({"set": !token.trim().is_empty()}))
+    }
+
+    /// `ai.setup.hfStatus`: the Hugging Face sign-in, without its tokens.
+    pub(super) fn hf_status(s: &mut Session, _: &Value) -> Result<Value> {
+        poll(s);
+        let c = s.ai.hf();
+        let client = s.ai_setup.env.as_ref().map(|env| env.hf_client_id.clone()).unwrap_or_default();
+        // A token on this PC is offered only when it is not the one in use already.
+        let found = s.ai_setup.env.is_some() && hf::found_on_this_pc().is_some_and(|t| t != c.access);
+        Ok(json!({
+            "available": s.ai_setup.env.is_some(),
+            "signedIn": c.signed_in(), "via": c.via, "user": c.user, "expiresAt": (c.expires_at != 0).then_some(c.expires_at),
+            "canSignIn": !client.trim().is_empty() && s.ai.transport.is_some(),
+            "signingIn": s.ai_setup.signing_in(), "error": s.ai_setup.sign_in_error, "found": found, "seq": s.ai_setup.hf_seq,
+            "links": {"help": hf::HELP_URL, "connectedApps": hf::CONNECTED_APPS_URL, "tokens": hf::TOKENS_URL},
+        }))
+    }
+
+    /// `ai.setup.hfAccess`: where each gated model among `models` stands. Renews a sign-in about to
+    /// expire, and learns whose a pasted token is.
+    pub(super) fn hf_access(s: &mut Session, p: &Value) -> Result<Value> {
+        let cmd = "ai.setup.hfAccess";
+        let env = env(s)?;
+        let transport = s.ai.transport.clone().ok_or_else(|| EngineError::Other(NEEDS_DESKTOP.into()))?;
+        let m = manifest(s)?;
+        let models: Vec<String> = match p.get("models") {
+            None | Some(Value::Null) => hf::gated(&m, &m.models.iter().map(|x| x.id.clone()).collect::<Vec<_>>()).iter().map(|x| x.id.clone()).collect(),
+            Some(Value::Array(list)) if list.len() <= 256 => {
+                let ids: Vec<String> = list.iter().filter_map(Value::as_str).map(str::to_string).collect();
+                if ids.len() != list.len() || ids.iter().any(|id| m.model(id).is_none()) {
+                    return Err(bad(cmd, "`models` must be a list of model ids (ai.setup.manifest lists them)"));
+                }
+                ids
+            }
+            Some(_) => return Err(bad(cmd, "`models` must be a list of model ids")),
+        };
+        let before = s.ai.hf();
+        let client = env.hf_client_id.clone();
+        let start = before.clone();
+        crate::jobs::run(
+            s,
+            "Check Hugging Face Access",
+            false,
+            move |ctx| {
+                let mut c = start;
+                let mut note = String::new();
+                let now = hf::unix_now();
+                if c.needs_refresh(now) {
+                    match hf::refresh(transport.as_ref(), &client, &c, now) {
+                        Ok(fresh) => c = fresh,
+                        // Not renewable any more: signed out.
+                        Err(photocraft_aisetup::Error::Access(why)) => {
+                            c = Credentials::default();
+                            note = why;
+                        }
+                        Err(e) => return Err(setup_error(e)),
+                    }
+                }
+                ctx.check()?;
+                if c.signed_in() && c.user.is_empty() {
+                    let who = if c.via == hf::Via::OAuth { hf::userinfo(transport.as_ref(), &c.access) } else { hf::whoami(transport.as_ref(), &c.access) };
+                    match who {
+                        Ok(user) => c.user = user,
+                        Err(photocraft_aisetup::Error::Access(why)) => note = why,
+                        Err(_) => {}
+                    }
+                }
+                ctx.check()?;
+                let token = c.signed_in().then_some(c.access.as_str());
+                let found = hf::access(&m, &models, token, env.fetch.as_ref()).map_err(setup_error)?;
+                Ok((c, found, note))
+            },
+            move |s, (c, found, note)| {
+                // Kept only when nothing changed the sign-in while this ran (a sign-in that ended).
+                if s.ai.hf() == before && c != before {
+                    s.ai.set_hf(&c);
+                    s.ai_setup.hf_changed();
+                }
+                Ok(json!({"models": found, "signedIn": c.signed_in(), "user": c.user, "via": c.via, "note": note}))
+            },
+        )
+    }
+
+    /// `ai.setup.hfSignIn`: start Sign in with Hugging Face (with `cancel`, stop it). The app
+    /// opens `url` in the browser.
+    pub(super) fn hf_sign_in(s: &mut Session, p: &Value) -> Result<Value> {
+        let cmd = "ai.setup.hfSignIn";
+        let env = env(s)?;
+        poll(s);
+        if flag_param(p, "cancel", false, cmd)? {
+            // Dropping it stops the wait and closes the listener.
+            let was = s.ai_setup.sign_in.take().is_some();
+            if was {
+                s.ai_setup.sign_in_error.clear();
+                s.ai_setup.hf_changed();
+            }
+            return Ok(json!({"cancelled": was}));
+        }
+        if let Some(sign_in) = &s.ai_setup.sign_in {
+            return Ok(json!({"url": sign_in.url(), "started": false}));
+        }
+        let transport = s.ai.transport.clone().ok_or_else(|| EngineError::Other(NEEDS_DESKTOP.into()))?;
+        let product: String = text_param(p, "product", cmd)?.filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "the app".into()).chars().take(60).collect();
+        let sign_in = hf::SignIn::start(transport, &env.hf_client_id, &product, std::time::Duration::from_secs(hf::SIGN_IN_SECONDS)).map_err(setup_error)?;
+        let url = sign_in.url().to_string();
+        s.ai_setup.sign_in = Some(sign_in);
+        s.ai_setup.sign_in_error.clear();
+        s.ai_setup.hf_changed();
+        Ok(json!({"url": url, "started": true}))
+    }
+
+    /// `ai.setup.hfSignOut`: forget the Hugging Face sign-in here. Revoking the app is done on
+    /// Hugging Face (`connectedApps`).
+    pub(super) fn hf_sign_out(s: &mut Session, _: &Value) -> Result<Value> {
+        s.ai_setup.sign_in = None;
+        s.ai_setup.sign_in_error.clear();
+        s.ai.set_hf(&Credentials::default());
+        s.ai_setup.hf_changed();
+        Ok(json!({"signedOut": true, "connectedApps": hf::CONNECTED_APPS_URL}))
+    }
+
+    /// `ai.setup.hfUseFound`: use the Hugging Face token found on this PC, as the user chose to.
+    pub(super) fn hf_use_found(s: &mut Session, _: &Value) -> Result<Value> {
+        env(s)?;
+        let token = hf::found_on_this_pc().ok_or_else(|| EngineError::Other("No Hugging Face sign-in was found on this PC.".into()))?;
+        s.ai.set_hf_token(&token);
+        s.ai_setup.hf_changed();
+        Ok(json!({"used": true}))
     }
 }
 
@@ -659,6 +854,14 @@ mod web {
         }
 
         pub fn seq(&self) -> u64 {
+            0
+        }
+
+        pub fn signing_in(&self) -> bool {
+            false
+        }
+
+        pub fn hf_seq(&self) -> u64 {
             0
         }
     }
@@ -701,6 +904,26 @@ mod web {
     }
 
     pub(super) fn set_token(_: &mut Session, _: &Value) -> Result<Value> {
+        Err(unsupported())
+    }
+
+    pub(super) fn hf_status(_: &mut Session, _: &Value) -> Result<Value> {
+        Ok(json!({"available": false, "signedIn": false, "canSignIn": false, "signingIn": false, "found": false, "seq": 0}))
+    }
+
+    pub(super) fn hf_access(_: &mut Session, _: &Value) -> Result<Value> {
+        Err(unsupported())
+    }
+
+    pub(super) fn hf_sign_in(_: &mut Session, _: &Value) -> Result<Value> {
+        Err(unsupported())
+    }
+
+    pub(super) fn hf_sign_out(_: &mut Session, _: &Value) -> Result<Value> {
+        Err(unsupported())
+    }
+
+    pub(super) fn hf_use_found(_: &mut Session, _: &Value) -> Result<Value> {
         Err(unsupported())
     }
 }
@@ -811,9 +1034,59 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set Hugging Face Token",
             menu: &[],
             shortcut: None,
-            params: r##"{"token":str (empty removes it)} → {set}: the token gated model files are downloaded with (kept for this session; the app saves it with the API keys, apart from the preferences). Sent only to huggingface.co"##,
+            params: r##"{"token":str (empty removes it)} → {set}: an access token pasted by hand, the fallback to Sign in with Hugging Face, that gated model files are downloaded with (the app saves it with the API keys, apart from the preferences). Sent only to huggingface.co"##,
             enabled: always,
             run: imp::set_token,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.hfStatus",
+            label: "Hugging Face Sign-In",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {available,signedIn,via:oauth|token|none,user,expiresAt?,canSignIn (Sign in with Hugging Face is set up in this build),signingIn,error (why the last sign-in failed),found (a Hugging Face token is on this PC, for the user to choose to use),seq,links:{help,connectedApps,tokens}}: never a token"##,
+            enabled: always,
+            run: imp::hf_status,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.hfAccess",
+            label: "Check Hugging Face Access",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"models":[id,…]?=every gated model} → {models:[{id,name,page,licence,access:signIn|licence|ready,detail}],signedIn,user,via,note}: where each gated model stands (one HEAD of its gated file: 401 sign in, 403 accept the licence, 2xx ready). Renews a sign-in about to expire. Downloads nothing"##,
+            enabled: can_install,
+            run: imp::hf_access,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.hfSignIn",
+            label: "Sign In with Hugging Face",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"cancel":bool=false,"product":str?} → {url,started} | {cancelled}: starts Sign in with Hugging Face (OAuth with PKCE, scopes openid profile gated-repos); the app opens `url` in the browser, which comes back to 127.0.0.1. Waits five minutes. The user's to do: automation is refused"##,
+            enabled: can_install,
+            run: imp::hf_sign_in,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.hfSignOut",
+            label: "Sign Out of Hugging Face",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {signedOut,connectedApps}: forgets the Hugging Face sign-in here (revoking the app is done on Hugging Face, at connectedApps)"##,
+            enabled: always,
+            run: imp::hf_sign_out,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.hfUseFound",
+            label: "Use the Hugging Face Sign-In on This PC",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {used}: uses the Hugging Face token found on this PC (HF_TOKEN, or huggingface_hub's token file), as the user chose to"##,
+            enabled: can_install,
+            run: imp::hf_use_found,
             journal: false,
         },
     ]

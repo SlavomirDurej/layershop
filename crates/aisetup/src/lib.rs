@@ -16,6 +16,8 @@
 //! - [`configure`]: the settings an install leaves behind (address, launch, models).
 //! - [`install`]: runs a plan on a worker thread and reports progress; [`state`] is the record
 //!   that lets an interrupted setup be continued after a restart.
+//! - [`hf`]: Hugging Face, for the gated models: Sign in with Hugging Face (OAuth with PKCE), an
+//!   access token as the fallback, and whether the user may download each gated model yet.
 //!
 //! Everything that touches the network, the file system or another process is native only. The
 //! web build keeps the manifest and the plan; its setup commands say they need the desktop app.
@@ -30,6 +32,7 @@ pub mod configure;
 pub mod download;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod fetch;
+pub mod hf;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod install;
 pub mod manifest;

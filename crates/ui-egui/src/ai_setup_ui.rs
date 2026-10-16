@@ -73,6 +73,17 @@ impl Page {
     }
 }
 
+/// A question over the wizard, until it is answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum Ask {
+    /// Install was pressed with a gated model ticked that can't be downloaded yet: sign in with
+    /// Hugging Face and accept its licence, or install without it.
+    SignIn,
+    /// Close was pressed while a setup runs: keep it going in the background, or stop it.
+    Close,
+}
+
 /// The wizard's state (in `UiState`, so `ui.inspect` reports it).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
@@ -110,6 +121,16 @@ pub struct AiSetupUi {
     pub remove_model: Option<String>,
     /// A local model rendered in this session: local AI works, however it was set up.
     pub local_worked: bool,
+    /// Hugging Face, for the gated models: `ai.setup.hfStatus` (signed in, as whom; never a
+    /// token) and `ai.setup.hfAccess` (where each ticked gated model stands), and that check
+    /// running in the background.
+    pub hf: Option<Value>,
+    pub access: Option<Value>,
+    pub access_job: Option<u64>,
+    /// A question over the wizard.
+    pub ask: Option<Ask>,
+    /// "Use an access token instead" is open.
+    pub token_open: bool,
     /// Asked for from the Preferences dialog, which is confirmed first (a window can't take
     /// input beside a dialog, and the dialog's draft would overwrite what a setup writes).
     #[serde(skip)]
@@ -128,6 +149,15 @@ pub struct AiSetupUi {
     seen_seq: u64,
     #[serde(skip)]
     status_at: f64,
+    /// What `access` was asked for (the models and the sign-in), so it is asked again when that
+    /// changes; the sign-in changes seen; and whether the app had the focus last frame (coming
+    /// back from the browser checks again).
+    #[serde(skip)]
+    access_key: String,
+    #[serde(skip)]
+    hf_seen: u64,
+    #[serde(skip)]
+    focused: bool,
 }
 
 impl Default for AiSetupUi {
@@ -153,12 +183,20 @@ impl Default for AiSetupUi {
             confirm_remove: false,
             remove_model: None,
             local_worked: false,
+            hf: None,
+            access: None,
+            access_job: None,
+            ask: None,
+            token_open: false,
             from_prefs: None,
             token: String::new(),
             plan_key: String::new(),
             plan_note: String::new(),
             seen_seq: 0,
             status_at: f64::NEG_INFINITY,
+            access_key: String::new(),
+            hf_seen: 0,
+            focused: true,
         }
     }
 }
@@ -325,7 +363,16 @@ pub fn open(app: &mut PhotocraftApp) {
     if app.ui.ai_setup.url.trim().is_empty() {
         app.ui.ai_setup.url = app.session.prefs().integrations.ai.comfy_url.clone();
     }
+    app.ui.ai_setup.ask = None;
+    refresh_hf(app);
     start_probe(app);
+}
+
+/// The wizard on its Install screen, as the running setup's progress: what clicking the status
+/// bar's readout (or the AI Gen panel's line) brings back.
+pub fn show_progress(app: &mut PhotocraftApp) {
+    open(app);
+    app.ui.ai_setup.page = Page::Install;
 }
 
 /// The first launch after installing: offer the wizard once, when nothing is set up yet. The
@@ -433,24 +480,64 @@ pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
         }
     }
     let now = ctx.input(|i| i.time);
-    for (job, is_probe) in [(app.ui.ai_setup.probe_job, true), (app.ui.ai_setup.server_job, false)] {
+    for (job, which) in [(app.ui.ai_setup.probe_job, 0), (app.ui.ai_setup.server_job, 1), (app.ui.ai_setup.access_job, 2)] {
         let Some(id) = job else { continue };
         match app.session.jobs_with_recent().into_iter().rev().find(|j| j.id.0 == id) {
             Some(j) if j.state == "running" => ctx.request_repaint_after(std::time::Duration::from_millis(100)),
             ended => {
-                let result = ended.and_then(|j| if j.state == "done" { j.result.ok_or_else(String::new) } else { Err(j.error.unwrap_or_default()) }.ok());
-                if is_probe {
-                    app.ui.ai_setup.probe_job = None;
-                    match result {
-                        Some(found) => probed(app, found),
-                        None => app.ui.ai_setup.note = tr("This PC could not be checked. Press Check Again.").to_string(),
+                let (result, error) = match ended {
+                    Some(j) if j.state == "done" => (j.result, None),
+                    Some(j) => (None, j.error),
+                    None => (None, None),
+                };
+                match which {
+                    0 => {
+                        app.ui.ai_setup.probe_job = None;
+                        match result {
+                            Some(found) => probed(app, found),
+                            None => app.ui.ai_setup.note = tr("This PC could not be checked. Press Check Again.").to_string(),
+                        }
                     }
-                } else {
-                    app.ui.ai_setup.server_job = None;
-                    connected(app, result);
+                    1 => {
+                        app.ui.ai_setup.server_job = None;
+                        connected(app, result);
+                    }
+                    _ => {
+                        app.ui.ai_setup.access_job = None;
+                        if result.is_none() {
+                            app.ui.ai_setup.note = error.unwrap_or_else(|| tr("Hugging Face could not be asked. Press Check again.").to_string());
+                        }
+                        accessed(app, result);
+                    }
                 }
             }
         }
+    }
+    // Hugging Face: a sign-in that ended (or anything else that changed it) is saved and shown,
+    // and the ticked gated models are asked about again.
+    let hf_seq = app.session.ai_setup.hf_seq();
+    if hf_seq != app.ui.ai_setup.hf_seen {
+        app.ui.ai_setup.hf_seen = hf_seq;
+        refresh_hf(app);
+        let error = app.ui.ai_setup.hf.as_ref().map(|h| text(h, "/error").to_string()).unwrap_or_default();
+        if !error.is_empty() {
+            app.ui.ai_setup.note = error;
+        }
+    }
+    if app.session.ai.take_keys_dirty() {
+        save_keys(app);
+    }
+    if app.session.ai_setup.signing_in() {
+        // The browser is out: notice it coming back.
+        ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    }
+    // Back from the browser (the licence accepted there, say): ask again.
+    let focused = ctx.input(|i| i.viewport().focused.unwrap_or(true));
+    let regained = focused && !app.ui.ai_setup.focused;
+    app.ui.ai_setup.focused = focused;
+    let asking = app.ui.ai_setup.open && (app.ui.ai_setup.page == Page::Models || app.ui.ai_setup.ask == Some(Ask::SignIn));
+    if regained && asking && !all_ready(app) {
+        check_access(app);
     }
     // A setup that has just ended is no longer running: its result is collected here, where its
     // settings are applied, whether or not the wizard is open.
@@ -617,20 +704,164 @@ fn remove_model(app: &mut PhotocraftApp, id: &str) {
     }
 }
 
-/// Store the typed token, and save it with the API keys.
+/// Store the typed access token (the fallback to signing in), and check it.
 fn save_token(app: &mut PhotocraftApp) {
     let token = std::mem::take(&mut app.ui.ai_setup.token);
     match app.session.execute("ai.setup.setToken", json!({"token": token})) {
         Ok(_) => {
-            if let Some(save) = app.services.save_ai_keys.as_mut()
-                && let Err(e) = save(&app.session.ai.keys_json())
-            {
-                app.ui.ai_setup.note = format!("{}: {e}", tr("The token could not be saved"));
+            save_keys(app);
+            refresh_status(app);
+            app.ui.ai_setup.token_open = false;
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// The Hugging Face sign-in changed in the engine (signed in, renewed, out): save the keys
+/// file it lives in, beside the API keys.
+fn save_keys(app: &mut PhotocraftApp) {
+    let _ = app.session.ai.take_keys_dirty();
+    if let Some(save) = app.services.save_ai_keys.as_mut()
+        && let Err(e) = save(&app.session.ai.keys_json())
+    {
+        app.ui.ai_setup.note = format!("{}: {e}", tr("The Hugging Face sign-in could not be saved"));
+    }
+}
+
+// ---------- Hugging Face ----------
+
+fn refresh_hf(app: &mut PhotocraftApp) {
+    app.ui.ai_setup.hf = app.session.execute("ai.setup.hfStatus", json!({})).ok();
+}
+
+fn hf_flag(app: &PhotocraftApp, key: &str) -> bool {
+    app.ui.ai_setup.hf.as_ref().and_then(|h| h.get(key)).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The ticked models that need a Hugging Face sign-in before their files can come (the plan's
+/// `needsSignIn`: gated, and not there already).
+fn needs_sign_in(app: &PhotocraftApp) -> Vec<Value> {
+    app.ui.ai_setup.plan.as_ref().map(|p| list(p, "/needsSignIn").to_vec()).unwrap_or_default()
+}
+
+/// Where a gated model stands: `signIn`, `licence`, `ready`, or empty while not known.
+fn access_of(app: &PhotocraftApp, id: &str) -> String {
+    let Some(access) = &app.ui.ai_setup.access else { return String::new() };
+    list(access, "/models").iter().find(|m| text(m, "/id") == id).map(|m| text(m, "/access").to_string()).unwrap_or_default()
+}
+
+/// Can every ticked gated model be downloaded?
+fn all_ready(app: &PhotocraftApp) -> bool {
+    needs_sign_in(app).iter().all(|m| access_of(app, text(m, "/id")) == "ready")
+}
+
+/// What the access in front was asked for: the gated models and the sign-in.
+fn access_key(app: &PhotocraftApp) -> String {
+    let ids: Vec<String> = needs_sign_in(app).iter().map(|m| text(m, "/id").to_string()).collect();
+    format!("{}|{}", ids.join(","), app.session.ai_setup.hf_seq())
+}
+
+/// Ask Hugging Face where the ticked gated models stand, in the background where the app has
+/// jobs. Renews a sign-in about to expire on the way.
+fn check_access(app: &mut PhotocraftApp) {
+    if app.ui.ai_setup.access_job.is_some() || app.session.ai_setup.signing_in() {
+        return;
+    }
+    let ids: Vec<String> = needs_sign_in(app).iter().map(|m| text(m, "/id").to_string()).collect();
+    if ids.is_empty() {
+        return;
+    }
+    app.ui.ai_setup.access_key = access_key(app);
+    let p = json!({"models": ids});
+    let started = if app.background_jobs {
+        app.session.start("ai.setup.hfAccess", p)
+    } else {
+        app.session.execute("ai.setup.hfAccess", p).map(photocraft_engine::jobs::Started::Done)
+    };
+    match started {
+        Ok(photocraft_engine::jobs::Started::Done(found)) => accessed(app, Some(found)),
+        Ok(photocraft_engine::jobs::Started::Job(id)) => app.ui.ai_setup.access_job = Some(id.0),
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// The access check answered (`None`: it failed, and said why in the note).
+fn accessed(app: &mut PhotocraftApp, found: Option<Value>) {
+    if let Some(found) = found {
+        app.ui.ai_setup.access = Some(found);
+    }
+    // A renewed sign-in, or one Hugging Face stopped taking, is saved as it is now.
+    if app.session.ai.take_keys_dirty() {
+        save_keys(app);
+    }
+    refresh_hf(app);
+    app.ui.ai_setup.access_key = access_key(app);
+}
+
+/// Sign in with Hugging Face: the browser opens on its page, and comes back to the app.
+fn sign_in(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    app.ui.ai_setup.note.clear();
+    match app.session.execute("ai.setup.hfSignIn", json!({"product": crate::brand::NAME})) {
+        Ok(started) => {
+            if let Some(url) = started.get("url").and_then(Value::as_str).map(str::to_string) {
+                crate::links::open(app, ctx, &url);
+                app.ui.status = tr("Sign in with Hugging Face: continue in your browser").to_string();
             }
+            refresh_hf(app);
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+fn cancel_sign_in(app: &mut PhotocraftApp) {
+    let _ = app.session.execute("ai.setup.hfSignIn", json!({"cancel": true}));
+    refresh_hf(app);
+}
+
+fn sign_out(app: &mut PhotocraftApp) {
+    match app.session.execute("ai.setup.hfSignOut", json!({})) {
+        Ok(_) => {
+            save_keys(app);
+            app.ui.ai_setup.access = None;
+            refresh_hf(app);
             refresh_status(app);
         }
         Err(e) => app.ui.ai_setup.note = e.to_string(),
     }
+}
+
+/// Use the Hugging Face token found on this PC: only ever on the user's click.
+fn use_found(app: &mut PhotocraftApp) {
+    match app.session.execute("ai.setup.hfUseFound", json!({})) {
+        Ok(_) => {
+            save_keys(app);
+            refresh_hf(app);
+            refresh_status(app);
+        }
+        Err(e) => app.ui.ai_setup.note = e.to_string(),
+    }
+}
+
+/// Install, or first ask for what a ticked gated model still needs.
+fn install_clicked(app: &mut PhotocraftApp) {
+    if all_ready(app) {
+        install(app);
+        return;
+    }
+    app.ui.ai_setup.ask = Some(Ask::SignIn);
+    check_access(app);
+}
+
+/// Install without the gated models that can't be downloaded yet: they are unticked.
+fn install_without(app: &mut PhotocraftApp) {
+    let blocked: Vec<String> = needs_sign_in(app).iter().map(|m| text(m, "/id").to_string()).filter(|id| access_of(app, id) != "ready").collect();
+    for id in &blocked {
+        toggle_model(app, id, false);
+    }
+    app.ui.ai_setup.ask = None;
+    // The plan follows the ticks before anything is started.
+    replan(app);
+    install(app);
 }
 
 /// Use my ComfyUI › Connect: read the model files of the ComfyUI at the address, and how it
@@ -807,12 +1038,21 @@ fn test_image(app: &PhotocraftApp, ctx: &egui::Context) -> Option<egui::TextureH
 pub fn status_progress(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let Some((fraction, line)) = progress_line(app) else { return };
     let t = Tokens::get(ui.ctx());
-    let (bar, _) = ui.allocate_exact_size(vec2(90.0, 6.0), Sense::hover());
-    crate::jobs_ui::bar(ui, bar, Some(fraction), &t);
-    let label = ui.add(egui::Label::new(RichText::new(line).color(t.text_dim).size(12.0)).sense(Sense::click()));
-    if label.on_hover_text(tr("Local AI is being set up. Click to see its progress.")).clicked() {
-        app.ui.ai_setup.open = true;
-        app.ui.ai_setup.page = Page::Install;
+    // The bar and its words are one button: either brings the wizard back on its progress.
+    let inner = ui.scope(|ui| {
+        ui.spacing_mut().item_spacing.x = 6.0;
+        let (bar, bar_resp) = ui.allocate_exact_size(vec2(90.0, 6.0), Sense::click());
+        crate::jobs_ui::bar(ui, bar, Some(fraction), &t);
+        let label = ui.add(egui::Label::new(RichText::new(line).color(t.text_dim).size(12.0)).selectable(false).sense(Sense::click()));
+        bar_resp.union(label)
+    });
+    let r = inner.inner;
+    if r.hovered() {
+        ui.painter().rect_stroke(r.rect.expand2(vec2(4.0, 3.0)), t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
+    }
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("Show the Local AI setup")));
+    if r.on_hover_text(tr("Local AI is being set up in the background. Click to show its progress.")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+        show_progress(app);
     }
 }
 
@@ -1315,7 +1555,6 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
     heading(ui, "Choose your models", "Each model is a few large files. Files that models share are downloaded once. You can add more later.");
     let manifest = app.ui.ai_setup.manifest.clone().unwrap_or(Value::Null);
     let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
-    let has_token = status.get("token").and_then(Value::as_bool).unwrap_or(false);
     // Presets.
     let mut chosen_preset = None;
     ui.horizontal(|ui| {
@@ -1338,6 +1577,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
     let vram = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("vramGb")).and_then(Value::as_u64);
     // Files this app downloaded for its own engine are its to delete again.
     let managed = !list(&status, "/engines").is_empty() && !running(app);
+    let needing = needs_sign_in(app);
     let mut any_gated = false;
     egui::ScrollArea::vertical().id_salt("ai-setup-models").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
         for model in list(&manifest, "/models").to_vec() {
@@ -1373,9 +1613,9 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
                     }
                     _ => {}
                 }
-                if gated && !has_token {
-                    ui.label(RichText::new(tr("needs a Hugging Face sign-in")).color(t.warning).size(11.5));
-                    link(app, ui, tr("Get access"), text(&model, "/page"));
+                // A gated model still to come: where it stands, and the one thing to do next.
+                if gated && on && needing.iter().any(|m| text(m, "/id") == id) {
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| gated_state(app, ui, &id, text(&model, "/page")));
                 }
                 if installed && managed {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1400,24 +1640,139 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
             ui.add_space(6.0);
         }
     });
-    // A gated model among the ticked ones: where its licence is accepted, and the token.
-    if any_gated {
+    // A gated model among the ticked ones: the Hugging Face account, and the token fallback.
+    if any_gated && (!needing.is_empty() || hf_flag(app, "signedIn")) {
         ui.add_space(2.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(tr("Hugging Face token")).color(t.text_dim).size(12.0));
-            let hint = if has_token { tr("Saved. Type a new one to replace it") } else { tr("Paste a read token") };
-            ui.add(egui::TextEdit::singleline(&mut app.ui.ai_setup.token).password(true).desired_width(230.0).hint_text(hint));
-            let typed = !app.ui.ai_setup.token.trim().is_empty();
-            if ui.add_enabled_ui(typed, |ui| widgets::secondary_button(ui, tr("Save"), 64.0)).inner.clicked() {
-                save_token(app);
-            }
-        });
-        let hint = "Accept the model's licence on its page (Get access), then paste a read token from your Hugging Face settings. It is sent only to huggingface.co. Without one, that model is skipped.";
-        ui.add(egui::Label::new(RichText::new(tr(hint)).color(t.text_faint).size(11.0)).wrap());
+        hf_panel(app, ui);
     }
     problem(ui, &app.ui.ai_setup.plan_note.clone());
     problem(ui, &app.ui.ai_setup.note.clone());
     replan(app);
+    // Where the ticked gated models stand, asked whenever they or the sign-in change.
+    if !needs_sign_in(app).is_empty() && app.ui.ai_setup.access_key != access_key(app) {
+        check_access(app);
+    }
+}
+
+/// An underlined word that does something: the small actions in a model's row.
+fn action(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
+    let r = ui.add(egui::Label::new(RichText::new(label).color(color).size(11.5).underline()).selectable(false).sense(Sense::click()));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    r.on_hover_cursor(egui::CursorIcon::PointingHand)
+}
+
+/// A gated model's row (laid out right to left): where it stands, and the one thing to do next.
+/// Sign in with Hugging Face, then Accept the licence, then it is ready.
+fn gated_state(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: &str, page: &str) {
+    let t = Tokens::get(ui.ctx());
+    let small = |s: &str, c: Color32| RichText::new(s).color(c).size(11.5);
+    if app.session.ai_setup.signing_in() {
+        if action(ui, tr("Cancel"), t.text_dim).clicked() {
+            cancel_sign_in(app);
+        }
+        ui.label(small(tr("Waiting for your browser\u{2026}"), t.text_dim));
+        ui.add(egui::Spinner::new().size(12.0));
+        return;
+    }
+    match access_of(app, id).as_str() {
+        "ready" => {
+            ui.label(small(tr("Ready to download"), t.accent_text));
+            let (mark, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+            crate::icons::paint(ui, mark, "check", 12.0, t.accent_text);
+        }
+        "licence" => {
+            if action(ui, tr("Check again"), t.text_dim).clicked() {
+                check_access(app);
+            }
+            if action(ui, tr("Accept the licence"), t.accent).on_hover_text(page).clicked() {
+                crate::links::open(app, ui.ctx(), page);
+            }
+            ui.label(small(tr("Step 2 of 2:"), t.warning));
+        }
+        _ if app.ui.ai_setup.access_job.is_some() => {
+            ui.label(small(tr("Checking access\u{2026}"), t.text_dim));
+            ui.add(egui::Spinner::new().size(12.0));
+        }
+        _ => {
+            let can = hf_flag(app, "canSignIn");
+            if action(ui, if can { tr("Sign in with Hugging Face") } else { tr("Use an access token") }, t.accent).clicked() {
+                if can {
+                    sign_in(app, ui.ctx());
+                } else {
+                    app.ui.ai_setup.token_open = true;
+                }
+            }
+            ui.label(small(tr("Step 1 of 2:"), t.warning));
+        }
+    }
+}
+
+/// Below the models, when a gated one is ticked: the Hugging Face account (who is signed in,
+/// Sign out), "How does this work?", and the access token as the fallback.
+fn hf_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    use photocraft_aisetup::hf::{CONNECTED_APPS_URL, HELP_URL, TOKENS_URL};
+    let t = Tokens::get(ui.ctx());
+    let hf = app.ui.ai_setup.hf.clone().unwrap_or(Value::Null);
+    let (signed, user, via) = (hf_flag(app, "signedIn"), text(&hf, "/user").to_string(), text(&hf, "/via").to_string());
+    let small = |s: &str, c: Color32| RichText::new(s).color(c).size(11.5);
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.label(RichText::new(tr("Hugging Face")).font(crate::theme::medium(12.0)).color(t.text));
+        if signed {
+            let mut who = if user.is_empty() { tr("Signed in").to_string() } else { format!("{} {user}", tr("Signed in as")) };
+            if via == "token" {
+                who = format!("{who} {}", tr("(access token)"));
+            }
+            ui.label(small(&who, t.text_dim));
+            let out = action(ui, tr("Sign out"), t.text_dim)
+                .on_hover_text(tr("Forgets the sign-in on this PC. To disconnect the app from your account too, use Connected apps on Hugging Face"));
+            if out.clicked() {
+                sign_out(app);
+            }
+            if via == "oauth" {
+                link(app, ui, tr("Connected apps"), CONNECTED_APPS_URL);
+            }
+        } else if app.session.ai_setup.signing_in() {
+            ui.label(small(tr("Waiting for your browser\u{2026}"), t.text_dim));
+        } else {
+            ui.label(small(tr("Not signed in"), t.text_faint));
+        }
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| link(app, ui, tr("How does this work?"), HELP_URL));
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 12.0;
+        let toggled = ui
+            .horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 3.0;
+                let (mark, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
+                crate::icons::paint(ui, mark, if app.ui.ai_setup.token_open { "chevron-down" } else { "chevron-right" }, 11.0, t.text_dim);
+                action(ui, tr("Use an access token instead"), t.text_dim).clicked()
+            })
+            .inner;
+        if toggled {
+            app.ui.ai_setup.token_open = !app.ui.ai_setup.token_open;
+        }
+        if hf_flag(app, "found") && !signed {
+            let r = action(ui, tr("Use the Hugging Face sign-in found on this PC"), t.accent)
+                .on_hover_text(tr("A Hugging Face token is saved on this PC (by huggingface-cli, or in HF_TOKEN). It is used only if you click here."));
+            if r.clicked() {
+                use_found(app);
+            }
+        }
+    });
+    if app.ui.ai_setup.token_open {
+        ui.horizontal(|ui| {
+            let hint = if signed && via == "token" { tr("Saved. Paste a new one to replace it") } else { tr("Paste a read token") };
+            ui.add(egui::TextEdit::singleline(&mut app.ui.ai_setup.token).password(true).desired_width(260.0).hint_text(hint));
+            let typed = !app.ui.ai_setup.token.trim().is_empty();
+            if ui.add_enabled_ui(typed, |ui| widgets::secondary_button(ui, tr("Save"), 64.0)).inner.clicked() {
+                save_token(app);
+            }
+            link(app, ui, tr("Create a token"), TOKENS_URL);
+        });
+        let hint = "For organisation token policies, or if signing in doesn't work. A read token is enough (or a fine-grained one that can read public gated repos). It is sent only to huggingface.co.";
+        ui.add(egui::Label::new(RichText::new(tr(hint)).color(t.text_faint).size(11.0)).wrap());
+    }
 }
 
 fn eta(seconds: u64) -> String {
@@ -1667,7 +2022,8 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 let go = ui.add_enabled_ui(!problems && !busy, |ui| widgets::primary_button(ui, label, 96.0)).inner;
                 let why = list(&plan, "/problems").first().and_then(Value::as_str).unwrap_or("Choose folders first").to_string();
                 if go.on_disabled_hover_text(why).clicked() {
-                    install(app);
+                    // A gated model that can't be downloaded yet is asked about first.
+                    install_clicked(app);
                 }
                 if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
                     app.ui.ai_setup.page = Page::Location;
@@ -1681,8 +2037,9 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     {
                         let _ = app.session.execute("ai.setup.cancel", json!({}));
                     }
-                    if widgets::secondary_button(ui, tr("Close"), 80.0).on_hover_text(tr("The setup carries on in the background")).clicked() {
-                        app.ui.ai_setup.open = false;
+                    if widgets::secondary_button(ui, tr("Close"), 80.0).clicked() {
+                        // Keep downloading in the background, or stop: asked.
+                        app.ui.ai_setup.ask = Some(Ask::Close);
                     }
                 } else {
                     let state = app.ui.ai_setup.status.as_ref().map_or("", |s| text(s, "/state")).to_string();
@@ -1773,7 +2130,8 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 Page::Location => {
                     egui::ScrollArea::vertical().id_salt("ai-setup-location").auto_shrink([false, false]).show(&mut page, |ui| page_location(app, ui));
                 }
-                Page::Models => page_models(app, &mut page, (body.height() - 190.0).max(120.0)),
+                // The access token's field, when open, takes two lines from the list.
+                Page::Models => page_models(app, &mut page, (body.height() - if app.ui.ai_setup.token_open { 236.0 } else { 190.0 }).max(110.0)),
                 Page::Install => page_install(app, &mut page, (body.height() - 150.0).max(100.0)),
                 Page::Ready => page_ready(app, &mut page),
             }
@@ -1781,7 +2139,234 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             footer(app, &mut bottom);
         });
     if close {
+        if running(app) {
+            app.ui.ai_setup.ask = Some(Ask::Close);
+        } else {
+            app.ui.ai_setup.open = false;
+        }
+    }
+    questions(app, ctx);
+}
+
+/// The question over the wizard, when one is asked.
+fn questions(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    match app.ui.ai_setup.ask {
+        Some(Ask::Close) => close_question(app, ctx),
+        Some(Ask::SignIn) => sign_in_question(app, ctx),
+        None => {}
+    }
+}
+
+/// Close, while a setup runs: carry on in the background (the status bar brings the wizard
+/// back), or stop the downloads (what arrived is kept).
+fn close_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use widgets::{ButtonRole, DialogButton};
+    if !running(app) {
+        // It ended while the question was open: nothing to decide.
+        app.ui.ai_setup.ask = None;
         app.ui.ai_setup.open = false;
+        return;
+    }
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let (done, total) = (number(&status, "/progress/bytesDone"), number(&status, "/progress/bytesTotal"));
+    let how_far = if total > 0 && done < total { format!(" {} {} {} {}.", tr("So far"), size(done), tr("of"), size(total)) } else { String::new() };
+    let mut answer = None;
+    let buttons = [
+        DialogButton::new(ButtonRole::Default, tr("Keep Downloading"), 140.0),
+        DialogButton::new(ButtonRole::Alternate, tr("Stop Download"), 120.0),
+        DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0),
+    ];
+    let modal = egui::Modal::new(egui::Id::new("ai-setup-close")).show(ctx, |ui| {
+        ui.set_max_width(440.0);
+        ui.label(RichText::new(tr("Keep downloading in the background?")).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        let message = format!(
+            "{}{how_far} {}",
+            tr("Local AI is still being set up."),
+            tr("It can carry on while you work: the status bar shows how far it is, and clicking it brings this window back. Stop Download pauses it; what arrived is kept, and Set Up Local AI continues from there.")
+        );
+        ui.add(egui::Label::new(message).wrap());
+        ui.add_space(12.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    if let Some(answer) = answer {
+        close_answered(app, answer);
+    }
+}
+
+/// Close's question answered: keep downloading in the background (the window closes; the
+/// status bar brings it back), stop (the setup pauses, what arrived is kept, the window
+/// closes), or neither (back to the wizard).
+fn close_answered(app: &mut PhotocraftApp, answer: widgets::ButtonRole) {
+    use widgets::ButtonRole;
+    app.ui.ai_setup.ask = None;
+    match answer {
+        ButtonRole::Default => app.ui.ai_setup.open = false,
+        ButtonRole::Alternate => {
+            let _ = app.session.execute("ai.setup.cancel", json!({}));
+            app.ui.ai_setup.open = false;
+        }
+        _ => {}
+    }
+}
+
+/// Install, with a gated model ticked that can't be downloaded yet: the two steps it takes (Sign
+/// in with Hugging Face, Accept the licence), each where it stands; then Install, or install
+/// without it.
+fn sign_in_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use widgets::{ButtonRole, DialogButton};
+    let needs = needs_sign_in(app);
+    let Some(first) = needs.first().cloned() else {
+        // Unticked, or there already, meanwhile: nothing to ask.
+        app.ui.ai_setup.ask = None;
+        return;
+    };
+    let t = Tokens::get(ctx);
+    let names: Vec<&str> = needs.iter().map(|m| text(m, "/name")).collect();
+    let names = names.join(&format!(" {} ", tr("and")));
+    let hf = app.ui.ai_setup.hf.clone().unwrap_or(Value::Null);
+    let signed = hf_flag(app, "signedIn");
+    let signing = app.session.ai_setup.signing_in();
+    let checking = app.ui.ai_setup.access_job.is_some();
+    let can = hf_flag(app, "canSignIn");
+    let ready = all_ready(app);
+    let licence_left = needs.iter().any(|m| access_of(app, text(m, "/id")) == "licence");
+    let user = text(&hf, "/user").to_string();
+    let (mut answer, mut go_sign_in, mut go_licence, mut recheck, mut use_token, mut cancel) = (None, false, false, false, false, false);
+    let without = format!("{} {}", tr("Install Without"), if needs.len() == 1 { text(&first, "/name") } else { tr("Them") });
+    let buttons = [
+        DialogButton::new(ButtonRole::Default, tr("Install"), 96.0).enabled(ready && !checking),
+        DialogButton::new(ButtonRole::Alternate, &without, 120.0),
+        DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0),
+    ];
+    let modal = egui::Modal::new(egui::Id::new("ai-setup-sign-in")).show(ctx, |ui| {
+        ui.set_max_width(500.0);
+        let title = if needs.len() == 1 { format!("{names} {}", tr("needs a Hugging Face sign-in")) } else { format!("{names} {}", tr("need a Hugging Face sign-in")) };
+        ui.label(RichText::new(title).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        let licence = text(&first, "/licence");
+        let why = format!(
+            "{} ({licence}). {}",
+            tr("Its makers share it with people who are signed in to Hugging Face and have accepted its licence"),
+            tr("Both steps happen in your browser; PhotoCraft only checks that they are done.")
+        );
+        ui.add(egui::Label::new(RichText::new(why).color(t.text_dim)).wrap());
+        ui.add_space(10.0);
+        // The two steps, each with where it stands.
+        let step = |ui: &mut egui::Ui, n: &str, done: bool, title: &str| {
+            let (dot, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
+            if done {
+                ui.painter().circle_filled(dot.center(), 10.0, t.accent);
+                crate::icons::paint(ui, Rect::from_center_size(dot.center(), vec2(13.0, 13.0)), "check", 11.0, t.primary_text);
+            } else {
+                ui.painter().circle_stroke(dot.center(), 10.0, Stroke::new(1.0, t.field_border));
+                ui.painter().text(dot.center(), egui::Align2::CENTER_CENTER, n, egui::FontId::proportional(11.5), t.text_dim);
+            }
+            ui.label(RichText::new(title).font(crate::theme::medium(13.0)).color(t.text));
+        };
+        ui.horizontal(|ui| {
+            ui.set_min_height(30.0);
+            step(ui, "1", signed, tr("Sign in with Hugging Face"));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if signing {
+                    cancel = widgets::secondary_button(ui, tr("Cancel"), 70.0).clicked();
+                    ui.label(RichText::new(tr("Waiting for your browser\u{2026}")).color(t.text_dim).size(12.0));
+                    ui.add(egui::Spinner::new().size(14.0));
+                } else if signed {
+                    let who = if user.is_empty() { tr("Signed in").to_string() } else { format!("{} {user}", tr("Signed in as")) };
+                    ui.label(RichText::new(who).color(t.text_dim).size(12.0));
+                } else {
+                    let r = ui.add_enabled_ui(can, |ui| widgets::primary_button(ui, tr("Sign In with Hugging Face"), 0.0)).inner;
+                    go_sign_in = r.on_disabled_hover_text(tr("Not set up in this build: use an access token instead")).clicked();
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.set_min_height(30.0);
+            step(ui, "2", ready, tr("Accept the model's licence"));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ready {
+                    ui.label(RichText::new(tr("Accepted")).color(t.accent_text).size(12.0));
+                } else if checking {
+                    ui.label(RichText::new(tr("Checking\u{2026}")).color(t.text_dim).size(12.0));
+                    ui.add(egui::Spinner::new().size(14.0));
+                } else {
+                    recheck = signed && action(ui, tr("Check again"), t.text_dim).clicked();
+                    let r = ui.add_enabled_ui(signed, |ui| {
+                        if licence_left { widgets::primary_button(ui, tr("Accept the Licence"), 0.0) } else { widgets::secondary_button(ui, tr("Accept the Licence"), 0.0) }
+                    });
+                    go_licence = r.inner.on_disabled_hover_text(tr("Sign in first: the licence is accepted with your Hugging Face account")).clicked();
+                }
+            });
+        });
+        let error = [app.ui.ai_setup.note.as_str(), text(&hf, "/error")].into_iter().find(|e| !e.is_empty()).unwrap_or("").to_string();
+        let detail = list(app.ui.ai_setup.access.as_ref().unwrap_or(&Value::Null), "/models").iter().map(|m| text(m, "/detail")).find(|d| !d.is_empty()).unwrap_or("").to_string();
+        let said = if error.is_empty() { detail } else { error };
+        if !said.is_empty() {
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(said).color(t.danger).size(12.0)).wrap().selectable(true));
+        }
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 12.0;
+            link(app, ui, tr("How does this work?"), photocraft_aisetup::hf::HELP_URL);
+            use_token = action(ui, tr("Use an access token instead"), t.text_dim).clicked();
+        });
+        ui.add_space(12.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    if go_sign_in {
+        sign_in(app, ctx);
+    }
+    if cancel {
+        cancel_sign_in(app);
+    }
+    if go_licence {
+        let page = text(&first, "/page").to_string();
+        crate::links::open(app, ctx, &page);
+    }
+    if recheck {
+        check_access(app);
+    }
+    if use_token {
+        app.ui.ai_setup.ask = None;
+        app.ui.ai_setup.token_open = true;
+        app.ui.ai_setup.page = Page::Models;
+    }
+    if let Some(answer) = answer {
+        sign_in_answered(app, answer);
+    }
+}
+
+/// The sign-in question answered: Install (everything ticked can be downloaded now), Install
+/// Without (the gated models that can't are unticked), or Cancel.
+fn sign_in_answered(app: &mut PhotocraftApp, answer: widgets::ButtonRole) {
+    use widgets::ButtonRole;
+    match answer {
+        ButtonRole::Default if all_ready(app) => {
+            app.ui.ai_setup.ask = None;
+            install(app);
+        }
+        ButtonRole::Default => {}
+        ButtonRole::Alternate => install_without(app),
+        _ => app.ui.ai_setup.ask = None,
     }
 }
 

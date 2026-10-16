@@ -32,6 +32,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, ServerState, Settings, Source, Transport};
+use photocraft_aisetup::hf::{Credentials as HfCredentials, Via as HfVia};
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
@@ -68,8 +69,14 @@ const MASK_FADE: f64 = 0.12;
 /// Longest prompt accepted (characters).
 const MAX_PROMPT: usize = 20_000;
 
-/// The name the Hugging Face token is stored under, beside the providers' keys.
+/// The names the Hugging Face sign-in is stored under, beside the providers' keys: the access
+/// token, and for Sign in with Hugging Face what renews it, when it expires, whose it is, and how
+/// it was had.
 const HF_TOKEN: &str = "huggingface";
+const HF_REFRESH: &str = "huggingfaceRefresh";
+const HF_EXPIRES: &str = "huggingfaceExpires";
+const HF_USER: &str = "huggingfaceUser";
+const HF_VIA: &str = "huggingfaceVia";
 
 /// What generation needs beyond the preferences: the network and the API keys.
 #[derive(Default, Clone)]
@@ -79,8 +86,12 @@ pub struct AiRuntime {
     /// Starts ComfyUI when a local model needs it and none is running (desktop; see
     /// `photocraft_aigen::launch`). `None`: the user starts it.
     pub server: Option<Arc<dyn LocalServer>>,
-    /// API keys by provider key (`openai`, `gemini`). Never serialised with the preferences.
+    /// API keys by provider key (`openai`, `gemini`), and the Hugging Face sign-in. Never
+    /// serialised with the preferences.
     keys: BTreeMap<String, String>,
+    /// The Hugging Face sign-in changed here (signed in, renewed, signed out): the app saves the
+    /// keys ([`Self::take_keys_dirty`]).
+    keys_dirty: bool,
 }
 
 impl std::fmt::Debug for AiRuntime {
@@ -117,28 +128,54 @@ impl AiRuntime {
         String::new()
     }
 
-    /// Store (or, with an empty token, forget) the Hugging Face token: what downloads a gated
-    /// model's files in the Local AI setup. It is kept with the API keys, and like them never
-    /// reaches the preferences.
+    /// Store (or, with an empty token, forget) an access token pasted by hand: what downloads a
+    /// gated model's files in the Local AI setup, as the fallback to Sign in with Hugging Face.
     pub fn set_hf_token(&mut self, token: &str) {
-        let token = token.trim();
-        if token.is_empty() {
-            self.keys.remove(HF_TOKEN);
-        } else {
-            self.keys.insert(HF_TOKEN.to_string(), token.to_string());
-        }
+        self.set_hf(&HfCredentials { access: token.trim().to_string(), via: HfVia::Token, ..HfCredentials::default() });
     }
 
-    /// The Hugging Face token: the stored one, else the `HF_TOKEN` environment variable (desktop).
+    /// The Hugging Face access token, as stored (never one found on this PC that the user did
+    /// not choose to use).
     pub fn hf_token(&self) -> String {
-        if let Some(t) = self.keys.get(HF_TOKEN) {
-            return t.clone();
+        self.keys.get(HF_TOKEN).cloned().unwrap_or_default()
+    }
+
+    /// The Hugging Face sign-in, as stored.
+    pub fn hf(&self) -> HfCredentials {
+        let text = |k: &str| self.keys.get(k).cloned().unwrap_or_default();
+        let access = text(HF_TOKEN);
+        // A token saved before signing in existed was pasted by hand.
+        let via = match HfVia::from_key(&text(HF_VIA)) {
+            HfVia::None if !access.is_empty() => HfVia::Token,
+            via => via,
+        };
+        HfCredentials { access, refresh: text(HF_REFRESH), expires_at: text(HF_EXPIRES).parse().unwrap_or(0), user: text(HF_USER), via }
+    }
+
+    /// Store the Hugging Face sign-in (or, signed out, forget it), kept with the API keys and like
+    /// them never in the preferences.
+    pub fn set_hf(&mut self, c: &HfCredentials) {
+        for k in [HF_TOKEN, HF_REFRESH, HF_EXPIRES, HF_USER, HF_VIA] {
+            self.keys.remove(k);
         }
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(t) = std::env::var("HF_TOKEN").ok().filter(|t| !t.trim().is_empty()) {
-            return t.trim().to_string();
+        if c.signed_in() {
+            let fields = [
+                (HF_TOKEN, c.access.trim().to_string()),
+                (HF_REFRESH, c.refresh.trim().to_string()),
+                (HF_EXPIRES, if c.expires_at == 0 { String::new() } else { c.expires_at.to_string() }),
+                (HF_USER, c.user.trim().to_string()),
+                (HF_VIA, c.via.key().to_string()),
+            ];
+            for (k, v) in fields.into_iter().filter(|(_, v)| !v.is_empty()) {
+                self.keys.insert(k.to_string(), v);
+            }
         }
-        String::new()
+        self.keys_dirty = true;
+    }
+
+    /// Has the Hugging Face sign-in changed since this was last asked? The app then saves the keys.
+    pub fn take_keys_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.keys_dirty)
     }
 
     /// The stored keys as JSON text, for the app to save apart from the preferences.
@@ -156,8 +193,10 @@ impl AiRuntime {
                 self.set_key(p, k);
             }
         }
-        if let Some(t) = m.get(HF_TOKEN).and_then(Value::as_str).filter(|t| t.len() <= 1024 && !t.chars().any(char::is_control)) {
-            self.set_hf_token(t);
+        for k in [HF_TOKEN, HF_REFRESH, HF_EXPIRES, HF_USER, HF_VIA] {
+            if let Some(v) = m.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty() && v.len() <= 2048 && !v.chars().any(char::is_control)) {
+                self.keys.insert(k.to_string(), v.to_string());
+            }
         }
     }
 
@@ -1137,12 +1176,14 @@ fn server_find(s: &mut Session, p: &Value) -> Result<Value> {
     let transport = transport(s)?;
     let server = s.ai.server.clone().ok_or_else(|| EngineError::Other("starting ComfyUI is not available here: it needs the desktop app".into()))?;
     let launch = server.find(transport.as_ref(), &settings.comfy_url).map_err(ai_error)?;
-    let mut found = serde_json::to_value(&launch).map_err(|e| EngineError::Other(e.to_string()))?;
+    let found = serde_json::to_value(&launch).map_err(|e| EngineError::Other(e.to_string()))?;
     // Where a ComfyUI started so keeps its models, as its settings give them.
     #[cfg(not(target_arch = "wasm32"))]
-    {
+    let found = {
+        let mut found = found;
         found["modelsFolders"] = json!(photocraft_aigen::launch::models_folders_here(&launch));
-    }
+        found
+    };
     Ok(found)
 }
 

@@ -307,7 +307,9 @@ pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), Automati
 /// are not, and neither is planning for a folder or a server listing of the agent's choosing.
 fn installs_local_ai(id: &str, params: &Value) -> bool {
     match id {
-        "ai.setup.start" | "ai.setup.cancel" | "ai.setup.repair" | "ai.setup.remove" | "ai.setup.setToken" => true,
+        // Signing in to Hugging Face, or using a token found on the PC, is the user's too.
+        "ai.setup.start" | "ai.setup.cancel" | "ai.setup.repair" | "ai.setup.remove" | "ai.setup.setToken" | "ai.setup.hfSignIn" | "ai.setup.hfSignOut"
+        | "ai.setup.hfUseFound" => true,
         "ai.setup.plan" => ["engineDir", "modelsDir", "serverFiles"].iter().any(|key| params.get(key).is_some()),
         _ => false,
     }
@@ -530,6 +532,8 @@ mod tests {
             ("ai.setup.manifest", json!({"vramGb": 12})),
             ("ai.setup.status", json!({})),
             ("ai.setup.plan", json!({"models": ["qwen-image-2-1"]})),
+            ("ai.setup.hfStatus", json!({})),
+            ("ai.setup.hfAccess", json!({"models": ["flux-2-klein-9b"]})),
         ] {
             assert!(authorize_engine_command(id, &params).is_ok(), "{id} {params}");
             assert!(authorize_desktop_engine_command(id, &params).is_ok(), "{id} {params}");
@@ -541,6 +545,10 @@ mod tests {
             ("ai.setup.repair", json!({})),
             ("ai.setup.remove", json!({"engine": true})),
             ("ai.setup.setToken", json!({"token": "hf_x"})),
+            ("ai.setup.hfSignIn", json!({})),
+            ("ai.setup.hfSignIn", json!({"cancel": true})),
+            ("ai.setup.hfSignOut", json!({})),
+            ("ai.setup.hfUseFound", json!({})),
             ("ai.setup.plan", json!({"models": [], "modelsDir": "C:\\Windows"})),
             ("ai.setup.plan", json!({"engineDir": null})),
             ("ai.setup.plan", json!({"serverFiles": {}})),

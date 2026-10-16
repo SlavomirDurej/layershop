@@ -95,7 +95,7 @@ impl FakeNet {
 
 impl Fetch for FakeNet {
     fn head(&self, url: &str, _: Option<&str>) -> Result<Head> {
-        Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None })
+        Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None, ..Head::default() })
     }
 
     fn fetch(&self, request: &Request<'_>, sink: &mut dyn Sink, _: &dyn Fn() -> bool) -> Result<()> {

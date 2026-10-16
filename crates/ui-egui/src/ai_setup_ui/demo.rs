@@ -5,11 +5,13 @@
 //! Nothing here reaches the network. [`Scale::Real`] keeps the real manifest (real names and
 //! sizes) and trickles zeros in place of the files, so a setup shows its progress and never
 //! finishes; [`Scale::Small`] cuts the manifest down to files of a few kilobytes that arrive
-//! whole, so a setup runs to its end and its test image.
+//! whole, so a setup runs to its end and its test image; [`Scale::Gated`] is the same with
+//! FLUX.2 Klein 9B in place of Z-Image Turbo, a gated model whose file opens only to the token
+//! [`install`] returns a handle on (as Hugging Face's does only once the licence is accepted).
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use photocraft_aigen::{Method, Request, Response, Transport};
@@ -29,7 +31,12 @@ pub enum Scale {
     Real,
     /// Two models whose files are a few kilobytes; a setup finishes in moments.
     Small,
+    /// Qwen Image 2.1 and FLUX.2 Klein 9B (gated), their files a few kilobytes.
+    Gated,
 }
+
+/// The stand-in's Hugging Face access token, for a demo that is signed in.
+pub const TOKEN: &str = "hf_demo_token";
 
 /// The stand-in "test image": the app's own icon.
 const IMAGE: &[u8] = include_bytes!("../../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.photocraft.png");
@@ -42,8 +49,17 @@ fn contents(key: &str) -> Vec<u8> {
 
 /// The bundled manifest cut down to two models with small files (and their real names).
 pub fn small_manifest() -> Option<Manifest> {
+    manifest_of(&["qwen-image-2-1", "z-image-turbo"])
+}
+
+/// [`small_manifest`] with FLUX.2 Klein 9B, which is gated, in place of Z-Image Turbo.
+pub fn gated_manifest() -> Option<Manifest> {
+    manifest_of(&["qwen-image-2-1", "flux-2-klein-9b"])
+}
+
+fn manifest_of(ids: &[&str]) -> Option<Manifest> {
     let mut m = Manifest::bundled().ok()?.clone();
-    m.models.retain(|x| ["qwen-image-2-1", "z-image-turbo"].contains(&x.id.as_str()));
+    m.models.retain(|x| ids.contains(&x.id.as_str()));
     let used: Vec<String> = m.models.iter().flat_map(|x| x.files.clone()).collect();
     m.files.retain(|key, _| used.contains(key));
     for (key, file) in &mut m.files {
@@ -61,11 +77,24 @@ struct DemoFetch {
     files: HashMap<String, Vec<u8>>,
     /// Bytes a second of a trickle.
     rate: u64,
+    /// The gated files, by address, and the token whose owner accepted their licence: no token
+    /// is 401, another one 403, as Hugging Face answers.
+    gated: Vec<String>,
+    accepted: Arc<Mutex<String>>,
 }
 
 impl Fetch for DemoFetch {
-    fn head(&self, url: &str, _: Option<&str>) -> photocraft_aisetup::Result<Head> {
-        Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None })
+    fn head(&self, url: &str, token: Option<&str>) -> photocraft_aisetup::Result<Head> {
+        if self.gated.iter().any(|g| g == url) {
+            let accepted = self.accepted.lock().unwrap_or_else(PoisonError::into_inner).clone();
+            let status = match token {
+                None => 401,
+                Some(t) if !accepted.is_empty() && t == accepted => 200,
+                Some(_) => 403,
+            };
+            return Ok(Head { status, error_code: (status != 200).then(|| "GatedRepo".to_string()), ..Head::default() });
+        }
+        Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None, ..Head::default() })
     }
 
     fn fetch(&self, request: &photocraft_aisetup::fetch::Request<'_>, sink: &mut dyn Sink, cancelled: &dyn Fn() -> bool) -> photocraft_aisetup::Result<()> {
@@ -116,19 +145,40 @@ impl Transport for DemoComfy {
 }
 
 /// Give `app` the stand-in network and engine, with its folders and its record in `dir`.
-pub fn install(app: &mut PhotocraftApp, dir: &Path, scale: Scale) {
+/// Returns the token the gated files open to (none until one is set: the licence not accepted
+/// by anyone yet).
+pub fn install(app: &mut PhotocraftApp, dir: &Path, scale: Scale) -> Arc<Mutex<String>> {
     let manifest = match scale {
         Scale::Real => None,
         Scale::Small => small_manifest().map(Arc::new),
+        Scale::Gated => gated_manifest().map(Arc::new),
     };
     let files = manifest.as_ref().map(|m| m.files.iter().map(|(key, f)| (f.url.clone(), contents(key))).collect()).unwrap_or_default();
+    let all = manifest.clone().or_else(|| Manifest::bundled().ok().map(|m| Arc::new(m.clone())));
+    let gated = all.map(|m| m.files.values().filter(|f| f.gated).map(|f| f.url.clone()).collect()).unwrap_or_default();
+    let accepted = Arc::new(Mutex::new(String::new()));
     app.session.ai.transport = Some(Arc::new(DemoComfy { folders: comfy_folders(dir) }));
     app.session.ai_setup.env = Some(SetupEnv {
-        fetch: Arc::new(DemoFetch { files, rate: 6_000_000 }),
+        fetch: Arc::new(DemoFetch { files, rate: 6_000_000, gated, accepted: accepted.clone() }),
         state_file: dir.join("ai-setup.json"),
         engine_dir: dir.join("engine").to_string_lossy().into_owned(),
         models_dir: dir.join("models").to_string_lossy().into_owned(),
         manifest,
+        // An app to sign in as, so Sign in with Hugging Face is offered (it never gets that far).
+        hf_client_id: "demo-client".into(),
+    });
+    accepted
+}
+
+/// Signed in to Hugging Face as the demo's user (with [`TOKEN`]), as Sign in leaves it.
+pub fn sign_in(app: &mut PhotocraftApp) {
+    use photocraft_aisetup::hf::{Credentials, Via};
+    app.session.ai.set_hf(&Credentials {
+        access: TOKEN.into(),
+        refresh: "hf_demo_refresh".into(),
+        expires_at: photocraft_aisetup::hf::unix_now() + 28_800,
+        user: "pixel-painter".into(),
+        via: Via::OAuth,
     });
 }
 
@@ -216,10 +266,49 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// `models`, `install` (a setup under way) or `ready` (one that has just finished); `installed`
 /// and `installed-models` are the first screen and the Models screen of a setup that is there
 /// already; `pc-comfy` and `location-comfy` the first screen and Use my ComfyUI's on a machine
-/// with ComfyUI Desktop; `env` only gives the app the stand-in, with the wizard closed (its ways
-/// in: the File menu, the Preferences page, the AI Gen panel). Returns whether `page` names one
-/// of these.
+/// with ComfyUI Desktop; `models-hf`, `models-licence` and `models-ready` the Models screen with
+/// FLUX.2 Klein 9B ticked (signed out; signed in without its licence accepted; ready),
+/// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
+/// asks while a setup runs; `env` only gives the app the stand-in, with the wizard closed (its
+/// ways in: the File menu, the Preferences page, the AI Gen panel). Returns whether `page` names
+/// one of these.
 pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
+    // A gated model ticked: where it stands, on the Models screen or in the question Install asks.
+    let gated = match page {
+        "models-hf" => Some((false, None, false)),
+        "models-licence" => Some((true, Some("someone-elses"), false)),
+        "models-ready" => Some((true, Some(TOKEN), false)),
+        "sign-in" => Some((false, None, true)),
+        "sign-in-licence" => Some((true, Some("someone-elses"), true)),
+        _ => None,
+    };
+    if let Some((signed_in, accepted_by, asked)) = gated {
+        let accepted = install(app, dir, Scale::Gated);
+        *accepted.lock().unwrap_or_else(PoisonError::into_inner) = accepted_by.unwrap_or("").to_string();
+        if signed_in {
+            sign_in(app);
+        }
+        app.ui.ai_setup.probe = Some(probe(dir));
+        super::open(app);
+        app.ui.ai_setup.models = vec!["qwen-image-2-1".into(), "flux-2-klein-9b".into()];
+        super::name_preset(app);
+        app.ui.ai_setup.page = Page::Models;
+        super::replan(app);
+        super::check_access(app);
+        if asked {
+            super::install_clicked(app);
+        }
+        return true;
+    }
+    if page == "close" {
+        install(app, dir, Scale::Real);
+        app.ui.ai_setup.probe = Some(probe(dir));
+        super::open(app);
+        app.ui.ai_setup.models = vec!["qwen-image-2-1".into()];
+        super::install(app);
+        app.ui.ai_setup.ask = Some(super::Ask::Close);
+        return true;
+    }
     if page == "env" {
         install(app, dir, Scale::Real);
         app.ui.ai_setup.probe = Some(probe(dir));
