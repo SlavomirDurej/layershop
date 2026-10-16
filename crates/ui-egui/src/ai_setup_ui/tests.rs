@@ -600,3 +600,25 @@ fn closing_while_downloading_asks_and_the_status_bar_brings_it_back() {
     draw(&mut app, &c);
     assert!(!app.ui.ai_setup.open && app.ui.ai_setup.ask.is_none(), "nothing to decide once it has stopped");
 }
+
+#[test]
+fn the_install_rows_say_what_is_being_done_not_what_to_do() {
+    let row = |key: &str, label: &str, state: &str, note: &str| step_words(&json!({"key": key, "label": label, "state": state, "note": note}));
+    // The last step, from waiting to done: the engine's own words while it works.
+    assert_eq!(row("verify", "Start the engine and render a test image", "pending", ""), "Engine start and a test image");
+    assert_eq!(row("verify", "", "active", ""), "Starting the engine\u{2026}");
+    assert_eq!(row("verify", "", "active", "Starting ComfyUI\u{2026}"), "Starting ComfyUI\u{2026}");
+    assert_eq!(row("verify", "", "active", "Rendering a test image with Qwen Image 2.1"), "Rendering a test image with Qwen Image 2.1\u{2026}");
+    assert_eq!(row("verify", "", "done", ""), "Engine started, test image rendered");
+    assert_eq!(row("verify", "", "done", "The test image did not render"), "Engine started \u{b7} The test image did not render");
+    // Downloads, and the steps between.
+    assert_eq!(row("file:vae/v.safetensors", "v.safetensors", "active", ""), "Downloading v.safetensors\u{2026}");
+    assert_eq!(row("file:vae/v.safetensors", "v.safetensors", "active", "Checking what arrived"), "Checking what arrived: v.safetensors\u{2026}");
+    assert_eq!(row("file:vae/v.safetensors", "v.safetensors", "skipped", "needs a Hugging Face sign-in"), "v.safetensors \u{b7} needs a Hugging Face sign-in");
+    assert_eq!(row("file:vae/v.safetensors", "v.safetensors", "done", ""), "v.safetensors");
+    assert_eq!(row("unpack", "Unpack the engine", "active", ""), "Unpacking the engine\u{2026}");
+    assert_eq!(row("paths", "Point the engine at your models", "pending", ""), "The engine's model folders");
+    assert_eq!(row("configure", "Set up the models", "done", ""), "Models set up");
+    // Anything else falls back to its own label.
+    assert_eq!(row("odd", "Something", "pending", ""), "Something");
+}

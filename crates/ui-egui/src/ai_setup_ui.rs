@@ -158,6 +158,9 @@ pub struct AiSetupUi {
     hf_seen: u64,
     #[serde(skip)]
     focused: bool,
+    /// The Install screen's active row last brought into view, so it is scrolled to once.
+    #[serde(skip)]
+    shown_active: String,
 }
 
 impl Default for AiSetupUi {
@@ -197,6 +200,7 @@ impl Default for AiSetupUi {
             access_key: String::new(),
             hf_seen: 0,
             focused: true,
+            shown_active: String::new(),
         }
     }
 }
@@ -1783,6 +1787,39 @@ fn eta(seconds: u64) -> String {
     }
 }
 
+/// A row of the Install screen in words that say where it stands: what is coming (a plain
+/// name), what is being done now ("Downloading …", "Starting ComfyUI…", what the engine says
+/// while it renders), or what was done. Never words that read like something for the user to do.
+fn step_words(step: &Value) -> String {
+    let (key, label, note, state) = (text(step, "/key"), text(step, "/label"), text(step, "/note").trim_end_matches('…'), text(step, "/state"));
+    let file = key.strip_prefix("file:").map(|_| label);
+    let words = match (state, key, file) {
+        ("active", _, Some(name)) if !note.is_empty() => format!("{}: {name}", tr(note)),
+        ("active", _, Some(name)) => format!("{} {name}", tr("Downloading")),
+        ("active", "runtime", _) => tr("Downloading the ComfyUI engine").to_string(),
+        ("active", "unpack", _) => tr("Unpacking the engine").to_string(),
+        ("active", "paths", _) => tr("Pointing the engine at your models").to_string(),
+        ("active", "configure", _) => tr("Setting up the models").to_string(),
+        // The engine reports each stage itself: starting, loading the model, rendering.
+        ("active", "verify", _) if !note.is_empty() => tr(note).to_string(),
+        ("active", "verify", _) => tr("Starting the engine").to_string(),
+        ("done", "runtime", _) => tr("ComfyUI engine downloaded").to_string(),
+        ("done", "unpack", _) => tr("Engine unpacked").to_string(),
+        ("done", "paths", _) => tr("Engine pointed at your models").to_string(),
+        ("done", "configure", _) => tr("Models set up").to_string(),
+        ("done", "verify", _) if !note.is_empty() => format!("{} · {}", tr("Engine started"), tr(note)),
+        ("done", "verify", _) => tr("Engine started, test image rendered").to_string(),
+        (_, "runtime", _) => label.to_string(),
+        (_, "unpack", _) => tr("Engine unpacking").to_string(),
+        (_, "paths", _) => tr("The engine's model folders").to_string(),
+        (_, "configure", _) => tr("Model settings").to_string(),
+        (_, "verify", _) => tr("Engine start and a test image").to_string(),
+        (_, _, Some(name)) if !note.is_empty() && state != "done" => format!("{name} · {}", tr(note)),
+        _ => tr(label).to_string(),
+    };
+    if state == "active" { format!("{words}\u{2026}") } else { words }
+}
+
 fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
     let t = Tokens::get(ui.ctx());
     let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
@@ -1808,27 +1845,48 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
         if let Some(seconds) = progress.get("etaSeconds").and_then(Value::as_u64).filter(|_| busy) {
             line = format!("{line} · {} {}", eta(seconds), tr("left"));
         }
-        let message = text(&progress, "/message");
-        if !message.is_empty() && done >= total {
-            line = format!("{line} · {}", tr(message));
-        }
         ui.label(RichText::new(line).color(t.text_dim).size(12.0));
-        ui.add_space(8.0);
+        ui.add_space(6.0);
     }
+    // What the setup is doing this moment, where it is seen: a spinner and the step in words.
+    let steps = list(&progress, "/steps").to_vec();
+    let active = steps.iter().find(|s| text(s, "/state") == "active");
+    if busy {
+        let now = active.map_or_else(|| tr(text(&progress, "/message")).to_string(), step_words);
+        ui.horizontal(|ui| {
+            ui.add(egui::Spinner::new().size(14.0).color(t.accent));
+            ui.label(RichText::new(now).font(crate::theme::medium(13.0)).color(t.text));
+        });
+        ui.add_space(8.0);
+        // The spinner and the active row's bar move between the quarter-second status reads.
+        ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
+    }
+    let active_key = active.map(|s| text(s, "/key").to_string()).unwrap_or_default();
     egui::ScrollArea::vertical().id_salt("ai-setup-steps").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
-        for step in list(&progress, "/steps") {
-            let rect = row_frame(ui, 34.0);
+        for step in &steps {
             let state = text(step, "/state");
-            let (icon, color) = match state {
-                "done" => ("check", t.accent),
-                "failed" => ("x", t.danger),
-                "skipped" => ("info", t.warning),
-                "active" => ("circle-dot", t.text),
-                _ => ("circle", t.text_faint),
-            };
-            crate::icons::paint(ui, Rect::from_min_size(rect.min + vec2(10.0, 9.0), vec2(16.0, 16.0)), icon, 14.0, color);
+            let on = state == "active";
+            let rect = row_frame(ui, 34.0);
+            if on {
+                // The row being worked on stands out, and comes into view once when it starts.
+                ui.painter().rect_stroke(rect, t.radius, Stroke::new(1.5, t.accent), StrokeKind::Inside);
+                if app.ui.ai_setup.shown_active != active_key {
+                    ui.scroll_to_rect(rect, None);
+                    app.ui.ai_setup.shown_active.clone_from(&active_key);
+                }
+            }
+            let mark = Rect::from_min_size(rect.min + vec2(10.0, 9.0), vec2(16.0, 16.0));
+            match state {
+                "active" => {
+                    let mut child = ui.new_child(UiBuilder::new().max_rect(mark));
+                    child.add(egui::Spinner::new().size(14.0).color(t.accent));
+                }
+                "done" => crate::icons::paint(ui, mark, "check", 14.0, t.accent),
+                "failed" => crate::icons::paint(ui, mark, "x", 14.0, t.danger),
+                "skipped" => crate::icons::paint(ui, mark, "info", 14.0, t.warning),
+                _ => crate::icons::paint(ui, mark, "circle", 14.0, t.text_faint),
+            }
             let (step_done, step_total) = (number(step, "/done"), number(step, "/total"));
-            let note = text(step, "/note");
             let right = match (state, step_total) {
                 ("skipped" | "failed", _) => String::new(),
                 (_, 0) => String::new(),
@@ -1836,19 +1894,24 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
                 (_, total) => format!("{} / {}", size(step_done), size(total)),
             };
             let right_width = if right.is_empty() { 0.0 } else { 150.0 };
-            let label =
-                if note.is_empty() || state == "done" { tr(text(step, "/label")).to_string() } else { format!("{} · {}", tr(text(step, "/label")), tr(note)) };
+            let label = step_words(step);
             let label_rect = Rect::from_min_max(rect.min + vec2(36.0, 0.0), rect.max - vec2(right_width + 12.0, 0.0));
             let mut child = ui.new_child(UiBuilder::new().max_rect(label_rect).layout(Layout::left_to_right(Align::Center)));
+            if on {
+                child.style_mut().visuals.override_text_color = Some(t.text);
+            } else if state == "pending" {
+                child.style_mut().visuals.override_text_color = Some(t.text_dim);
+            }
             widgets::elided_label(&mut child, &label, label_rect.width()).on_hover_text(&label);
             if !right.is_empty() {
                 ui.painter().text(pos2(rect.right() - 12.0, rect.center().y), egui::Align2::RIGHT_CENTER, right, crate::theme::mono(11.5), t.text_dim);
             }
-            if state == "active" && step_total > 0 {
-                let track = Rect::from_min_max(pos2(rect.left() + 36.0, rect.bottom() - 5.0), pos2(rect.right() - 12.0, rect.bottom() - 3.0));
-                ui.painter().rect_filled(track, 1.0, t.field_border);
-                let fraction = (step_done as f64 / step_total as f64).clamp(0.0, 1.0) as f32;
-                ui.painter().rect_filled(Rect::from_min_size(track.min, vec2(track.width() * fraction, track.height())), 1.0, t.accent);
+            if on {
+                // Its own progress when it has a size; otherwise a bar that moves, so a step that
+                // can't say how far it is (starting the engine, rendering) still shows it works.
+                let track = Rect::from_min_max(pos2(rect.left() + 36.0, rect.bottom() - 6.0), pos2(rect.right() - 12.0, rect.bottom() - 3.0));
+                let fraction = (step_total > 0).then(|| (step_done as f64 / step_total as f64).clamp(0.0, 1.0) as f32);
+                crate::jobs_ui::bar(ui, track, fraction, &t);
             }
             ui.add_space(4.0);
         }
