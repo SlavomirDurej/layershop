@@ -407,7 +407,7 @@ fn main() -> eframe::Result {
             app.session.ai.server = Some(std::sync::Arc::new(photocraft_aigen::ComfyProcess::new(services::config_dir().map(|d| d.join("comfyui.log")))));
             // File › Set Up Local AI…: the wizard downloads ComfyUI and the model files through this,
             // into folders of the product's own unless the user chooses others.
-            let local_ai = app_dirs::local_ai_dirs(app_dirs::current(), |k| std::env::var_os(k), photocraft_ui_egui::brand::NAME);
+            let local_ai = app_dirs::local_ai_dirs(app_dirs::current(), |k| std::env::var_os(k));
             if let (Some(config), Some((engine, models))) = (services::config_dir(), local_ai) {
                 app.session.ai_setup.env = Some(photocraft_engine::ai_setup_cmds::SetupEnv {
                     fetch: std::sync::Arc::new(photocraft_aisetup::fetch::UreqFetch::default()),

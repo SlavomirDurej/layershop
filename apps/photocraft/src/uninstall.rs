@@ -261,7 +261,7 @@ pub fn run(args: Args) -> i32 {
     let env_dir = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
     let local = args.local.clone().or_else(|| env_dir("LOCALAPPDATA"));
     let roaming = args.roaming.clone().or_else(|| env_dir("APPDATA"));
-    let found = survey(local.as_deref(), roaming.as_deref(), photocraft_ui_egui::brand::NAME);
+    let found = survey(local.as_deref(), roaming.as_deref(), crate::app_dirs::DIR_NAME);
     if !found.anything() {
         return 0;
     }
@@ -331,6 +331,9 @@ fn ask_in_message_boxes(found: &Survey) -> Choice {
 /// The question as a small window of its own, above the installer's.
 fn ask_in_a_window(found: Survey) -> eframe::Result {
     let name = photocraft_ui_egui::brand::NAME;
+    // Nothing of the window's own is kept: without a file of its own, eframe would leave a
+    // "LayerShop uninstall" folder in %APPDATA% behind the uninstall.
+    let scratch = std::env::temp_dir().join(format!("{}-uninstall-{}.ron", crate::app_dirs::DIR_NAME, std::process::id()));
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("Uninstall {name}"))
@@ -343,16 +346,20 @@ fn ask_in_a_window(found: Survey) -> eframe::Result {
             .with_active(true)
             .with_icon(crate::app_icon::window_icon()),
         centered: true,
+        persist_window: false,
+        persistence_path: Some(scratch.clone()),
         ..Default::default()
     };
-    eframe::run_native(
+    let shown = eframe::run_native(
         &format!("{name} uninstall"),
         options,
         Box::new(move |cc| {
             photocraft_ui_egui::PhotocraftApp::setup_context(&cc.egui_ctx, photocraft_ui_egui::theme::ThemeKind::ALL[0]);
             Ok(Box::new(Dialog::new(found)))
         }),
-    )
+    );
+    let _ = std::fs::remove_file(&scratch);
+    shown
 }
 
 /// The window's state.

@@ -244,11 +244,10 @@ log text file. GPU on/off and the GPU tile size apply at the next launch.
 
 The desktop app stores them in `preferences.json` in the platform config directory (macOS
 `~/Library/Application Support/LayerShop`, Windows `%APPDATA%\LayerShop`, Linux
-`$XDG_CONFIG_HOME/layershop`; override with `PHOTOCRAFT_CONFIG_DIR`; a build's first start
-copies the settings of builds before the rename from the old `Photocraft` folder); autosaves go to its
+`$XDG_CONFIG_HOME/layershop`; override with `PHOTOCRAFT_CONFIG_DIR`); autosaves go to its
 `Recovery` folder, and the window size and position, the dock width and floating-panel geometry
 to `ui.ron` beside it (a file holding values that would crash startup is discarded). In portable mode (a `portable.txt` or `PhotoCraft.portable` file beside the
-executable, as in the Windows portable zip) that directory is `PhotoCraftData` next to the
+executable, as in the Windows portable zip) that directory is `LayerShopData` next to the
 executable instead. The web build keeps them in `localStorage`. A save writes only the values
 this instance changed since it last loaded or saved them over what storage holds now, so a second
 browser tab (or app window) never reverts the other's changes; for a value changed in both, the
