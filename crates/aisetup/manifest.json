@@ -187,14 +187,14 @@
     {
       "id": "flux-3-klein",
       "name": "FLUX.3 Klein",
-      "about": "Creates, edits and fills a selection so it matches the picture around it; quick.",
+      "about": "Detailed, natural pictures from a prompt, quickly.",
       "family": "flux3",
       "files": [
         "diffusion_models/flux3_image_klein_base_int8_convrot.safetensors",
         "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
         "vae/flux2-vae.safetensors"
       ],
-      "does": ["create", "edit", "fill"],
+      "does": ["create"],
       "licence": {
         "name": "FLUX Kommunity License",
         "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/blob/main/LICENSE.md",

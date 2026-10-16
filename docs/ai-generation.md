@@ -87,7 +87,8 @@ generate.
 - **Restyle** redraws the picture following the prompt, keeping its composition. See *Restyling*.
 
 Change has its own choice of model, as it lists other models than Create and Restyle, which
-share theirs.
+share theirs. FLUX.3 Klein is not offered for Change: ComfyUI's template edits with it, but asked
+to add a deer to a meadow it drew malformed animals (2026-10-16), so it creates and restyles only.
 
 **The mask tools** under the prompt of a change mark what to change without leaving the panel
 (*Filling a selection* describes them). They work for an instruction as well: what is marked

@@ -76,8 +76,8 @@ pub enum Family {
     #[default]
     ZImage,
     Krea2,
-    /// FLUX.3 Klein: generates and edits with the same weights, like FLUX.2, but with its own
-    /// text encoder type and a plain sampler (ComfyUI's FLUX 3 Image Klein templates).
+    /// FLUX.3 Klein: its own text encoder type and a plain sampler (ComfyUI's FLUX 3 Image Klein
+    /// templates). Text to image only: see [`Family::edits`].
     Flux3,
     Flux2,
     Flux1,
@@ -248,12 +248,12 @@ impl Family {
     }
 
     /// Offered for inpainting unless the user says otherwise ([`Model::can_inpaint`]): the
-    /// dedicated inpainting models, and FLUX.3 and FLUX.2, edit models that are given the picture
-    /// as a reference. The built-in workflow runs with every other architecture too (encode the
+    /// dedicated inpainting models, and FLUX.2, an edit model that is given the picture as a
+    /// reference. The built-in workflow runs with every other architecture too (encode the
     /// picture, denoise only the masked part), but those don't know where the mask is: tried
     /// against ComfyUI 0.39 they paint a picture of their own inside it, or leave seams.
     pub fn inpaints(self) -> bool {
-        self.inpaint_only() || matches!(self, Family::Flux3 | Family::Flux2)
+        self.inpaint_only() || self == Family::Flux2
     }
 
     /// A dedicated edit model: it changes a picture it is given, following an instruction, and
@@ -264,10 +264,14 @@ impl Family {
 
     /// Edits a picture following an instruction (the panel's Edit tab): the edit models, and
     /// the models that generate and edit with the same weights (Qwen Image 2.1, Ming Image,
-    /// FLUX.3, FLUX.2). They are shown the picture whole, as a reference, and render a new one
-    /// from it.
+    /// FLUX.2). They are shown the picture whole, as a reference, and render a new one from it.
+    ///
+    /// Not FLUX.3 Klein, though its templates edit: asked to add a deer to a meadow (2026-10-16,
+    /// ComfyUI 0.39, the template's graph) it drew heads growing from chests, fused bodies and
+    /// rocks turned half into animals at CFG 3.5, and at the template's CFG 1 no deer or a
+    /// shapeless one.
     pub fn edits(self) -> bool {
-        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux3 | Family::Flux2)
+        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2)
     }
 
     /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
@@ -303,9 +307,9 @@ impl Family {
                 cfg: 1.0,
                 ..base
             },
-            // ComfyUI's FLUX 3 Image Klein templates (text to image and edit), undistilled "base"
-            // model. The templates can also rewrite the prompt with a 9B prompt upsampler first;
-            // that is left out.
+            // ComfyUI's FLUX 3 Image Klein text-to-image template, undistilled "base" model. The
+            // template can also rewrite the prompt with a 9B prompt upsampler first; that is
+            // left out.
             Family::Flux3 => Model {
                 name: "FLUX.3 Klein".into(),
                 unet: "flux3_image_klein_base_int8_convrot.safetensors".into(),
@@ -874,7 +878,7 @@ mod tests {
     #[test]
     fn inpainting_follows_the_architecture_unless_the_user_says_otherwise() {
         for f in Family::ALL {
-            let want = matches!(f, Family::Flux3 | Family::Flux2 | Family::Flux1Fill | Family::QwenInpaint);
+            let want = matches!(f, Family::Flux2 | Family::Flux1Fill | Family::QwenInpaint);
             assert_eq!(f.preset().can_inpaint(), want, "{f:?}");
             // A dedicated inpainting model does nothing else.
             assert_eq!(f.preset().can_generate(), !matches!(f, Family::Flux1Fill | Family::QwenInpaint | Family::QwenEdit), "{f:?}");
@@ -894,7 +898,7 @@ mod tests {
     #[test]
     fn editing_follows_the_architecture() {
         for f in Family::ALL {
-            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux3 | Family::Flux2);
+            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2);
             assert_eq!((f.preset().can_edit(), f.edits()), (want, want), "{f:?}");
             assert!(f.max_references() <= MAX_REFERENCES && (!f.edit_only() || f.edits()), "{f:?}");
         }

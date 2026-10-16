@@ -507,7 +507,7 @@ mod tests {
             (base.family, base.clip.as_str(), base.vae.as_str(), base.steps, base.cfg),
             (Family::Flux3, "qwen3vl_4b_int8_convrot.safetensors", "flux2-vae.safetensors", 50, 3.5)
         );
-        assert!(base.can_generate() && base.can_edit() && base.can_inpaint() && problem(base).is_none());
+        assert!(base.can_generate() && !base.can_edit() && !base.can_inpaint() && problem(base).is_none());
         let sd = by("flux3_image_klein_sd_int8_convrot.safetensors");
         assert_eq!((sd.family, sd.steps, sd.cfg, sd.name.as_str()), (Family::Flux3, 16, 1.0, "flux3 image klein sd int8 convrot"));
         // Without "base" in its name it is still the base model.

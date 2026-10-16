@@ -169,8 +169,7 @@ pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Resu
 ///   guidance; 2511 reads them by index (ComfyUI's templates).
 /// - Ming Image: its encoder takes the pictures with the prompt, and the model is sampled with
 ///   the LCM sampler of ComfyUI's Image Edit template.
-/// - FLUX.3 and FLUX.2: each picture is a reference latent on the conditioning (what FLUX.3's
-///   Set Reference Multi Latent node does for all of them at once).
+/// - FLUX.2: each picture is a reference latent on the conditioning.
 pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     build_edit(model, job, edit)
 }
@@ -492,7 +491,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
     if !f.edits() {
         return Err(Error::Config(format!(
-            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.3 or FLUX.2) on the Edit tab"
+            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
         )));
     }
     if let Some(why) = crate::detect::problem(model) {
@@ -989,7 +988,7 @@ mod tests {
     }
 
     #[test]
-    fn flux3_loads_as_its_templates_do_and_edits_with_reference_latents() {
+    fn flux3_loads_as_its_template_does_and_does_not_edit() {
         let m = Family::Flux3.preset();
         let w = workflow(&m, &job()).unwrap();
         assert_well_formed(&w);
@@ -1006,16 +1005,13 @@ mod tests {
         }
         // CFG above 1: the negative prompt is encoded.
         assert_eq!(c.iter().filter(|x| *x == "CLIPTextEncode").count(), 2);
-        // Editing: the picture is a reference latent on both sides of the guidance.
-        let w = edit_workflow(&m, &job(), &Edit { image: "src.png", references: &["ref.png".to_string()] }).unwrap();
-        assert_well_formed(&w);
-        let c = classes(&w);
-        assert_eq!((c.iter().filter(|x| *x == "ReferenceLatent").count(), c.iter().filter(|x| *x == "VAEEncode").count()), (4, 2));
-        let k = node(&w, "KSampler");
-        for side in ["positive", "negative"] {
-            assert_eq!(w[k["inputs"][side][0].as_str().unwrap()]["class_type"], "ReferenceLatent", "{side}");
-        }
-        assert!(m.can_generate() && m.can_edit() && m.can_inpaint());
+        // Text to image only: its edits drew malformed animals ([`Family::edits`]).
+        let e = edit_workflow(&m, &job(), &Edit { image: "src.png", references: &[] }).unwrap_err().to_string();
+        assert!(e.contains("FLUX.3 Klein can't edit"), "{e}");
+        assert!(m.can_generate() && !m.can_edit() && !m.can_inpaint());
+        // Inpainting the user turns on by hand still shows it the picture, as FLUX.2 is.
+        let w = inpaint_workflow(&Model { inpaint: Some(true), ..m }, &job(), &INPAINT).unwrap();
+        assert_eq!(classes(&w).iter().filter(|x| *x == "ReferenceLatent").count(), 2);
     }
 
     #[test]
