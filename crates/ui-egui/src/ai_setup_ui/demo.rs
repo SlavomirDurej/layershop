@@ -6,7 +6,7 @@
 //! sizes) and trickles zeros in place of the files, so a setup shows its progress and never
 //! finishes; [`Scale::Small`] cuts the manifest down to files of a few kilobytes that arrive
 //! whole, so a setup runs to its end and its test image; [`Scale::Gated`] is the same with
-//! FLUX.2 Klein 9B in place of Z-Image Turbo, a gated model whose file opens only to the token
+//! FLUX.3 Klein in place of Z-Image Turbo, a gated model whose file opens only to the token
 //! [`install`] returns a handle on (as Hugging Face's does only once the licence is accepted).
 
 use std::collections::HashMap;
@@ -31,7 +31,7 @@ pub enum Scale {
     Real,
     /// Two models whose files are a few kilobytes; a setup finishes in moments.
     Small,
-    /// Qwen Image 2.1 and FLUX.2 Klein 9B (gated), their files a few kilobytes.
+    /// Qwen Image 2.1 and FLUX.3 Klein (gated), their files a few kilobytes.
     Gated,
 }
 
@@ -52,9 +52,9 @@ pub fn small_manifest() -> Option<Manifest> {
     manifest_of(&["qwen-image-2-1", "z-image-turbo"])
 }
 
-/// [`small_manifest`] with FLUX.2 Klein 9B, which is gated, in place of Z-Image Turbo.
+/// [`small_manifest`] with FLUX.3 Klein, which is gated, in place of Z-Image Turbo.
 pub fn gated_manifest() -> Option<Manifest> {
-    manifest_of(&["qwen-image-2-1", "flux-2-klein-9b"])
+    manifest_of(&["qwen-image-2-1", "flux-3-klein"])
 }
 
 fn manifest_of(ids: &[&str]) -> Option<Manifest> {
@@ -267,7 +267,7 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// and `installed-models` are the first screen and the Models screen of a setup that is there
 /// already; `pc-comfy` and `location-comfy` the first screen and Use my ComfyUI's on a machine
 /// with ComfyUI Desktop; `models-hf`, `models-licence` and `models-ready` the Models screen with
-/// FLUX.2 Klein 9B ticked (signed out; signed in without its licence accepted; ready),
+/// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
 /// asks while a setup runs; `env` only gives the app the stand-in, with the wizard closed (its
 /// ways in: the File menu, the Preferences page, the AI Gen panel). Returns whether `page` names
@@ -290,7 +290,7 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         }
         app.ui.ai_setup.probe = Some(probe(dir));
         super::open(app);
-        app.ui.ai_setup.models = vec!["qwen-image-2-1".into(), "flux-2-klein-9b".into()];
+        app.ui.ai_setup.models = vec!["qwen-image-2-1".into(), "flux-3-klein".into()];
         super::name_preset(app);
         app.ui.ai_setup.page = Page::Models;
         super::replan(app);

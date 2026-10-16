@@ -67,16 +67,16 @@
       "size": 335304388,
       "sha256": "afc8e28272cd15db3919bacdb6918ce9c1ed22e96cb12c4d5ed0fba823529e38"
     },
-    "diffusion_models/flux-2-klein-9b-fp8.safetensors": {
-      "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8/resolve/main/flux-2-klein-9b-fp8.safetensors",
-      "size": 9433061528,
-      "sha256": "865ba09f5b4c3cbd3468a4bd3acb9fcb2f8740c54317482f0bcd4ed1d3655cee",
+    "diffusion_models/flux3_image_klein_base_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/resolve/main/diffusion_models/flux3_image_klein_base_int8_convrot.safetensors",
+      "size": 5807427339,
+      "sha256": "8949ecfc1bf3871b08be02cf43ec7276a4914e1a86eade6b5eb8f4204426bc92",
       "gated": true
     },
-    "text_encoders/qwen_3_8b_fp8mixed.safetensors": {
-      "url": "https://huggingface.co/Comfy-Org/vae-text-encorder-for-flux-klein-9b/resolve/main/split_files/text_encoders/qwen_3_8b_fp8mixed.safetensors",
-      "size": 8664848742,
-      "sha256": "abad16806e0cbabc54e0325d6565847443fe396d5f0be38bb3cd3fe75a1201d6"
+    "text_encoders/qwen3vl_4b_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+      "size": 4858559240,
+      "sha256": "32de113cbf8282b02cbff0794b637b9d6676da09314a1db5a30bcea9bf4ee01c"
     },
     "vae/flux2-vae.safetensors": {
       "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
@@ -185,22 +185,22 @@
       "testedVramGb": [24]
     },
     {
-      "id": "flux-2-klein-9b",
-      "name": "FLUX.2 Klein 9B",
-      "about": "Fills a selection so it matches the picture around it; also creates and edits.",
-      "family": "flux2",
+      "id": "flux-3-klein",
+      "name": "FLUX.3 Klein",
+      "about": "Creates, edits and fills a selection so it matches the picture around it; quick.",
+      "family": "flux3",
       "files": [
-        "diffusion_models/flux-2-klein-9b-fp8.safetensors",
-        "text_encoders/qwen_3_8b_fp8mixed.safetensors",
+        "diffusion_models/flux3_image_klein_base_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
         "vae/flux2-vae.safetensors"
       ],
       "does": ["create", "edit", "fill"],
       "licence": {
-        "name": "FLUX Non-Commercial License",
-        "url": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9B/blob/main/LICENSE.md",
-        "commercial": false
+        "name": "FLUX Kommunity License",
+        "url": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy/blob/main/LICENSE.md",
+        "commercial": null
       },
-      "page": "https://huggingface.co/black-forest-labs/FLUX.2-klein-9b-fp8",
+      "page": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy",
       "gated": true,
       "minVramGb": null,
       "testedVramGb": [24]
@@ -300,11 +300,11 @@
   ],
   "presets": {
     "starter": ["qwen-image-2-1"],
-    "recommended": ["qwen-image-2-1", "z-image-turbo", "flux-2-klein-9b"],
+    "recommended": ["qwen-image-2-1", "z-image-turbo", "flux-3-klein"],
     "everything": [
       "qwen-image-2-1",
       "z-image-turbo",
-      "flux-2-klein-9b",
+      "flux-3-klein",
       "krea-2-turbo",
       "ideogram-4",
       "hidream-o1",

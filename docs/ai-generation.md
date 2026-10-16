@@ -298,13 +298,13 @@ dialog: the editor stays usable beside it.
 - **Every file is checked against a pinned sha256** before it takes its final name. A file that
   arrives wrong is fetched once more, then refused with both checksums in the message.
 - **Shared files are downloaded once** (Ideogram 4 uses Qwen Image 2.1's text encoder), and the
-  totals count them once: Starter 18.5 GB, Recommended 51.5 GB, Everything 176.5 GB.
-- **Gated models** (FLUX.2 Klein 9B: Black Forest Labs' FLUX Non-Commercial License) can be
+  totals count them once: Starter 18.5 GB, Recommended 44.1 GB, Everything 169.1 GB.
+- **Gated models** (FLUX.3 Klein: Black Forest Labs' FLUX Kommunity License) can be
   downloaded only by someone signed in to Hugging Face who accepted the licence on the model's
   page. Its row says where the user stands and the one thing to do next: **Step 1 of 2: Sign in
   with Hugging Face** → **Step 2 of 2: Accept the licence** (opens the model's page; **Check
   again**, and coming back to the app checks by itself) → **Ready to download**. Install with
-  it ticked and not ready asks first (**Install**, **Install Without FLUX.2 Klein 9B**,
+  it ticked and not ready asks first (**Install**, **Install Without FLUX.3 Klein**,
   **Cancel**): it is never silently left out.
   - **Sign in with Hugging Face** is OAuth 2 with PKCE as a public app (no client secret):
     the browser opens Hugging Face's page and comes back to a one-shot listener on
@@ -421,7 +421,7 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 | Qwen Image 2.1 | local | 25 steps, CFG 1, 1 MP |
 | Krea 2 Turbo | local | 8 steps, CFG 1, 1 MP |
 | Z-Image Turbo | local | 8 steps, CFG 2, `res_multistep`, shift 3, 1 MP |
-| FLUX.2 Klein 9B (distilled) | local | 4 steps, CFG 1, 1 MP |
+| FLUX.3 Klein | local | 50 steps, CFG 3.5, 1 MP |
 | Ideogram 4 | local | 28 steps, CFG 5, shift 5, 1 MP |
 | HiDream O1 | local | 40 steps, CFG 5, `dpmpp_2m_sde_gpu`, noise scale 8, its trained sizes; prompt written by Gemma 4, result refined by Z-Image Turbo at 0.35 |
 | Ernie Image Turbo | local | 8 steps, CFG 1, 2 MP |

@@ -76,6 +76,9 @@ pub enum Family {
     #[default]
     ZImage,
     Krea2,
+    /// FLUX.3 Klein: generates and edits with the same weights, like FLUX.2, but with its own
+    /// text encoder type and a plain sampler (ComfyUI's FLUX 3 Image Klein templates).
+    Flux3,
     Flux2,
     Flux1,
     Ernie,
@@ -104,9 +107,10 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 16] = [
+    pub const ALL: [Family; 17] = [
         Family::ZImage,
         Family::Krea2,
+        Family::Flux3,
         Family::Flux2,
         Family::Flux1,
         Family::Ernie,
@@ -127,6 +131,7 @@ impl Family {
         match self {
             Family::ZImage => "zImage",
             Family::Krea2 => "krea2",
+            Family::Flux3 => "flux3",
             Family::Flux2 => "flux2",
             Family::Flux1 => "flux1",
             Family::Ernie => "ernie",
@@ -152,6 +157,7 @@ impl Family {
         match self {
             Family::ZImage => "Z-Image",
             Family::Krea2 => "Krea 2",
+            Family::Flux3 => "FLUX.3",
             Family::Flux2 => "FLUX.2",
             Family::Flux1 => "FLUX.1",
             Family::Ernie => "Ernie Image",
@@ -242,12 +248,12 @@ impl Family {
     }
 
     /// Offered for inpainting unless the user says otherwise ([`Model::can_inpaint`]): the
-    /// dedicated inpainting models, and FLUX.2, an edit model that is given the picture as a
-    /// reference. The built-in workflow runs with every other architecture too (encode the
+    /// dedicated inpainting models, and FLUX.3 and FLUX.2, edit models that are given the picture
+    /// as a reference. The built-in workflow runs with every other architecture too (encode the
     /// picture, denoise only the masked part), but those don't know where the mask is: tried
     /// against ComfyUI 0.39 they paint a picture of their own inside it, or leave seams.
     pub fn inpaints(self) -> bool {
-        self.inpaint_only() || self == Family::Flux2
+        self.inpaint_only() || matches!(self, Family::Flux3 | Family::Flux2)
     }
 
     /// A dedicated edit model: it changes a picture it is given, following an instruction, and
@@ -258,9 +264,10 @@ impl Family {
 
     /// Edits a picture following an instruction (the panel's Edit tab): the edit models, and
     /// the models that generate and edit with the same weights (Qwen Image 2.1, Ming Image,
-    /// FLUX.2). They are shown the picture whole, as a reference, and render a new one from it.
+    /// FLUX.3, FLUX.2). They are shown the picture whole, as a reference, and render a new one
+    /// from it.
     pub fn edits(self) -> bool {
-        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2)
+        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux3 | Family::Flux2)
     }
 
     /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
@@ -294,6 +301,18 @@ impl Family {
                 vae: "qwen_image_vae.safetensors".into(),
                 steps: 8,
                 cfg: 1.0,
+                ..base
+            },
+            // ComfyUI's FLUX 3 Image Klein templates (text to image and edit), undistilled "base"
+            // model. The templates can also rewrite the prompt with a 9B prompt upsampler first;
+            // that is left out.
+            Family::Flux3 => Model {
+                name: "FLUX.3 Klein".into(),
+                unet: "flux3_image_klein_base_int8_convrot.safetensors".into(),
+                clip: "qwen3vl_4b_int8_convrot.safetensors".into(),
+                vae: "flux2-vae.safetensors".into(),
+                steps: 50,
+                cfg: 3.5,
                 ..base
             },
             Family::Flux2 => Model {
@@ -642,8 +661,9 @@ impl Model {
             Some(local(Family::QwenImage21, "Qwen Image 2.1")),
             Some(Model { unet: "krea2_turbo_int8_convrot.safetensors".into(), ..local(Family::Krea2, "Krea 2 Turbo") }),
             Some(Model { unet: "z_image_turbo_int8_convrot.safetensors".into(), ..local(Family::ZImage, "Z-Image Turbo") }),
-            // The distilled Klein: four steps, no guidance (the preset is the undistilled one).
-            Some(Model { unet: "flux-2-klein-9b-fp8.safetensors".into(), steps: 4, cfg: 1.0, ..local(Family::Flux2, "FLUX.2 Klein 9B") }),
+            // In place of FLUX.2 Klein 9B since 2026-10-16 (not in that comparison): tried
+            // against it on the same server, faster and as good, at its template's settings.
+            Some(local(Family::Flux3, "FLUX.3 Klein")),
             Some(local(Family::Ideogram4, "Ideogram 4")),
             // With its prompt written by Gemma 4 and the result refined by Z-Image Turbo.
             Some(Model {
@@ -691,10 +711,11 @@ impl Model {
             "flux-2",
             "grok-imagine",
         ];
-        const LOCAL: [Family; 16] = [
+        const LOCAL: [Family; 17] = [
             Family::QwenImage21,
             Family::Krea2,
             Family::ZImage,
+            Family::Flux3,
             Family::Flux2,
             Family::Ideogram4,
             Family::HidreamO1,
@@ -853,7 +874,7 @@ mod tests {
     #[test]
     fn inpainting_follows_the_architecture_unless_the_user_says_otherwise() {
         for f in Family::ALL {
-            let want = matches!(f, Family::Flux2 | Family::Flux1Fill | Family::QwenInpaint);
+            let want = matches!(f, Family::Flux3 | Family::Flux2 | Family::Flux1Fill | Family::QwenInpaint);
             assert_eq!(f.preset().can_inpaint(), want, "{f:?}");
             // A dedicated inpainting model does nothing else.
             assert_eq!(f.preset().can_generate(), !matches!(f, Family::Flux1Fill | Family::QwenInpaint | Family::QwenEdit), "{f:?}");
@@ -873,7 +894,7 @@ mod tests {
     #[test]
     fn editing_follows_the_architecture() {
         for f in Family::ALL {
-            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2);
+            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux3 | Family::Flux2);
             assert_eq!((f.preset().can_edit(), f.edits()), (want, want), "{f:?}");
             assert!(f.max_references() <= MAX_REFERENCES && (!f.edit_only() || f.edits()), "{f:?}");
         }
@@ -914,7 +935,7 @@ mod tests {
                 "qwen-image-2-1",
                 "krea-2-turbo",
                 "z-image-turbo",
-                "flux-2-klein-9b",
+                "flux-3-klein",
                 "ideogram-4",
                 "hidream-o1",
                 "ernie-image-turbo",
@@ -934,7 +955,7 @@ mod tests {
         let by = |id: &str| s.model(id).unwrap();
         assert_eq!((by("z-image-turbo").steps, by("z-image-turbo").cfg, by("z-image-turbo").sampler.as_str()), (8, 2.0, "res_multistep"));
         assert_eq!((by("ideogram-4").steps, by("ideogram-4").cfg, by("ideogram-4").shift), (28, 5.0, 5.0));
-        assert_eq!((by("flux-2-klein-9b").steps, by("flux-2-klein-9b").cfg), (4, 1.0));
+        assert_eq!((by("flux-3-klein").steps, by("flux-3-klein").cfg), (50, 3.5));
         assert_eq!((by("ernie-image-turbo").steps, by("ernie-image-turbo").cfg, by("ernie-image-turbo").megapixels), (8, 1.0, 2.0));
         assert_eq!((by("hidream-o1").steps, by("hidream-o1").refiner.as_str()), (40, "z_image_turbo_bf16.safetensors"));
         assert_eq!((by("ming-image-0-1-design").megapixels, by("ming-image-0-1-design").alpha), (2.0, true));

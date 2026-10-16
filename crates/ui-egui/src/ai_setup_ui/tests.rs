@@ -71,11 +71,11 @@ fn opening_fills_in_the_folders_and_the_recommended_models() {
     assert_eq!(s.models_dir, dir.path().join("models").to_string_lossy());
     assert_eq!(
         (s.preset.as_str(), s.models.clone()),
-        ("recommended", vec!["qwen-image-2-1".to_string(), "z-image-turbo".to_string(), "flux-2-klein-9b".to_string()])
+        ("recommended", vec!["qwen-image-2-1".to_string(), "z-image-turbo".to_string(), "flux-3-klein".to_string()])
     );
     assert!(s.probe_job.is_none(), "an answer that is there is not asked for again");
     // The presets: ticking by hand names the preset that results, or none.
-    toggle_model(&mut app, "flux-2-klein-9b", false);
+    toggle_model(&mut app, "flux-3-klein", false);
     toggle_model(&mut app, "z-image-turbo", false);
     assert_eq!(app.ui.ai_setup.preset, "starter");
     toggle_model(&mut app, "krea-2-turbo", true);
@@ -97,7 +97,7 @@ fn opening_fills_in_the_folders_and_the_recommended_models() {
     app.ui.ai_setup.models = preset_models(&app, "recommended");
     draw(&mut app, &c);
     let plan = app.ui.ai_setup.plan.clone().unwrap();
-    assert_eq!(plan["models"].as_array().unwrap().iter().filter(|m| !m["skipped"].is_null()).count(), 1, "FLUX.2 Klein needs a sign-in");
+    assert_eq!(plan["models"].as_array().unwrap().iter().filter(|m| !m["skipped"].is_null()).count(), 1, "FLUX.3 Klein needs a sign-in");
     assert!(plan["downloadBytes"].as_u64().unwrap() > 30_000_000_000);
     assert!(!dir.path().join("engine").exists(), "looking changes nothing");
 }
@@ -450,7 +450,7 @@ fn draw_focused(app: &mut PhotocraftApp, ctx: &egui::Context, focused: bool) {
     ctx.run_ui(input, |ui| window(app, ui.ctx())).textures_delta.clear();
 }
 
-/// An app whose stand-in has FLUX.2 Klein 9B (gated) ticked beside Qwen Image 2.1, on the Models
+/// An app whose stand-in has FLUX.3 Klein (gated) ticked beside Qwen Image 2.1, on the Models
 /// screen; the token its file opens to; and what the app saved as its keys file.
 fn gated_app() -> (PhotocraftApp, tempfile::TempDir, std::sync::Arc<std::sync::Mutex<String>>, std::sync::Arc<std::sync::Mutex<String>>) {
     let (mut app, dir) = app(demo::Scale::Small);
@@ -468,7 +468,7 @@ fn gated_app() -> (PhotocraftApp, tempfile::TempDir, std::sync::Arc<std::sync::M
     (s.existing, s.url) = (true, "http://127.0.0.1:8188".into());
     s.server = Some(json!({"folders": {}, "launch": null, "local": true}));
     s.models_dir = dir.path().join("models").to_string_lossy().into_owned();
-    s.models = vec!["qwen-image-2-1".into(), "flux-2-klein-9b".into()];
+    s.models = vec!["qwen-image-2-1".into(), "flux-3-klein".into()];
     s.page = Page::Models;
     (app, dir, accepted, saved)
 }
@@ -478,9 +478,9 @@ fn a_gated_model_is_sign_in_then_licence_then_ready_and_installs_only_then() {
     let (mut app, dir, accepted, saved) = gated_app();
     let c = ctx();
     draw(&mut app, &c);
-    // Not signed in: the plan says FLUX.2 Klein needs it, and its row asks to sign in.
-    assert_eq!(needs_sign_in(&app).iter().map(|m| text(m, "/id").to_string()).collect::<Vec<_>>(), ["flux-2-klein-9b"]);
-    assert_eq!(access_of(&app, "flux-2-klein-9b"), "signIn");
+    // Not signed in: the plan says FLUX.3 Klein needs it, and its row asks to sign in.
+    assert_eq!(needs_sign_in(&app).iter().map(|m| text(m, "/id").to_string()).collect::<Vec<_>>(), ["flux-3-klein"]);
+    assert_eq!(access_of(&app, "flux-3-klein"), "signIn");
     assert!(hf_flag(&app, "canSignIn") && !hf_flag(&app, "signedIn"));
     // Install asks first, and starts nothing.
     install_clicked(&mut app);
@@ -497,22 +497,22 @@ fn a_gated_model_is_sign_in_then_licence_then_ready_and_installs_only_then() {
     assert!(saved.lock().unwrap().contains(demo::TOKEN), "the keys file has the sign-in");
     refresh_hf(&mut app);
     check_access(&mut app);
-    assert_eq!(access_of(&app, "flux-2-klein-9b"), "licence");
+    assert_eq!(access_of(&app, "flux-3-klein"), "licence");
     assert_eq!(text(app.ui.ai_setup.hf.as_ref().unwrap(), "/user"), "pixel-painter");
     draw(&mut app, &c);
     // The licence is accepted in the browser; back in the app, it is asked again by itself.
     *accepted.lock().unwrap() = demo::TOKEN.into();
     draw_focused(&mut app, &c, false);
-    assert_eq!(access_of(&app, "flux-2-klein-9b"), "licence", "not while away");
+    assert_eq!(access_of(&app, "flux-3-klein"), "licence", "not while away");
     draw_focused(&mut app, &c, true);
-    assert_eq!(access_of(&app, "flux-2-klein-9b"), "ready");
-    // Install, from the question: everything installs, FLUX.2 Klein too.
+    assert_eq!(access_of(&app, "flux-3-klein"), "ready");
+    // Install, from the question: everything installs, FLUX.3 Klein too.
     sign_in_answered(&mut app, widgets::ButtonRole::Default);
     assert!(app.ui.ai_setup.ask.is_none() && app.ui.ai_setup.page == Page::Install, "{}", app.ui.ai_setup.note);
     finish(&mut app, &c);
     let result = app.ui.ai_setup.status.as_ref().unwrap()["result"].clone();
     assert_eq!(result["ok"], true, "{result}");
-    assert!(dir.path().join("models").join("diffusion_models").join("flux-2-klein-9b-fp8.safetensors").is_file());
+    assert!(dir.path().join("models").join("diffusion_models").join("flux3_image_klein_base_int8_convrot.safetensors").is_file());
     // Nothing the wizard shows or reports carries a token.
     let state = serde_json::to_string(&app.ui).unwrap();
     assert!(!state.contains(demo::TOKEN) && !state.contains("hf_demo_refresh"));
@@ -530,11 +530,11 @@ fn install_without_leaves_the_gated_model_out() {
     install_clicked(&mut app);
     assert_eq!(app.ui.ai_setup.ask, Some(Ask::SignIn));
     sign_in_answered(&mut app, widgets::ButtonRole::Alternate);
-    assert!(app.ui.ai_setup.ask.is_none() && !app.ui.ai_setup.models.contains(&"flux-2-klein-9b".to_string()));
+    assert!(app.ui.ai_setup.ask.is_none() && !app.ui.ai_setup.models.contains(&"flux-3-klein".to_string()));
     assert_eq!(app.ui.ai_setup.models, ["qwen-image-2-1"]);
     finish(&mut app, &c);
     assert_eq!(app.ui.ai_setup.status.as_ref().unwrap()["result"]["ok"], true);
-    assert!(!dir.path().join("models").join("diffusion_models").join("flux-2-klein-9b-fp8.safetensors").exists());
+    assert!(!dir.path().join("models").join("diffusion_models").join("flux3_image_klein_base_int8_convrot.safetensors").exists());
     // Cancel just closes the question.
     let (mut other, _dir2, _a, _s) = gated_app();
     draw(&mut other, &c);
@@ -558,7 +558,7 @@ fn the_access_token_is_the_fallback_and_a_token_on_this_pc_is_never_used_unasked
     save_token(&mut app);
     assert!(saved.lock().unwrap().contains("hf_pasted") && !app.ui.ai_setup.token_open);
     draw(&mut app, &c);
-    assert_eq!(access_of(&app, "flux-2-klein-9b"), "ready");
+    assert_eq!(access_of(&app, "flux-3-klein"), "ready");
     assert_eq!(text(app.ui.ai_setup.hf.as_ref().unwrap(), "/via"), "token");
     install_clicked(&mut app);
     assert!(app.ui.ai_setup.ask.is_none() && running(&app), "ready: Install installs at once");

@@ -1455,7 +1455,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     // With the server's files read, the list marks the models whose file it doesn't have.
     let listing: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_value(f[FILES].clone()).unwrap();
     let lost: Vec<&str> = models.iter().filter(|m| !photocraft_aigen::detect::on_server(&listing, m)).map(|m| m.id.as_str()).collect();
-    assert_eq!(lost, ["qwen-image-2-1", "krea-2-turbo", "flux-2-klein-9b", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]);
+    assert_eq!(lost, ["qwen-image-2-1", "krea-2-turbo", "flux-3-klein", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]);
     for x in Filter::ALL {
         f.insert(FILTER.into(), json!(x.key()));
         draw_section(&mut f);

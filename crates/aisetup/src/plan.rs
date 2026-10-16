@@ -495,13 +495,13 @@ mod tests {
         let recommended: Vec<&str> = m.preset("recommended").iter().map(String::as_str).collect();
         let p = plan(m, &choices(&recommended), &Fake::default()).unwrap();
         assert_eq!(p.installable(), ["qwen-image-2-1", "z-image-turbo"]);
-        let klein = p.models.iter().find(|x| x.id == "flux-2-klein-9b").unwrap();
+        let klein = p.models.iter().find(|x| x.id == "flux-3-klein").unwrap();
         assert!(klein.skipped.as_deref().unwrap().contains("Hugging Face"));
         // Its encoder and VAE are not downloaded for nothing either.
         let skipped: Vec<String> = p.steps.iter().filter(|s| s.skipped.is_some()).map(|s| s.step.key()).collect();
         assert_eq!(
             skipped,
-            ["file:diffusion_models/flux-2-klein-9b-fp8.safetensors", "file:text_encoders/qwen_3_8b_fp8mixed.safetensors", "file:vae/flux2-vae.safetensors"]
+            ["file:diffusion_models/flux3_image_klein_base_int8_convrot.safetensors", "file:text_encoders/qwen3vl_4b_int8_convrot.safetensors", "file:vae/flux2-vae.safetensors"]
         );
         assert_eq!(p.models_bytes, m.download_bytes(&p.installable()));
         // With Ideogram 4 chosen too, the VAE they share is wanted after all.
@@ -514,7 +514,7 @@ mod tests {
         assert!(p.steps.iter().all(|s| s.skipped.is_none()) && p.installable().len() == 3);
         // Signed in, the gated file comes first: it starts while the sign-in is fresh.
         let first = p.steps.iter().find(|s| matches!(s.step, Step::FetchFile(_))).unwrap();
-        assert_eq!(first.step.key(), "file:diffusion_models/flux-2-klein-9b-fp8.safetensors");
+        assert_eq!(first.step.key(), "file:diffusion_models/flux3_image_klein_base_int8_convrot.safetensors");
         assert_eq!(p.models_bytes, m.download_bytes(m.preset("recommended")));
     }
 

@@ -172,7 +172,7 @@ impl Fetch for FakeFiles {
 fn each_gated_model_is_sign_in_then_licence_then_ready() {
     let m = Manifest::bundled().unwrap();
     let recommended = m.presets["recommended"].clone();
-    assert_eq!(gated(m, &recommended).iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["FLUX.2 Klein 9B"]);
+    assert_eq!(gated(m, &recommended).iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["FLUX.3 Klein"]);
     let state = |status: u16, code: Option<&'static str>, token: Option<&str>| {
         let files = FakeFiles::new(status, code);
         let found = access(m, &recommended, token, &files).unwrap();
@@ -196,7 +196,7 @@ fn each_gated_model_is_sign_in_then_licence_then_ready() {
     // The ungated ones are not asked about at all.
     assert!(access(m, &["qwen-image-2-1".to_string(), "no-such".to_string()], Some("hf_x"), &FakeFiles::new(200, None)).unwrap().is_empty());
     let klein = &access(m, &recommended, None, &FakeFiles::new(200, None)).unwrap()[0];
-    assert!(klein.page.starts_with("https://huggingface.co/") && klein.licence.contains("Non-Commercial"), "{klein:?}");
+    assert!(klein.page.starts_with("https://huggingface.co/") && klein.licence.contains("Kommunity"), "{klein:?}");
 }
 
 /// The browser coming back to the sign-in's listener with `target`; what the page said.

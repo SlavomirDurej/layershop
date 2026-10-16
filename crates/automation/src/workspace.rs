@@ -537,7 +537,7 @@ mod tests {
             ("ai.setup.status", json!({})),
             ("ai.setup.plan", json!({"models": ["qwen-image-2-1"]})),
             ("ai.setup.hfStatus", json!({})),
-            ("ai.setup.hfAccess", json!({"models": ["flux-2-klein-9b"]})),
+            ("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})),
         ] {
             assert!(authorize_engine_command(id, &params).is_ok(), "{id} {params}");
             assert!(authorize_desktop_engine_command(id, &params).is_ok(), "{id} {params}");

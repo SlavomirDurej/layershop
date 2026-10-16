@@ -37,7 +37,7 @@ fn contents(key: &str) -> Vec<u8> {
 /// The real manifest cut down to three models, with files small enough to serve from memory.
 fn manifest(archive: &[u8]) -> Manifest {
     let mut m = Manifest::bundled().unwrap().clone();
-    m.models.retain(|x| ["qwen-image-2-1", "z-image-turbo", "flux-2-klein-9b"].contains(&x.id.as_str()));
+    m.models.retain(|x| ["qwen-image-2-1", "z-image-turbo", "flux-3-klein"].contains(&x.id.as_str()));
     let used: Vec<String> = m.models.iter().flat_map(|x| x.files.clone()).collect();
     m.files.retain(|key, _| used.contains(key));
     for (key, file) in &mut m.files {
@@ -376,21 +376,21 @@ fn adding_a_model_later_downloads_only_its_own_files_and_keeps_the_port() {
 #[test]
 fn a_gated_model_is_left_out_and_the_rest_installs() {
     let rig = Rig::new();
-    let klein = "diffusion_models/flux-2-klein-9b-fp8.safetensors";
+    let klein = "diffusion_models/flux3_image_klein_base_int8_convrot.safetensors";
     rig.net.rule(&rig.manifest, klein, Net::Gated);
     // No token: the plan leaves the model out, and nothing of it is asked for.
-    let (result, progress) = rig.run(&["qwen-image-2-1", "flux-2-klein-9b"]);
+    let (result, progress) = rig.run(&["qwen-image-2-1", "flux-3-klein"]);
     let done = result.unwrap();
     assert_eq!(done.installed, ["qwen-image-2-1"]);
     assert_eq!(
         done.skipped.iter().map(|m| (m.id.as_str(), m.skipped.as_deref().unwrap())).collect::<Vec<_>>(),
-        [("flux-2-klein-9b", "needs a Hugging Face sign-in")]
+        [("flux-3-klein", "needs a Hugging Face sign-in")]
     );
-    assert_eq!(rig.net.served(&rig.manifest, klein) + rig.net.served(&rig.manifest, "text_encoders/qwen_3_8b_fp8mixed.safetensors"), 0);
+    assert_eq!(rig.net.served(&rig.manifest, klein) + rig.net.served(&rig.manifest, "text_encoders/qwen3vl_4b_int8_convrot.safetensors"), 0);
     assert_eq!(progress.steps.iter().filter(|s| s.state == StepState::Skipped).count(), 3);
     assert!(done.test.is_some());
     // A token the model's licence was not accepted with: refused by the host, still not fatal.
-    let mut job = rig.job(Choices { token: true, ..rig.choices(&["qwen-image-2-1", "flux-2-klein-9b"]) });
+    let mut job = rig.job(Choices { token: true, ..rig.choices(&["qwen-image-2-1", "flux-3-klein"]) });
     job.token = Some("hf_wrong".into());
     let (result, progress) = rig.run_job(job, plenty);
     let done = result.unwrap();
@@ -399,10 +399,10 @@ fn a_gated_model_is_left_out_and_the_rest_installs() {
     let refused = progress.steps.iter().find(|s| s.key == format!("file:{klein}")).unwrap();
     assert_eq!(refused.state, StepState::Skipped);
     // With access: it installs, and the token went to the gated file only.
-    let mut job = rig.job(Choices { token: true, ..rig.choices(&["qwen-image-2-1", "flux-2-klein-9b"]) });
+    let mut job = rig.job(Choices { token: true, ..rig.choices(&["qwen-image-2-1", "flux-3-klein"]) });
     job.token = Some("hf_ok".into());
     let done = rig.run_job(job, plenty).0.unwrap();
-    assert_eq!(done.installed, ["qwen-image-2-1", "flux-2-klein-9b"]);
+    assert_eq!(done.installed, ["qwen-image-2-1", "flux-3-klein"]);
     let tokens = rig.net.tokens.lock().unwrap();
     assert!(tokens.iter().all(|(url, token)| token.is_none() || *url == rig.manifest.files[klein].url), "the token went to a file that did not need it");
 }

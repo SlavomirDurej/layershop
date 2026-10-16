@@ -319,15 +319,15 @@ mod tests {
         let m = bundled();
         let gb = |ids: &[String]| (m.download_bytes(ids) as f64 / 1e9 * 10.0).round() / 10.0;
         assert_eq!(gb(m.preset("starter")), 18.5);
-        assert_eq!(gb(m.preset("recommended")), 51.5);
-        // The per-model figures of the plan add up to 176.6; the bytes themselves to 176.5.
-        assert_eq!(gb(m.preset("everything")), 176.5);
+        assert_eq!(gb(m.preset("recommended")), 44.1);
+        // FLUX.3 Klein (2026-10-16) is 7.4 GB less than the FLUX.2 Klein 9B it replaced.
+        assert_eq!(gb(m.preset("everything")), 169.1);
         assert_eq!(m.preset("everything").len(), m.models.len());
         assert!(m.preset("nope").is_empty());
         for (id, alone) in [
             ("qwen-image-2-1", 18.5),
             ("z-image-turbo", 14.6),
-            ("flux-2-klein-9b", 18.4),
+            ("flux-3-klein", 11.0),
             ("krea-2-turbo", 19.0),
             ("ming-image-0-1-design", 25.9),
             ("ernie-image-turbo", 24.1),
@@ -338,9 +338,9 @@ mod tests {
         // Ideogram 4 shares Qwen Image 2.1's text encoder and FLUX.2's VAE: beside them it adds
         // only its two diffusion models. HiDream O1's refiner shares Z-Image Turbo's files.
         let extra = |id: &str, have: &[&str]| (m.extra_bytes(id, &ids(have)) as f64 / 1e9 * 10.0).round() / 10.0;
-        assert_eq!(extra("ideogram-4", &["qwen-image-2-1", "flux-2-klein-9b"]), 18.6);
+        assert_eq!(extra("ideogram-4", &["qwen-image-2-1", "flux-3-klein"]), 18.6);
         assert_eq!(extra("hidream-o1", &["z-image-turbo"]), 37.7);
-        assert_eq!(extra("ernie-image-turbo", &["flux-2-klein-9b"]), 23.8);
+        assert_eq!(extra("ernie-image-turbo", &["flux-3-klein"]), 23.8);
         assert_eq!(extra("qwen-image-2-1", &["qwen-image-2-1"]), 0.0);
         assert_eq!(m.download_bytes(&ids(&["no-such-model"])), 0);
     }

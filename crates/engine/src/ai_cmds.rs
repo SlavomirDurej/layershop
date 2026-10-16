@@ -900,7 +900,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let context = number("context", DEFAULT_CONTEXT, 4.0)?;
     if edit && !model.can_edit() {
         return Err(EngineError::Other(format!(
-            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.2 or a cloud model; the panel's Edit tab lists them)",
+            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.3, FLUX.2 or a cloud model; the panel's Edit tab lists them)",
             model.name
         )));
     }

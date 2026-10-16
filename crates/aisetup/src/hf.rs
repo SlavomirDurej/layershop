@@ -1,4 +1,4 @@
-//! Hugging Face, for the gated models (today FLUX.2 Klein 9B): a model whose maker lets it be
+//! Hugging Face, for the gated models (today FLUX.3 Klein): a model whose maker lets it be
 //! downloaded only by someone who accepted its licence, signed in.
 //!
 //! Two steps, both the user's, in their browser:

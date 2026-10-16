@@ -52,6 +52,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::ZImage => "lumina2",
         Family::Krea2 => "krea2",
         Family::Flux2 | Family::Ernie => "flux2",
+        Family::Flux3 => "flux3",
         Family::Ideogram4 => "ideogram4",
         // Ming Image's encoder is recognised by its weights; its templates load it as this type.
         Family::QwenImage | Family::QwenImage21 | Family::MingImage | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
@@ -62,7 +63,7 @@ fn clip_type(family: Family) -> &'static str {
 fn latent_node(family: Family) -> &'static str {
     match family {
         Family::ZImage | Family::Flux1 | Family::HidreamI1 | Family::QwenImage => "EmptySD3LatentImage",
-        Family::Flux2 | Family::Ernie | Family::Ideogram4 => "EmptyFlux2LatentImage",
+        Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 => "EmptyFlux2LatentImage",
         Family::HidreamO1 => "EmptyHiDreamO1LatentImage",
         _ => "EmptyLatentImage",
     }
@@ -168,7 +169,8 @@ pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Resu
 ///   guidance; 2511 reads them by index (ComfyUI's templates).
 /// - Ming Image: its encoder takes the pictures with the prompt, and the model is sampled with
 ///   the LCM sampler of ComfyUI's Image Edit template.
-/// - FLUX.2: each picture is a reference latent on the conditioning.
+/// - FLUX.3 and FLUX.2: each picture is a reference latent on the conditioning (what FLUX.3's
+///   Set Reference Multi Latent node does for all of them at once).
 pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     build_edit(model, job, edit)
 }
@@ -280,7 +282,7 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
                     g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
                 }
                 _ => {
-                    if f == Family::Flux2 {
+                    if matches!(f, Family::Flux3 | Family::Flux2) {
                         positive = g.node("ReferenceLatent", json!({"conditioning": positive, "latent": encoded}));
                         negative = g.node("ReferenceLatent", json!({"conditioning": negative, "latent": encoded}));
                     }
@@ -490,7 +492,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
     if !f.edits() {
         return Err(Error::Config(format!(
-            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
+            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.3 or FLUX.2) on the Edit tab"
         )));
     }
     if let Some(why) = crate::detect::problem(model) {
@@ -987,6 +989,36 @@ mod tests {
     }
 
     #[test]
+    fn flux3_loads_as_its_templates_do_and_edits_with_reference_latents() {
+        let m = Family::Flux3.preset();
+        let w = workflow(&m, &job()).unwrap();
+        assert_well_formed(&w);
+        let c = classes(&w);
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["type"], "flux3");
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["clip_name"], "qwen3vl_4b_int8_convrot.safetensors");
+        assert_eq!(node(&w, "UNETLoader")["inputs"]["unet_name"], "flux3_image_klein_base_int8_convrot.safetensors");
+        // The templates' plain sampler: no FLUX.2 scheduler, no distilled guidance, no shift.
+        let k = node(&w, "KSampler");
+        assert_eq!((&k["inputs"]["steps"], &k["inputs"]["cfg"], &k["inputs"]["sampler_name"]), (&json!(50), &json!(3.5), &json!("euler")));
+        assert!(c.iter().any(|x| x == "EmptyFlux2LatentImage"));
+        for absent in ["Flux2Scheduler", "FluxGuidance", "ModelSamplingAuraFlow", "ReferenceLatent"] {
+            assert!(!c.iter().any(|x| x == absent), "{absent}: {c:?}");
+        }
+        // CFG above 1: the negative prompt is encoded.
+        assert_eq!(c.iter().filter(|x| *x == "CLIPTextEncode").count(), 2);
+        // Editing: the picture is a reference latent on both sides of the guidance.
+        let w = edit_workflow(&m, &job(), &Edit { image: "src.png", references: &["ref.png".to_string()] }).unwrap();
+        assert_well_formed(&w);
+        let c = classes(&w);
+        assert_eq!((c.iter().filter(|x| *x == "ReferenceLatent").count(), c.iter().filter(|x| *x == "VAEEncode").count()), (4, 2));
+        let k = node(&w, "KSampler");
+        for side in ["positive", "negative"] {
+            assert_eq!(w[k["inputs"][side][0].as_str().unwrap()]["class_type"], "ReferenceLatent", "{side}");
+        }
+        assert!(m.can_generate() && m.can_edit() && m.can_inpaint());
+    }
+
+    #[test]
     fn qwen_image_2_1_encodes_with_its_own_node() {
         let w = workflow(&Family::QwenImage21.preset(), &job()).unwrap();
         let c = classes(&w);
@@ -1258,7 +1290,8 @@ mod tests {
             // The mask is the second output of its Load Image, used as it is (it may be soft).
             assert_eq!(masked["inputs"]["mask"][1], 1, "{f:?}");
             assert_eq!(linked(&masked["inputs"]["mask"])["inputs"]["image"], "mask.png");
-            assert_eq!(c.iter().filter(|x| *x == "ReferenceLatent").count(), if f == Family::Flux2 { 2 } else { 0 }, "{f:?}");
+            let references = if matches!(f, Family::Flux3 | Family::Flux2) { 2 } else { 0 };
+            assert_eq!(c.iter().filter(|x| *x == "ReferenceLatent").count(), references, "{f:?}");
             assert_eq!(linked(&node(&w, "VAEEncode")["inputs"]["pixels"])["inputs"]["image"], "src.png");
             assert!(check(&m, true).is_ok() && (f.inpaint_only() || check(&m, false).is_ok()));
         }

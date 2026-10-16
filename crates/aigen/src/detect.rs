@@ -47,6 +47,8 @@ fn family_of(file: &str) -> Option<Family> {
         Family::ZImage
     } else if n.contains("krea2") || n.contains("krea-2") || n.contains("krea_2") {
         Family::Krea2
+    } else if n.contains("flux3") || n.contains("flux-3") || n.contains("flux_3") {
+        Family::Flux3
     } else if n.contains("flux2") || n.contains("flux-2") || n.contains("flux_2") {
         Family::Flux2
     } else if n.contains("flux1") || n.contains("flux-1") || n.contains("flux_1") {
@@ -205,6 +207,10 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::ZImage if !turbo => (m.steps, m.cfg, m.sampler) = (30, 4.0, "euler".into()),
             // Two megapixels: what the turbo model was judged at (2026-10-13).
             Family::Ernie if turbo => (m.steps, m.cfg, m.megapixels) = (8, 1.0, 2.0),
+            // The step-distilled Klein (`…_klein_sd_…`): its templates' 16 steps without guidance.
+            // `flux3_image_klein_…` without "base" is the base model under another name (the
+            // same file in BFL's repository).
+            Family::Flux3 if n.contains("klein_sd") || n.contains("klein-sd") => (m.steps, m.cfg) = (16, 1.0),
             Family::Flux2 if n.contains("klein") => {
                 // The "base" Klein is the undistilled one; the other renders in four steps.
                 if !n.contains("base") {
@@ -231,7 +237,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         }
         let clip_needles: &[&str] = match family {
             Family::ZImage => &["qwen_3_4b"],
-            Family::Krea2 => &["qwen3vl_4b"],
+            Family::Krea2 | Family::Flux3 => &["qwen3vl_4b"],
             Family::Flux2 if n.contains("klein") => &["qwen_3_8b"],
             Family::Flux2 => &["mistral_3_small_flux2", "mistral"],
             Family::Flux1 | Family::Flux1Fill | Family::HidreamI1 => &["clip_l"],
@@ -256,7 +262,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         let vae_needles: &[&str] = match family {
             Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
             Family::MingImage => &["ming_image_vae", "ming_image"],
-            Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
+            Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
             Family::Krea2 | Family::QwenImage | Family::QwenEdit => &["qwen_image_vae"],
             _ => &["ae.safetensors"],
         };
@@ -338,6 +344,8 @@ mod tests {
                     "flux-2-klein-9b-fp8.safetensors",
                     "flux-2-klein-base-9b-fp8.safetensors",
                     "flux2_dev_fp8mixed.safetensors",
+                    "flux3_image_klein_base_int8_convrot.safetensors",
+                    "flux3_image_klein_sd_int8_convrot.safetensors",
                     "flux1-dev.safetensors",
                     "ernie-image-turbo.safetensors",
                     "hidream_i1_full_fp8.safetensors",
@@ -357,6 +365,7 @@ mod tests {
                 "text_encoders".to_string(),
                 v(&[
                     "qwen3vl_8b_int8_convrot.safetensors",
+                    "qwen3vl_4b_int8_convrot.safetensors",
                     "qwen_2.5_vl_7b_fp8_scaled.safetensors",
                     "qwen_3_4b.safetensors",
                     "qwen_3_8b_fp8mixed.safetensors",
@@ -384,7 +393,7 @@ mod tests {
     fn recognises_image_models_only() {
         let found = detect(&folders());
         let names: Vec<&str> = found.iter().map(|m| m.unet.as_str()).filter(|u| !u.is_empty()).collect();
-        assert_eq!(names.len(), 14, "{names:?}");
+        assert_eq!(names.len(), 16, "{names:?}");
         for skipped in ["kontext", "ltx", "hunyuan", "mystery", "unconditional", "layer"] {
             assert!(!names.iter().any(|n| n.contains(skipped)), "{skipped} in {names:?}");
         }
@@ -491,6 +500,22 @@ mod tests {
         assert_eq!(by("flux-2-klein-base-9b-fp8.safetensors").cfg, 5.0);
         let dev = by("flux2_dev_fp8mixed.safetensors");
         assert_eq!((dev.guidance, dev.clip.as_str()), (4.0, "mistral_3_small_flux2_bf16.safetensors"));
+        // FLUX.3 Klein is not FLUX.2: its own architecture and encoder, the FLUX.2 VAE. The base
+        // model samples as its template does; the step-distilled one in 16 steps without guidance.
+        let base = by("flux3_image_klein_base_int8_convrot.safetensors");
+        assert_eq!(
+            (base.family, base.clip.as_str(), base.vae.as_str(), base.steps, base.cfg),
+            (Family::Flux3, "qwen3vl_4b_int8_convrot.safetensors", "flux2-vae.safetensors", 50, 3.5)
+        );
+        assert!(base.can_generate() && base.can_edit() && base.can_inpaint() && problem(base).is_none());
+        let sd = by("flux3_image_klein_sd_int8_convrot.safetensors");
+        assert_eq!((sd.family, sd.steps, sd.cfg, sd.name.as_str()), (Family::Flux3, 16, 1.0, "flux3 image klein sd int8 convrot"));
+        // Without "base" in its name it is still the base model.
+        let mut f = folders();
+        f.get_mut("diffusion_models").unwrap().push("flux3_image_klein_nvfp4.safetensors".into());
+        let found = detect(&f);
+        let plain = found.iter().find(|m| m.unet == "flux3_image_klein_nvfp4.safetensors").unwrap();
+        assert_eq!((plain.family, plain.steps, plain.cfg), (Family::Flux3, 50, 3.5));
         let ernie = by("ernie-image-turbo.safetensors");
         assert_eq!((ernie.steps, ernie.cfg, ernie.megapixels), (8, 1.0, 2.0));
         assert_eq!(by("ideogram4_fp8_scaled.safetensors").cfg, 5.0);

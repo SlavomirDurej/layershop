@@ -458,10 +458,10 @@ mod native {
         assert!(!rig.s.ai.keys_json().contains("hf_secret123"));
     }
 
-    /// The bundled manifest's FLUX.2 Klein 9B (gated) and Qwen Image 2.1, their files small.
+    /// The bundled manifest's FLUX.3 Klein (gated) and Qwen Image 2.1, their files small.
     fn gated_manifest() -> Manifest {
         let mut m = Manifest::bundled().unwrap().clone();
-        m.models.retain(|x| ["qwen-image-2-1", "flux-2-klein-9b"].contains(&x.id.as_str()));
+        m.models.retain(|x| ["qwen-image-2-1", "flux-3-klein"].contains(&x.id.as_str()));
         let used: Vec<String> = m.models.iter().flat_map(|x| x.files.clone()).collect();
         m.files.retain(|key, _| used.contains(key));
         for (key, file) in &mut m.files {
@@ -495,7 +495,7 @@ mod native {
         use photocraft_aisetup::hf::{self, Credentials};
         let mut rig = Rig::new();
         let manifest = Arc::new(gated_manifest());
-        let klein_url = manifest.files["diffusion_models/flux-2-klein-9b-fp8.safetensors"].url.clone();
+        let klein_url = manifest.files["diffusion_models/flux3_image_klein_base_int8_convrot.safetensors"].url.clone();
         let files = manifest.files.iter().map(|(key, f)| (f.url.clone(), contents(key))).collect();
         let net = Arc::new(FakeNet { files, ..FakeNet::default() });
         net.gated.lock().unwrap().insert(klein_url, "hf_oauth_first".into());
@@ -514,10 +514,10 @@ mod native {
         if let Some(env) = rig.s.ai_setup.env.as_mut() {
             env.hf_client_id = "test-client-id".into();
         }
-        let models = json!({"models": ["qwen-image-2-1", "flux-2-klein-9b"]});
+        let models = json!({"models": ["qwen-image-2-1", "flux-3-klein"]});
         // Not signed in: the plan says Klein needs it, and access says sign in.
         let plan = rig.run("ai.setup.plan", models.clone()).unwrap();
-        assert_eq!(plan["needsSignIn"][0]["id"], "flux-2-klein-9b");
+        assert_eq!(plan["needsSignIn"][0]["id"], "flux-3-klein");
         assert!(plan["needsSignIn"][0]["page"].as_str().unwrap().starts_with("https://huggingface.co/"));
         let access = rig.run("ai.setup.hfAccess", models.clone()).unwrap();
         assert_eq!((access["models"][0]["access"].as_str(), access["signedIn"].as_bool()), (Some("signIn"), Some(false)));
@@ -588,7 +588,7 @@ mod native {
         // A sign-in Hugging Face won't renew any more is signed out, and says why.
         rig.s.ai.set_hf(&Credentials { expires_at: 1, ..renewed });
         hub.token_answer.lock().unwrap().clear();
-        let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-2-klein-9b"]})).unwrap();
+        let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})).unwrap();
         assert_eq!(access["models"][0]["access"], "signIn");
         assert!(access["note"].as_str().unwrap().contains("Sign in again") && !rig.s.ai.hf().signed_in(), "{access}");
     }
