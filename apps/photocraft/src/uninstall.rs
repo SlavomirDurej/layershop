@@ -8,10 +8,10 @@
 //!   both in `%LOCALAPPDATA%\LayerShop` unless the user chose other folders (the setup's record,
 //!   `ai-setup.json`, says which);
 //! - **the settings**: preferences, presets, API keys and the Hugging Face sign-in, recovery
-//!   files, in `%APPDATA%\Photocraft`.
+//!   files, in `%APPDATA%\LayerShop`.
 //!
-//! A small window asks, one box each, with its size (engine and models ticked, settings not), and
-//! removes what is ticked. Model files in a folder the user chose go only where the setup put
+//! A small window asks, one box each, with its size (engine and models selected, settings not),
+//! and removes what is selected. Model files in a folder the user chose go only where the setup put
 //! them (the same code as Remove Local AI in the app), and models downloaded into the user's own
 //! ComfyUI are never touched. With the settings kept, they are told the engine is gone.
 //!
@@ -127,10 +127,10 @@ fn inside(path: &Path, folder: &Path) -> bool {
 }
 
 /// Look at what is there: `local` and `roaming` are the user's `%LOCALAPPDATA%` and `%APPDATA%`;
-/// `name` the product's folder name in the first (`LayerShop`).
+/// `name` the product's folder name in each (`LayerShop`).
 pub fn survey(local: Option<&Path>, roaming: Option<&Path>, name: &str) -> Survey {
     let mut out = Survey::default();
-    let settings = roaming.map(|r| r.join("Photocraft")).filter(|d| d.is_dir());
+    let settings = roaming.map(|r| r.join(name)).filter(|d| d.is_dir());
     out.record = settings.as_ref().map(|d| state::load(&d.join("ai-setup.json"))).unwrap_or_default();
     out.settings = settings.map(|path| Item { bytes: size_of(&path), path });
     let home = local.map(|l| l.join(name)).filter(|h| h.is_dir());
@@ -181,7 +181,7 @@ pub struct Choice {
     pub settings: bool,
 }
 
-/// Remove what `choice` ticks. Returns what could not be removed (files in use, say), one line
+/// Remove what `choice` selects. Returns what could not be removed (files in use, say), one line
 /// each.
 pub fn remove(found: &Survey, choice: Choice) -> Vec<String> {
     let mut failed = Vec::new();
@@ -334,7 +334,8 @@ fn ask_in_a_window(found: Survey) -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(format!("Uninstall {name}"))
-            .with_inner_size([560.0, 420.0])
+            // Fitted to the content on the first frame (`Dialog::content_height`).
+            .with_inner_size([WIDTH, 340.0])
             .with_resizable(false)
             .with_minimize_button(false)
             .with_maximize_button(false)
@@ -360,18 +361,26 @@ pub struct Dialog {
     pub choice: Choice,
     /// After removing: what could not be removed (empty: all went), or `None` before.
     pub done: Option<Vec<String>>,
-    /// The room the ticked items took: what removing them freed.
+    /// The room the selected items took: what removing them freed.
     pub freed: u64,
+    /// The height the content took when last drawn: the window is fitted to it.
+    pub content_height: f32,
+    /// The window height last asked for, so it is asked once.
+    asked_height: f32,
 }
+
+/// The window's width, and the room around its content.
+const WIDTH: f32 = 560.0;
+const MARGIN: i8 = 20;
 
 impl Dialog {
     pub fn new(found: Survey) -> Self {
         let choice = Choice { engine: !found.engine.is_empty(), models: !found.models.is_empty(), settings: false };
-        Self { found, choice, done: None, freed: 0 }
+        Self { found, choice, done: None, freed: 0, content_height: 0.0, asked_height: 0.0 }
     }
 
-    /// Remove what is ticked, and keep what came of it for the window to say.
-    pub fn remove_ticked(&mut self) {
+    /// Remove what is selected, and keep what came of it for the window to say.
+    pub fn remove_selected(&mut self) {
         let c = self.choice;
         self.freed = [(c.engine, self.found.engine_bytes()), (c.models, self.found.models_bytes()), (c.settings, self.found.settings.as_ref().map_or(0, |s| s.bytes))]
             .into_iter()
@@ -382,7 +391,7 @@ impl Dialog {
     }
 
     /// What removing came to, in the middle of the window: a mark, a title, a line, Close.
-    fn draw_done(&self, ui: &mut egui::Ui, failed: &[String]) -> bool {
+    fn draw_done(&mut self, ui: &mut egui::Ui, failed: &[String]) -> bool {
         use photocraft_ui_egui::widgets;
         let t = photocraft_ui_egui::theme::Tokens::get(ui.ctx());
         let (title, text) = if failed.is_empty() {
@@ -402,6 +411,8 @@ impl Dialog {
         };
         // Centred top to bottom: the block's height is estimated, and the room above it is half of what is left.
         let block = 170.0 + if failed.is_empty() { 0.0 } else { 40.0 + 18.0 * failed.len().min(10) as f32 };
+        // The window grows when the list needs more room than the question had, and never shrinks.
+        self.content_height = self.content_height.max(block + 16.0);
         ui.add_space(((ui.available_height() - block) / 2.0).max(8.0));
         let mut close = false;
         ui.vertical_centered(|ui| {
@@ -430,16 +441,20 @@ impl Dialog {
         use photocraft_ui_egui::widgets;
         let t = photocraft_ui_egui::theme::Tokens::get(ui.ctx());
         let name = photocraft_ui_egui::brand::NAME;
-        if let Some(failed) = &self.done {
-            return self.draw_done(ui, failed);
+        if let Some(failed) = self.done.clone() {
+            return self.draw_done(ui, &failed);
         }
         let mut close = false;
+        let top = ui.cursor().top();
         ui.add_space(6.0);
         ui.label(egui::RichText::new(format!("Uninstall {name}")).size(18.0).strong().color(t.text));
         ui.add_space(6.0);
         ui.add(
             egui::Label::new(
-                egui::RichText::new(format!("{name} is being removed. These stay on this PC unless you tick them:")).color(t.text_dim),
+                egui::RichText::new(format!(
+                    "{name} is being uninstalled. The following items will be kept on this PC unless they are selected for removal:"
+                ))
+                .color(t.text_dim),
             )
             .wrap(),
         );
@@ -461,33 +476,37 @@ impl Dialog {
             ui.add_space(8.0);
         };
         if !self.found.engine.is_empty() {
-            row(ui, &mut self.choice.engine, "Local AI engine (ComfyUI with its own Python)", &self.found.engine.clone(), "");
+            row(ui, &mut self.choice.engine, "Local AI engine (ComfyUI and its bundled Python)", &self.found.engine.clone(), "");
         }
         if !self.found.models.is_empty() {
-            row(ui, &mut self.choice.models, "AI models it downloaded", &self.found.models.clone(), "");
+            row(ui, &mut self.choice.models, "Downloaded AI models", &self.found.models.clone(), "");
         }
         if let Some(settings) = self.found.settings.clone() {
-            row(ui, &mut self.choice.settings, "Settings, presets, API keys and the Hugging Face sign-in", std::slice::from_ref(&settings), "");
+            row(ui, &mut self.choice.settings, "Settings, presets, API keys and Hugging Face sign-in", std::slice::from_ref(&settings), "");
         }
         if let Some(own) = &self.found.own_comfyui {
             ui.add(
                 egui::Label::new(
-                    egui::RichText::new(format!("Models downloaded into your own ComfyUI ({}) are left for it.", own.display())).size(11.0).color(t.text_faint),
+                    egui::RichText::new(format!("Models downloaded into your existing ComfyUI installation ({}) are not removed.", own.display()))
+                        .size(11.0)
+                        .color(t.text_faint),
                 )
                 .wrap(),
             );
             ui.add_space(8.0);
         }
         ui.add_space(6.0);
-        ui.horizontal(|ui| {
+        let buttons = ui.horizontal(|ui| {
             let any = self.choice.engine || self.choice.models || self.choice.settings;
-            if ui.add_enabled_ui(any, |ui| widgets::primary_button(ui, "Remove Ticked", 120.0)).inner.clicked() {
-                self.remove_ticked();
+            if ui.add_enabled_ui(any, |ui| widgets::primary_button(ui, "Remove Selected", 130.0)).inner.clicked() {
+                self.remove_selected();
             }
-            if widgets::secondary_button(ui, "Keep Everything", 120.0).clicked() {
+            if widgets::secondary_button(ui, "Keep Everything", 130.0).clicked() {
                 close = true;
             }
         });
+        // To the buttons' foot (the panel's own rect fills the window, whatever its content).
+        self.content_height = buttons.response.rect.bottom() - top;
         close
     }
 }
@@ -495,7 +514,13 @@ impl Dialog {
 impl eframe::App for Dialog {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let t = photocraft_ui_egui::theme::Tokens::get(ui.ctx());
-        let close = egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.card).inner_margin(20)).show(ui, |ui| self.draw(ui)).inner;
+        let close = egui::CentralPanel::default().frame(egui::Frame::NONE.fill(t.card).inner_margin(MARGIN)).show(ui, |ui| self.draw(ui)).inner;
+        // The window fits its content: no empty band below the buttons.
+        let height = (self.content_height + 2.0 * f32::from(MARGIN)).ceil();
+        if self.content_height > 0.0 && height != self.asked_height {
+            self.asked_height = height;
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(WIDTH, height)));
+        }
         if close {
             ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
         }
@@ -551,13 +576,13 @@ mod tests {
     }
 
     #[test]
-    fn the_engine_and_models_go_as_ticked_and_the_settings_stay() {
+    fn the_engine_and_models_go_as_selected_and_the_settings_stay() {
         let s = Scratch::new("default");
         let (local, roaming) = (s.0.join("Local"), s.0.join("Roaming"));
         let home = local.join("LayerShop");
         write(&home.join("engine/0.39.0/python_embeded/python.exe"), 3000);
         write(&home.join("models/diffusion_models/a.safetensors"), 5000);
-        write(&roaming.join("Photocraft/preferences.json"), 20);
+        write(&roaming.join("LayerShop/preferences.json"), 20);
         // A record pointing at the default folders: counted once, also through "\."-ended paths.
         let record = SetupState {
             phase: state::Phase::Done,
@@ -569,14 +594,14 @@ mod tests {
             },
             ..SetupState::default()
         };
-        state::save(&roaming.join("Photocraft/ai-setup.json"), &record).unwrap();
+        state::save(&roaming.join("LayerShop/ai-setup.json"), &record).unwrap();
         let dotted = parse([std::ffi::OsString::from("--local"), local.join(".").into_os_string(), "--roaming".into(), roaming.join(".").into_os_string()]);
         let found = survey(dotted.local.as_deref(), dotted.roaming.as_deref(), "LayerShop");
         assert_eq!((found.engine.len(), found.models.len()), (1, 1), "{found:?}");
         let found = survey(Some(&local), Some(&roaming), "LayerShop");
         assert_eq!((found.engine_bytes(), found.models_bytes()), (3000, 5000));
         assert!(found.settings.as_ref().is_some_and(|i| i.bytes >= 20));
-        // Ticked by default: engine and models, not the settings.
+        // Selected by default: engine and models, not the settings.
         let dialog = Dialog::new(found.clone());
         assert_eq!(dialog.choice, Choice { engine: true, models: true, settings: false });
         // The engine alone: the models and the home stay.
@@ -585,11 +610,11 @@ mod tests {
         // The models too: the home goes with them (it was LayerShop's); the settings stay.
         let found = survey(Some(&local), Some(&roaming), "LayerShop");
         assert!(remove(&found, dialog.choice).is_empty());
-        assert!(!home.exists() && roaming.join("Photocraft/preferences.json").is_file());
-        // And the settings, when ticked.
+        assert!(!home.exists() && roaming.join("LayerShop/preferences.json").is_file());
+        // And the settings, when selected.
         let found = survey(Some(&local), Some(&roaming), "LayerShop");
         assert!(remove(&found, Choice { settings: true, ..Choice::default() }).is_empty());
-        assert!(!roaming.join("Photocraft").exists());
+        assert!(!roaming.join("LayerShop").exists());
     }
 
     #[test]
@@ -624,7 +649,7 @@ mod tests {
             installed: vec!["qwen-image-2-1".into()],
             ..SetupState::default()
         };
-        state::save(&roaming.join("Photocraft/ai-setup.json"), &record).unwrap();
+        state::save(&roaming.join("LayerShop/ai-setup.json"), &record).unwrap();
         // Settings that start that engine.
         let mut session = photocraft_engine::Session::new();
         session.edit_prefs(|p| {
@@ -632,7 +657,7 @@ mod tests {
             p.integrations.ai.comfy_launch.python = root.join("python_embeded/python.exe").to_string_lossy().into_owned();
             p.integrations.ai.comfy_launch.folder = root.to_string_lossy().into_owned();
         });
-        std::fs::write(roaming.join("Photocraft/preferences.json"), session.prefs_to_json()).unwrap();
+        std::fs::write(roaming.join("LayerShop/preferences.json"), session.prefs_to_json()).unwrap();
         let found = survey(Some(&local), Some(&roaming), "LayerShop");
         assert!(found.home.is_none());
         assert_eq!(found.engine.len(), 1);
@@ -645,7 +670,7 @@ mod tests {
         }));
         // The settings that stay no longer start an engine that is gone.
         let mut after = photocraft_engine::Session::new();
-        after.load_prefs_json(&std::fs::read_to_string(roaming.join("Photocraft/preferences.json")).unwrap()).unwrap();
+        after.load_prefs_json(&std::fs::read_to_string(roaming.join("LayerShop/preferences.json")).unwrap()).unwrap();
         let ai = &after.prefs().integrations.ai;
         assert!(!ai.comfy_autostart && ai.comfy_launch.python.is_empty(), "{:?}", ai.comfy_launch);
     }
@@ -662,7 +687,7 @@ mod tests {
             installed: vec!["qwen-image-2-1".into()],
             ..SetupState::default()
         };
-        state::save(&roaming.join("Photocraft/ai-setup.json"), &record).unwrap();
+        state::save(&roaming.join("LayerShop/ai-setup.json"), &record).unwrap();
         let found = survey(Some(&local), Some(&roaming), "LayerShop");
         assert!(found.engine.is_empty() && found.models.is_empty() && found.own_comfyui.is_some());
         assert!(remove(&found, Choice { engine: true, models: true, settings: false }).is_empty());
@@ -674,7 +699,7 @@ mod tests {
         let s = Scratch::new("window");
         let (local, roaming) = (s.0.join("Local"), s.0.join("Roaming"));
         write(&local.join("LayerShop/models/vae/v.safetensors"), 100);
-        write(&roaming.join("Photocraft/preferences.json"), 20);
+        write(&roaming.join("LayerShop/preferences.json"), 20);
         let mut dialog = Dialog::new(survey(Some(&local), Some(&roaming), "LayerShop"));
         let ctx = egui::Context::default();
         photocraft_ui_egui::PhotocraftApp::setup_context(&ctx, photocraft_ui_egui::theme::ThemeKind::ALL[0]);
@@ -685,15 +710,17 @@ mod tests {
             .textures_delta
             .clear();
         }
-        dialog.remove_ticked();
+        // The window is fitted to the question: two rows and the buttons, well short of a screen.
+        assert!((100.0..300.0).contains(&dialog.content_height), "{}", dialog.content_height);
+        dialog.remove_selected();
         ctx.run_ui(Default::default(), |ui| {
             dialog.draw(ui);
         })
         .textures_delta
         .clear();
-        // The models (ticked) went, the settings (not ticked) stayed; what it freed is theirs.
+        // The models (selected) went, the settings (not selected) stayed; what it freed is theirs.
         assert_eq!((dialog.done.clone(), dialog.freed), (Some(Vec::new()), 100));
-        assert!(!local.join("LayerShop").exists() && roaming.join("Photocraft").exists());
+        assert!(!local.join("LayerShop").exists() && roaming.join("LayerShop").exists());
         // What could not be removed is listed, and draws too.
         dialog.done = Some(vec![r"C:\x\in-use.safetensors: Access is denied. (os error 5)".into()]);
         ctx.run_ui(Default::default(), |ui| {

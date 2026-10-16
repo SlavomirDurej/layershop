@@ -7,12 +7,22 @@
 //!    everything in `<exe dir>/PhotoCraftData`, so a portable copy on a USB stick leaves nothing in
 //!    `%APPDATA%`. The Windows portable zip ships with `portable.txt`; the MSI doesn't. If that
 //!    folder can't be written (read-only medium, Program Files), the app warns and falls back.
-//! 3. The platform convention: macOS `~/Library/Application Support/Photocraft`, Windows
-//!    `%APPDATA%\Photocraft`, Linux `$XDG_CONFIG_HOME/photocraft` or `~/.config/photocraft`.
+//! 3. The platform convention, in a folder named after the product ([`DIR_NAME`]): macOS
+//!    `~/Library/Application Support/LayerShop`, Windows `%APPDATA%\LayerShop`, Linux
+//!    `$XDG_CONFIG_HOME/layershop` or `~/.config/layershop`.
+//!
+//! Builds before the rename kept their settings in a `Photocraft` folder ([`LEGACY_DIR_NAME`]).
+//! When the product's folder doesn't exist yet and that one does, it is copied over once
+//! ([`adopt_legacy`]). Copied, not moved: the old folder may be PhotoCraft's own.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
+
+/// The settings folder's name in the platform's per-user config directory (lowercase on Linux).
+pub const DIR_NAME: &str = photocraft_ui_egui::brand::NAME;
+/// Where builds before the rename kept their settings.
+pub const LEGACY_DIR_NAME: &str = "Photocraft";
 
 /// Files beside the executable that switch on portable mode (either one; contents are ignored).
 pub const PORTABLE_MARKERS: [&str; 2] = ["portable.txt", "PhotoCraft.portable"];
@@ -45,7 +55,17 @@ pub fn current() -> &'static DataDir {
     static DIR: OnceLock<DataDir> = OnceLock::new();
     DIR.get_or_init(|| {
         let exe = std::env::current_exe().ok();
-        let d = resolve(|k| std::env::var_os(k), exe.as_deref().and_then(Path::parent));
+        let env = |k: &str| std::env::var_os(k);
+        let d = resolve(env, exe.as_deref().and_then(Path::parent));
+        if d.mode == Mode::Platform
+            && let (Some(dir), Some(legacy)) = (&d.dir, platform_dir_named(&env, LEGACY_DIR_NAME))
+        {
+            match adopt_legacy(&legacy, dir) {
+                Ok(true) => log::info!("settings copied from {} to {}", legacy.display(), dir.display()),
+                Ok(false) => {}
+                Err(e) => log::warn!("the settings in {} could not be copied to {}: {e}", legacy.display(), dir.display()),
+            }
+        }
         if let Some(w) = &d.warning {
             log::warn!("{w}");
             eprintln!("photocraft: {w}");
@@ -83,14 +103,59 @@ pub fn resolve(env: impl Fn(&str) -> Option<OsString>, exe_dir: Option<&Path>) -
 
 /// The platform convention, from `env` (so tests can fake `HOME`/`APPDATA`/`XDG_CONFIG_HOME`).
 pub fn platform_dir(env: &impl Fn(&str) -> Option<OsString>) -> Option<PathBuf> {
+    platform_dir_named(env, DIR_NAME)
+}
+
+/// The platform convention for a folder called `name`.
+pub fn platform_dir_named(env: &impl Fn(&str) -> Option<OsString>, name: &str) -> Option<PathBuf> {
     let home = env("HOME").filter(|h| !h.is_empty()).map(PathBuf::from);
     if cfg!(target_os = "macos") {
-        return home.map(|h| h.join("Library/Application Support/Photocraft"));
+        return home.map(|h| h.join("Library/Application Support").join(name));
     }
     if cfg!(windows) {
-        return env("APPDATA").filter(|a| !a.is_empty()).map(|a| PathBuf::from(a).join("Photocraft"));
+        return env("APPDATA").filter(|a| !a.is_empty()).map(|a| PathBuf::from(a).join(name));
     }
-    env("XDG_CONFIG_HOME").filter(|x| !x.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| h.join(".config"))).map(|c| c.join("photocraft"))
+    env("XDG_CONFIG_HOME").filter(|x| !x.is_empty()).map(PathBuf::from).or_else(|| home.map(|h| h.join(".config"))).map(|c| c.join(name.to_lowercase()))
+}
+
+/// Copy the settings of a build before the rename (`legacy`) to `dir`, when `dir` doesn't exist
+/// yet and `legacy` does. Returns whether it copied. The copy is made beside `dir` and renamed
+/// into place, so a copy cut short never passes for the settings.
+pub fn adopt_legacy(legacy: &Path, dir: &Path) -> std::io::Result<bool> {
+    if dir.exists() || !legacy.is_dir() || legacy == dir {
+        return Ok(false);
+    }
+    let mut partial = dir.as_os_str().to_owned();
+    partial.push(".copying");
+    let partial = PathBuf::from(partial);
+    let _ = std::fs::remove_dir_all(&partial);
+    let copied = copy_dir(legacy, &partial, 0).and_then(|()| std::fs::rename(&partial, dir));
+    if copied.is_err() {
+        let _ = std::fs::remove_dir_all(&partial);
+    }
+    copied.map(|()| true)
+}
+
+/// Copy the folder `from` to `to`: files and folders, links not followed, at most 32 levels. A
+/// file that can't be read (in use) is left out rather than costing the user the rest.
+fn copy_dir(from: &Path, to: &Path, depth: u32) -> std::io::Result<()> {
+    if depth > 32 {
+        return Ok(());
+    }
+    std::fs::create_dir_all(to)?;
+    for entry in std::fs::read_dir(from)? {
+        let entry = entry?;
+        let kind = entry.file_type()?;
+        let target = to.join(entry.file_name());
+        if kind.is_dir() {
+            copy_dir(&entry.path(), &target, depth + 1)?;
+        } else if kind.is_file()
+            && let Err(e) = std::fs::copy(entry.path(), &target)
+        {
+            log::warn!("settings: {} was not copied: {e}", entry.path().display());
+        }
+    }
+    Ok(())
 }
 
 /// Where the Local AI setup puts the engine and the models unless the user chooses otherwise:
@@ -165,12 +230,35 @@ mod tests {
         assert!(!exe.join(PORTABLE_DATA_DIR).exists(), "no portable folder without a marker");
         // The convention per platform.
         if cfg!(target_os = "macos") {
-            assert_eq!(dir, root.join("home/Library/Application Support/Photocraft"));
+            assert_eq!(dir, root.join("home/Library/Application Support/LayerShop"));
         } else if cfg!(windows) {
-            assert_eq!(dir, root.join("appdata").join("Photocraft"));
+            assert_eq!(dir, root.join("appdata").join("LayerShop"));
         } else {
-            assert_eq!(dir, root.join("home/.config/photocraft"));
+            assert_eq!(dir, root.join("home/.config/layershop"));
         }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn settings_from_before_the_rename_are_copied_once() {
+        let root = temp("legacy");
+        let env = fake_home(&root);
+        let (legacy, dir) = (platform_dir_named(&env, LEGACY_DIR_NAME).unwrap(), platform_dir(&env).unwrap());
+        // Nothing to copy: nothing happens.
+        assert!(!adopt_legacy(&legacy, &dir).unwrap() && !dir.exists());
+        std::fs::create_dir_all(legacy.join("Presets/Brushes")).unwrap();
+        std::fs::write(legacy.join("preferences.json"), b"{\"a\":1}").unwrap();
+        std::fs::write(legacy.join("Presets/Brushes/soft.json"), b"soft").unwrap();
+        assert!(adopt_legacy(&legacy, &dir).unwrap());
+        assert_eq!(std::fs::read(dir.join("preferences.json")).unwrap(), b"{\"a\":1}");
+        assert_eq!(std::fs::read(dir.join("Presets/Brushes/soft.json")).unwrap(), b"soft");
+        // The old folder stays (it may be PhotoCraft's), and no half copy is left beside the new one.
+        assert!(legacy.join("preferences.json").is_file());
+        assert_eq!(std::fs::read_dir(dir.parent().unwrap()).unwrap().count(), 2);
+        // Once the new folder exists it is the settings: the old one is never copied over it again.
+        std::fs::write(dir.join("preferences.json"), b"{\"a\":2}").unwrap();
+        assert!(!adopt_legacy(&legacy, &dir).unwrap());
+        assert_eq!(std::fs::read(dir.join("preferences.json")).unwrap(), b"{\"a\":2}");
         let _ = std::fs::remove_dir_all(&root);
     }
 
