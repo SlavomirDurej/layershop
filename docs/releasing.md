@@ -9,6 +9,28 @@ This is PhotoCraft's implementation of the shared
 [release playbook](release-playbook.md). User-facing names say **PhotoCraft**. Files, binaries
 and ids stay lowercase (`photocraft-<version>-<platform>-<arch>.<ext>`, `ai.storyteller.photocraft`).
 
+## LayerShop (this fork)
+
+The fork's previews are built on a Windows PC, not by the workflow (it needs the `release`
+environment and its signing secrets), and published on `SlavomirDurej/photocraft`. Two scripts,
+also ProjectManager's Deploy buttons:
+
+1. `pwsh -File packaging/windows/layershop-build.ps1` builds and packages Windows x64:
+   `dist/release/layershop-<version>-windows-x64.msi`, `-portable.zip`, `SHA256SUMS.txt` and
+   `build-info.json` (version, commit, uncommitted changes or not). It wraps `package.ps1`, uses
+   `../craft-fonts` when there is a checkout, and sets up WiX 5.0.2 itself when it is not on
+   PATH: the NuGet package, pinned by SHA-256, unpacked into
+   `%LOCALAPPDATA%\LayerShop-build\wix-5.0.2` and run on the .NET runtime (no SDK needed).
+2. `pwsh -File packaging/windows/layershop-publish.ps1 [-Draft] [-Preview N]` creates the GitHub
+   release `layershop-v<version>-preview.<N>` ("LayerShop <version> Preview <N>"; upstream owns
+   the plain `v` tags), a pre-release, with those files. It refuses unless the files were built
+   from the checked-out commit with nothing uncommitted, still match their checksums, and that
+   commit is on the fork. Notes come from `dist/release/RELEASE-NOTES.md` when there is one,
+   else a standard text listing the fork's commits since its last release.
+
+The files are unsigned (`sign.ps1` skips without a certificate). The MSI keeps Preview 1's
+UpgradeCode and allows same-version upgrades, so each preview replaces the last.
+
 ## Cutting a release
 
 1. **Bump the version** on `main`. The only place it lives is `[workspace.package] version`
