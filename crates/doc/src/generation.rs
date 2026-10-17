@@ -81,6 +81,26 @@ pub enum GenerationSource {
     /// Another open document, by id. Document ids last for the session: a saved file does not
     /// keep this.
     Document(u64),
+    /// A layer of another open document: its pixels alone. Like [`GenerationSource::Document`],
+    /// it lasts for the session.
+    DocumentLayer { document: u64, layer: u64 },
+}
+
+/// A picture an edit's instruction could refer to, and the name the prompt called it by
+/// (`@Luna`); empty when it had none and was referred to by number.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationReference {
+    #[serde(flatten)]
+    pub source: GenerationSource,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+impl From<GenerationSource> for GenerationReference {
+    fn from(source: GenerationSource) -> Self {
+        GenerationReference { source, name: String::new() }
+    }
 }
 
 /// The generation a layer came from ([`crate::Layer::generation`]).
@@ -104,9 +124,9 @@ pub struct Generation {
     pub seed: u64,
     /// Img2img, imgEdit: the picture that was redrawn or edited.
     pub source: Option<GenerationSource>,
-    /// ImgEdit: the pictures the instruction could refer to, in the order the model numbered
-    /// them after the source.
-    pub references: Vec<GenerationSource>,
+    /// ImgEdit: the pictures the instruction could refer to, with their names, in the order the
+    /// panel listed them. The prompt (kept as typed, `@Luna` and all) says which were sent.
+    pub references: Vec<GenerationReference>,
     /// ImgEdit: how much of the model's schedule was run.
     pub quality: GenerationQuality,
 }
@@ -129,5 +149,21 @@ mod tests {
         let old: Generation = serde_json::from_str(r#"{"mode":"img2img","prompt":"x"}"#).unwrap();
         assert_eq!((old.references.len(), old.quality), (0, Standard));
         assert_eq!(serde_json::to_value(GenerationMode::ImgEdit).unwrap(), "imgEdit");
+    }
+
+    #[test]
+    fn a_reference_keeps_its_name_beside_its_source() {
+        // Saved before references had names: the source alone.
+        let old: Generation = serde_json::from_str(r#"{"mode":"imgEdit","references":[{"layer":4},{"document":2}]}"#).unwrap();
+        assert_eq!(old.references, [GenerationSource::Layer(4).into(), GenerationSource::Document(2).into()]);
+        let named = GenerationReference { source: GenerationSource::DocumentLayer { document: 3, layer: 9 }, name: "Luna".into() };
+        let json = serde_json::to_value(&named).unwrap();
+        assert_eq!(json, serde_json::json!({"documentLayer": {"document": 3, "layer": 9}, "name": "Luna"}));
+        assert_eq!(serde_json::from_value::<GenerationReference>(json).unwrap(), named);
+        // No name: none is written.
+        assert_eq!(serde_json::to_value(GenerationReference::from(GenerationSource::Layer(1))).unwrap(), serde_json::json!({"layer": 1}));
+        for bad in [r#"{"name":"x"}"#, r#"{"layer":"x"}"#, r#"7"#] {
+            assert!(serde_json::from_str::<GenerationReference>(bad).is_err(), "{bad}");
+        }
     }
 }

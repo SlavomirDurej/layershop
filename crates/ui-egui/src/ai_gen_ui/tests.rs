@@ -280,7 +280,10 @@ fn the_gear_opens_manage_models_on_the_model_and_a_filter_selects_from_what_it_l
         app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone()
     };
     let f = fields(&mut app, "gpt");
-    assert_eq!((f["section"].as_str(), f[PAGE].as_str(), f[FILTER].as_str(), f[SELECTED].as_u64()), (Some("generativeAi"), Some("models"), Some("all"), Some(1)));
+    assert_eq!(
+        (f["section"].as_str(), f[PAGE].as_str(), f[FILTER].as_str(), f[SELECTED].as_u64()),
+        (Some("generativeAi"), Some("models"), Some("all"), Some(1))
+    );
     let mut f = fields(&mut app, "z2");
     assert_eq!((f[PAGE].as_str(), f[SELECTED].as_u64()), (Some("models"), Some(2)));
     // Narrowed to Editing the list doesn't show Z-Image: it takes its first model, the cloud one.
@@ -902,11 +905,17 @@ fn the_list_says_what_each_model_is_used_for_and_can_be_narrowed_to_it() {
     assert_eq!(groups.iter().map(|(heading, _)| *heading).collect::<Vec<_>>(), ["Cloud", "Local", "Local, made for inpainting"]);
     assert_eq!((groups[0].1.len(), groups[1].1.len()), (Model::cloud_presets().len(), Family::ALL.len() - 2));
     assert!(groups[0].1.iter().all(|(_, m)| !m.provider.is_local()) && groups[1].1.iter().all(|(_, m)| m.provider.is_local() && !m.family.inpaint_only()));
-    assert_eq!(groups[2].1.iter().map(|(title, _)| title.as_str()).collect::<Vec<_>>(), ["FLUX.1 Fill Dev", "FLUX.1 Fill OneReward", "Qwen Image InstantX Inpainting"]);
+    assert_eq!(
+        groups[2].1.iter().map(|(title, _)| title.as_str()).collect::<Vec<_>>(),
+        ["FLUX.1 Fill Dev", "FLUX.1 Fill OneReward", "Qwen Image InstantX Inpainting"]
+    );
     assert!(groups[2].1.iter().all(|(_, m)| m.can_inpaint() && !m.can_generate()));
     // Nano Banana 2.1 and GPT Image 2 are among the cloud models on offer.
     let offered: Vec<(&str, &str)> = groups[0].1.iter().map(|(title, m)| (title.as_str(), m.api_model.as_str())).collect();
-    assert!(offered.contains(&("Nano Banana 2.1 (Google Gemini)", "gemini-nano-banana-2.1")) && offered.contains(&("GPT Image 2 (OpenAI)", "gpt-image-2")), "{offered:?}");
+    assert!(
+        offered.contains(&("Nano Banana 2.1 (Google Gemini)", "gemini-nano-banana-2.1")) && offered.contains(&("GPT Image 2 (OpenAI)", "gpt-image-2")),
+        "{offered:?}"
+    );
     // A scan adds the server's inpainting models next to its text-to-image ones.
     let folders = json!({
         "diffusion_models": ["z_image_turbo_bf16.safetensors", "flux1-fill-dev.safetensors", "qwen_image_fp8_e4m3fn.safetensors"],
@@ -1103,17 +1112,20 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     // A selection scopes the edit: the model is sent it with a quarter of its edge around it.
     app.run("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
     assert_eq!(target_size(&app), Some((24, 24, true)));
-    // References: the ones still on offer, as many as the model takes, in order.
-    app.ui.ai_gen.edit_references = vec![SourceRef::Document(doc), SourceRef::Layer(999_999), SourceRef::Layer(background), SourceRef::Document(doc)];
-    assert_eq!(edit_references(&app, 3), [SourceRef::Document(doc), SourceRef::Layer(background), SourceRef::Document(doc)]);
-    assert_eq!(edit_references(&app, 2).len(), 2);
-    assert_eq!((reference_rows(0, 3), reference_rows(1, 3), reference_rows(3, 3), reference_rows(2, 2), reference_rows(usize::MAX, 3)), (1, 2, 3, 2, 3));
+    // References: the ones still on offer, as many as the model takes, in order, a layer named
+    // by its document too.
+    let mine = SourceRef::DocumentLayer { document: doc, layer: background };
+    app.ui.ai_gen.edit_references =
+        [SourceRef::Document(doc), SourceRef::Layer(999_999), SourceRef::Layer(background), SourceRef::Document(doc)].map(NamedRef::from).to_vec();
+    let sources = |refs: Vec<NamedRef>| refs.into_iter().map(|r| r.source).collect::<Vec<_>>();
+    assert_eq!(sources(refs::edit_references(&app, 3)), [SourceRef::Document(doc), mine, SourceRef::Document(doc)]);
+    assert_eq!(refs::edit_references(&app, 2).len(), 2);
     // Drawing keeps what is valid, and Qwen Image Edit (two references) drops the third.
     draw_panel(&mut app);
     assert_eq!(app.ui.ai_gen.edit_references.len(), 3);
     app.ui.ai_gen.edit_model = "edit".into();
     draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.edit_references, [SourceRef::Document(doc), SourceRef::Layer(background)]);
+    assert_eq!(sources(app.ui.ai_gen.edit_references.clone()), [SourceRef::Document(doc), mine]);
     app.ui.ai_gen.edit_model = "q21".into();
     app.ui.ai_gen.edit_quality = GenerationQuality::Draft;
     let before = app.session.active().unwrap().doc.layers.len();
@@ -1126,7 +1138,8 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
         assert!(layer.mask.is_some(), "the selection becomes the layer's mask");
         layer.generation.clone().unwrap()
     };
-    assert_eq!(made.references, [photocraft_doc::GenerationSource::Document(doc), photocraft_doc::GenerationSource::Layer(background)]);
+    // The layer keeps its own document's layer as one (what a saved file keeps).
+    assert_eq!(made.references, [photocraft_doc::GenerationSource::Document(doc).into(), photocraft_doc::GenerationSource::Layer(background).into()]);
     assert_eq!((made.quality, made.prompt.as_str()), (GenerationQuality::Draft, "make the sky stormy"));
     // Clicking that layer loads the edit back: tab, model, prompt, source, references, quality.
     let layer = r["layer"].as_u64().unwrap();
@@ -1148,12 +1161,118 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     );
     let old: AiGenUi = serde_json::from_value(json!({"prompt": "x", "mode": "imgEdit"})).unwrap();
     assert_eq!((old.mode, old.edit_source, old.edit_references.len(), old.edit_quality), (Mode::Edit, None, 0, GenerationQuality::Standard));
-    // The dock gives the task its rows: Edit's tasks, the source, the reference and one to add,
-    // and the mask tools.
+    // The dock gives the task its rows: Edit's tasks, the source, the chips and the mask tools;
+    // a chip open shows its name and picture too.
     app.ui.ai_gen.edit_references.truncate(1);
     let tall = wanted_height(&app);
+    app.ui.ai_gen.editing_ref = Some(0);
+    assert_eq!(wanted_height(&app), tall + 2.0 * ROW);
+    app.ui.ai_gen.editing_ref = Some(5);
+    assert_eq!(wanted_height(&app), tall, "a chip that is gone is not open");
     app.ui.ai_gen.mode = Mode::Create;
-    assert_eq!(tall, wanted_height(&app) + 5.0 * ROW);
+    assert_eq!(tall, wanted_height(&app) + 4.0 * ROW);
+}
+
+#[test]
+fn references_are_named_chips_the_prompt_calls_by_name() {
+    let mut app = app();
+    add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
+    // A picture to change, a layer to refer to, and another document with a layer of its own.
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let here = app.session.active().unwrap().doc.id.0;
+    let background = app.session.active().unwrap().active_layer.unwrap().0;
+    app.run("layer.new.layer", json!({"name": "Max"})).unwrap();
+    app.run("select.rect", json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+    app.run("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    let max = app.session.active().unwrap().active_layer.unwrap().0;
+    app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+    let there = app.session.active().unwrap().doc.id.0;
+    app.run("layer.new.layer", json!({"name": "Luna"})).unwrap();
+    app.run("select.rect", json!({"x": 4, "y": 4, "width": 8, "height": 20})).unwrap();
+    app.run("edit.fill", json!({"color": "#0000ff"})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    let luna = app.session.active().unwrap().active_layer.unwrap().0;
+    assert!(app.session.set_active(0));
+    app.run("layer.select", json!({"layer": background})).unwrap();
+    (app.ui.ai_gen.mode, app.ui.ai_gen.task, app.ui.ai_gen.edit_model) = (Mode::Edit, EditTask::Change, "q21".into());
+    // The other document's layer is on offer to refer to, after its document.
+    let offered = refs::offered(&app.session);
+    let theirs = SourceRef::DocumentLayer { document: there, layer: luna };
+    let at = offered.iter().position(|(r, _)| *r == SourceRef::Document(there)).unwrap();
+    assert_eq!(offered[at + 1].0, theirs);
+    // Chips are named after their pictures, and names don't clash.
+    assert_eq!(photocraft_engine::ai_cmds::reference_name(&app.session, theirs), "Luna");
+    assert_eq!(
+        (refs::unique("Luna", &["luna", "Luna2"]), refs::unique("Luna", &["Max"]), refs::unique("", &[""])),
+        ("Luna3".into(), "Luna".into(), String::new())
+    );
+    assert_eq!(refs::unique(&"x".repeat(24), &[&"x".repeat(24)]).chars().count(), 24);
+    app.ui.ai_gen.edit_references = vec![
+        NamedRef { source: theirs, name: "Luna".into() },
+        NamedRef { source: SourceRef::DocumentLayer { document: here, layer: max }, name: "Max".into() },
+        NamedRef::from(SourceRef::Document(there)),
+    ];
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.edit_references.len(), 3);
+    // What the prompt sends: all of them while it mentions none, then those it mentions.
+    let chips = refs::edit_references(&app, 3);
+    let states = |prompt: &str| refs::sent(prompt, &chips).into_iter().collect::<Vec<_>>();
+    use refs::Sent::{All, Mentioned, No};
+    assert_eq!(states("put image 4 behind them"), [(All, Some(2)), (All, Some(3)), (All, Some(4))]);
+    assert_eq!(states("@max hugs @Luna"), [(Mentioned, Some(2)), (Mentioned, Some(3)), (No, None)]);
+    assert_eq!(states("@Max waves"), [(No, None), (Mentioned, Some(2)), (No, None)]);
+    // The prompt shows a mention in the accent colour, on a tint; other @words stay plain.
+    let job = refs::prompt_job("@Luna meets @Bob", &["Luna", "Max"], egui::FontId::proportional(12.0), egui::Color32::WHITE, egui::Color32::BLUE, 100.0);
+    let colored: Vec<(&str, egui::Color32)> =
+        job.sections.iter().map(|s| (&job.text[s.byte_range.start.0..s.byte_range.end.0], s.format.color)).filter(|(t, _)| !t.is_empty()).collect();
+    assert_eq!(colored, [("@Luna", egui::Color32::BLUE), (" meets @Bob", egui::Color32::WHITE)]);
+    // Typing @ offers the names; Tab or a click puts the one taken in, and a space after it.
+    let names = ["Luna", "Max", "Lucas"];
+    assert_eq!(refs::completion_at("hug @", 5, &names), Some((4..5, vec![0, 1, 2])));
+    assert_eq!(refs::completion_at("hug @lu", 7, &names), Some((4..7, vec![0, 2])));
+    assert_eq!(refs::completion_at("hug @Luna", 9, &names), None, "typed out already");
+    assert_eq!(refs::completion_at("me@lu", 5, &names), None, "inside a word");
+    assert_eq!(refs::completion_at("@lu x", 3, &names), Some((0..3, vec![0, 2])));
+    assert_eq!(refs::completion_at("@lux", 3, &names), None, "the word goes on past the cursor");
+    assert_eq!(refs::completion_at("hug @zz", 7, &names), None);
+    assert_eq!(refs::completion_at("🦆 @L", 4, &names), Some(("🦆 ".len().."🦆 @L".len(), vec![0, 2])));
+    assert_eq!(refs::completion_at("x", 99, &names), None);
+    assert_eq!(refs::complete("hug @lu now", 4..7, "Luna"), ("hug @Luna now".into(), 9));
+    assert_eq!(refs::complete("hug @lu", 4..7, "Luna"), ("hug @Luna ".into(), 10));
+    // Generating sends the chips with their names; the engine sends the mentioned ones.
+    app.ui.ai_gen.prompt = "@Luna sits beside @Max".into();
+    assert_eq!(generate_blocked(&app, &Model { id: "q21".into(), ..Family::QwenImage21.preset() }), None);
+    let r = generate(&mut app).unwrap();
+    assert_eq!(r["modelPrompt"], "Luna (image 2) sits beside Max (image 3)");
+    let layer = r["layer"].as_u64().unwrap();
+    // Two alike can't be sent: Generate says so.
+    app.ui.ai_gen.edit_references[2].name = "LUNA".into();
+    let q21 = current_model(&app).cloned().unwrap();
+    assert!(generate_blocked(&app, &q21).unwrap().contains("Two references are named"));
+    // Clicking the layer loads its chips back, names and all; this document's layer by its
+    // document again.
+    (app.ui.ai_gen.edit_references, app.ui.ai_gen.prompt, app.ui.ai_gen.mode) = (Vec::new(), String::new(), Mode::Create);
+    assert!(load_layer(&mut app, layer));
+    let back: Vec<(SourceRef, String)> = app.ui.ai_gen.edit_references.iter().map(|r| (r.source, r.name.clone())).collect();
+    assert_eq!(
+        back,
+        [(theirs, "Luna".into()), (SourceRef::DocumentLayer { document: here, layer: max }, "Max".into()), (SourceRef::Document(there), String::new())]
+    );
+    assert_eq!(app.ui.ai_gen.prompt, "@Luna sits beside @Max");
+    // An open chip draws its name and picture; the state is kept as the engine reads it, and an
+    // old state's references (no names) still load.
+    app.ui.ai_gen.editing_ref = Some(1);
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.editing_ref, Some(1));
+    let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
+    assert_eq!(state["editReferences"][0], json!({"document": there, "layer": luna, "name": "Luna"}));
+    let old: AiGenUi = serde_json::from_value(json!({"editReferences": [{"layer": 3}, {"document": 1}]})).unwrap();
+    assert_eq!(old.edit_references, [NamedRef::from(SourceRef::Layer(3)), NamedRef::from(SourceRef::Document(1))]);
+    // The other document closed: its chips go, the rest stay.
+    assert!(app.session.close(1).is_some());
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.edit_references.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Max"]);
 }
 
 #[test]
@@ -1704,7 +1823,13 @@ fn while_local_ai_is_being_set_up_its_models_wait_and_the_panel_says_so() {
 fn the_panels_own_look_at_the_server_ends_quietly() {
     use photocraft_engine::jobs::{JobEvent, JobId, JobOutcome};
     let mut app = app();
-    let event = |id: u64, outcome: JobOutcome| JobEvent { id: JobId(id), command: "ai.comfyModels".into(), label: "Connect to ComfyUI".into(), document: None, outcome };
+    let event = |id: u64, outcome: JobOutcome| JobEvent {
+        id: JobId(id),
+        command: "ai.comfyModels".into(),
+        label: "Connect to ComfyUI".into(),
+        document: None,
+        outcome,
+    };
     // Someone else's job is not the panel's.
     assert!(!on_job_event(&mut app, &event(4, JobOutcome::Failed("refused".into()))));
     app.ui.ai_gen.server_job = Some(9);

@@ -19,7 +19,7 @@
 use egui::{RichText, vec2};
 use photocraft_aigen::{Family, Model, Provider, Settings};
 use photocraft_doc::{GenerationMode, GenerationQuality};
-use photocraft_engine::ai_cmds::SourceRef;
+use photocraft_engine::ai_cmds::{NamedRef, SourceRef};
 use photocraft_engine::jobs::JobInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -147,8 +147,12 @@ pub struct AiGenUi {
     /// Change, by instruction: the picture to change (`None`: the active layer when it has
     /// pixels, else the first that is offered).
     pub edit_source: Option<SourceRef>,
-    /// Change, by instruction: the pictures the prompt may refer to, as image 2, image 3, …
-    pub edit_references: Vec<SourceRef>,
+    /// Change, by instruction: the pictures the prompt may refer to, by name (`@Luna`) or as
+    /// image 2, image 3, … (the chips, see [`refs`]).
+    pub edit_references: Vec<NamedRef>,
+    /// The reference chip whose name and picture are open under the chips.
+    #[serde(skip)]
+    editing_ref: Option<usize>,
     /// Change, by instruction: how much of a local model's schedule to run.
     pub edit_quality: GenerationQuality,
     pub prompt: String,
@@ -198,6 +202,7 @@ impl Default for AiGenUi {
             edit_model: String::new(),
             edit_source: None,
             edit_references: Vec::new(),
+            editing_ref: None,
             edit_quality: GenerationQuality::default(),
             prompt: String::new(),
             alpha: false,
@@ -663,7 +668,7 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
             params["quality"] = json!(ui.edit_quality.key());
             params["alpha"] = json!(ui.alpha);
             params["context"] = json!(ui.context());
-            params["references"] = json!(edit_references(app, model.max_references()));
+            params["references"] = json!(refs::edit_references(app, model.max_references()));
             if let Some(source) = edit_source(app) {
                 params["source"] = json!(source);
             }
@@ -710,6 +715,9 @@ pub fn load_layer(app: &mut PhotocraftApp, layer: u64) -> bool {
         GenerationMode::Txt2img | GenerationMode::Img2img => m.can_generate(),
     };
     let available = app.session.prefs().integrations.ai.models.iter().any(|m| m.enabled && m.id == g.model && can(m));
+    // The layer's references name layers of its own document, which is the one in front.
+    let references: Vec<NamedRef> =
+        g.references.iter().cloned().map(NamedRef::from).map(|r| NamedRef { source: refs::absolute(&app.session, r.source), ..r }).collect();
     let ui = &mut app.ui.ai_gen;
     ui.prompt = g.prompt;
     match g.mode {
@@ -736,7 +744,8 @@ pub fn load_layer(app: &mut PhotocraftApp, layer: u64) -> bool {
             ui.context = g.context;
             // Pictures that are gone are not offered: the panel then leaves them out.
             ui.edit_source = g.source.map(Into::into);
-            ui.edit_references = g.references.iter().copied().map(Into::into).collect();
+            ui.edit_references = references;
+            ui.editing_ref = None;
             ui.edit_quality = g.quality;
             ui.alpha = g.alpha;
         }
@@ -804,13 +813,12 @@ fn advanced_rows(model: Option<&Model>, kind: GenerationMode) -> usize {
 
 /// The rows above the prompt that depend on the task: Edit's tasks, the picture to change or
 /// redraw, and the pictures an instruction may refer to (with a row to add one).
-fn rows_above(ui: &AiGenUi, model: Option<&Model>, kind: GenerationMode) -> usize {
-    let max = model.map_or(photocraft_aigen::MAX_REFERENCES, Model::max_references);
+fn rows_above(ui: &AiGenUi, kind: GenerationMode) -> usize {
     usize::from(ui.mode == Mode::Edit)
         + match kind {
             GenerationMode::Txt2img | GenerationMode::Inpaint => 0,
             GenerationMode::Img2img => 1,
-            GenerationMode::ImgEdit => 1 + reference_rows(ui.edit_references.len(), max),
+            GenerationMode::ImgEdit => 1 + refs::rows(ui),
         }
 }
 
@@ -830,7 +838,7 @@ pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
     // The line that leads to the Local AI wizard, while there is one (it may wrap).
     let setup = if setup_line(app).is_some() { 2.0 * (NOTE_SIZE + 4.0) } else { 0.0 };
-    rows + setup + (rows_above(ui, model, kind) + rows_below(ui, model, kind)) as f32 * ROW
+    rows + setup + (rows_above(ui, kind) + rows_below(ui, model, kind)) as f32 * ROW
 }
 
 /// Is the inpaint mask being painted with the panel's brush?
@@ -942,19 +950,6 @@ fn edit_source(app: &PhotocraftApp) -> Option<SourceRef> {
     app.ui.ai_gen.edit_source.filter(|s| offered.iter().any(|(o, _)| o == s)).or_else(|| photocraft_engine::ai_cmds::default_img2img_source(&app.session))
 }
 
-/// The pictures an instruction may refer to: those chosen that are still on offer, `max`
-/// at most (what the model takes).
-fn edit_references(app: &PhotocraftApp, max: usize) -> Vec<SourceRef> {
-    let offered = photocraft_engine::ai_cmds::edit_sources(&app.session);
-    app.ui.ai_gen.edit_references.iter().copied().filter(|r| offered.iter().any(|(o, _)| o == r)).take(max).collect()
-}
-
-/// How many reference rows the panel shows for `chosen` references: one each, and an empty one to
-/// add the next while the model takes more.
-fn reference_rows(chosen: usize, max: usize) -> usize {
-    chosen.saturating_add(1).min(max)
-}
-
 /// Width of the labels of the panel's labelled rows (Source, Image 2, Method, Seed), so their
 /// fields line up.
 const EDIT_LABEL: f32 = 54.0;
@@ -966,35 +961,6 @@ fn edit_label(ui: &mut egui::Ui, text: &str) {
         ui.set_min_width(EDIT_LABEL);
         ui.label(RichText::new(text).color(t.text_dim));
     });
-}
-
-/// A change by instruction: the pictures the instruction may refer to. The model numbers them after the picture
-/// it edits, so the rows are named as the instruction names them ("the shirt from image 2").
-/// Choosing "(none)" takes a picture out; the rows below it move up.
-fn reference_list(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, model: &Model) {
-    let offered = photocraft_engine::ai_cmds::edit_sources(&app.session);
-    let max = model.max_references();
-    let chosen = edit_references(app, max);
-    let none = tr("(none)").to_string();
-    let mut next = Vec::with_capacity(max);
-    ui.add_enabled_ui(!busy && !offered.is_empty(), |ui| {
-        for i in 0..reference_rows(chosen.len(), max) {
-            ui.horizontal(|ui| {
-                edit_label(ui, &format!("{} {}", tr("Image"), i + 2));
-                let mut value = chosen.get(i).copied();
-                let mut options: Vec<(Option<SourceRef>, &str)> = vec![(None, none.as_str())];
-                options.extend(offered.iter().map(|(s, name)| (Some(*s), name.as_str())));
-                widgets::dropdown(ui, &format!("ai-gen-reference-{i}"), &mut value, &options, (ui.available_width() - 2.0).max(80.0));
-                next.extend(value);
-            })
-            .response
-            .on_hover_text(tr(
-                "A picture the instruction may refer to by this name: a layer, this document, or another open document. Open a file to refer to it",
-            ));
-            ui.add_space(6.0);
-        }
-    });
-    app.ui.ai_gen.edit_references = next;
 }
 
 /// The Alpha Channel box. The choice is kept across models; one without alpha shows it off and
@@ -1236,7 +1202,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         ui.add_space(6.0);
     }
     if edit {
-        reference_list(app, ui, busy, &current);
+        refs::chips(app, ui, busy, current.max_references());
     }
 
     // What goes under Generate, worked out first: the prompt box takes the height that is left,
@@ -1288,18 +1254,49 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
             None => PROMPT_HEIGHT,
         };
         // A prompt longer than the box scrolls inside it instead of pushing Generate away.
+        // An instruction's references: `@Name` shows in the accent colour, and typing `@` offers
+        // the names.
+        let names: Vec<String> = if edit {
+            refs::edit_references(app, current.max_references()).into_iter().map(|r| r.name).filter(|n| !n.is_empty()).collect()
+        } else {
+            Vec::new()
+        };
+        let names: Vec<&str> = names.iter().map(String::as_str).collect();
+        if edit {
+            refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
+        }
         egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
-            let edit = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt)
+            let font = egui::TextStyle::Body.resolve(ui.style());
+            let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
+            let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
+                ui.painter().layout_job(refs::prompt_job(text.as_str(), &names, font.clone(), color, t.accent, wrap))
+            };
+            let mut edit_box = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt)
+                .id(refs::prompt_id())
                 .hint_text(tr(match kind {
                     GenerationMode::Inpaint => "Describe what to paint in the selection…",
                     GenerationMode::Img2img => "Describe what the picture should become…",
+                    GenerationMode::ImgEdit if !names.is_empty() => "Say what to change, calling a reference by name: \u{201c}@Luna sits on the bench\u{201d}…",
                     GenerationMode::ImgEdit => "Say what to change: \u{201c}make the jacket red leather\u{201d}…",
                     GenerationMode::Txt2img => "Describe what to generate…",
                 }))
                 .desired_width(width)
                 .min_size(vec2(width, height));
-            let resp = ui.add(edit);
-            submit = resp.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+            if edit {
+                // While names are offered for an `@`, Tab takes the first instead of moving on.
+                let tab = refs::offering(ui.ctx());
+                edit_box = edit_box.layouter(&mut layouter).event_filter(egui::EventFilter {
+                    horizontal_arrows: true,
+                    vertical_arrows: true,
+                    tab,
+                    ..Default::default()
+                });
+            }
+            let output = edit_box.show(ui);
+            submit = output.response.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
+            if edit {
+                refs::after_prompt(ui, &output, &app.ui.ai_gen.prompt, &names);
+            }
         });
     });
     ui.add_space(6.0);
@@ -1485,6 +1482,10 @@ fn generate_blocked(app: &PhotocraftApp, model: &Model) -> Option<String> {
             // What the engine would refuse: no picture to change, or none in the selection.
             if let Err(why) = photocraft_engine::ai_cmds::edit_plan(&app.session, edit_source(app), ui.context(), None) {
                 return Some(why);
+            }
+            let named = refs::edit_references(app, model.max_references());
+            if let Some(name) = photocraft_engine::ai_refs::duplicate(&named.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()) {
+                return Some(format!("{} \u{201c}{name}\u{201d}: {}", tr("Two references are named"), tr("give each its own name.")));
             }
             if local && let Err(why) = photocraft_aigen::comfy::check_edit(model) {
                 return Some(why.to_string());
@@ -1710,7 +1711,11 @@ impl Filter {
 
 /// What a model is used for, in the words of the list's filters.
 fn uses(m: &Model) -> Vec<&'static str> {
-    [(m.can_generate(), "Text to image"), (m.can_edit(), "Editing"), (m.can_inpaint(), "Inpainting")].into_iter().filter(|(on, _)| *on).map(|(_, what)| what).collect()
+    [(m.can_generate(), "Text to image"), (m.can_edit(), "Editing"), (m.can_inpaint(), "Inpainting")]
+        .into_iter()
+        .filter(|(on, _)| *on)
+        .map(|(_, what)| what)
+        .collect()
 }
 
 /// A model of the draft, when it reads as one.
@@ -2123,7 +2128,8 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     let page_right = ui.cursor().left() + page;
 
     // ----- what is set up, and Add Model -----
-    let count = |local: bool| ai.get("models").and_then(Value::as_array).map_or(0, |ms| ms.iter().filter(|m| m.is_object() && is_local_model(m) == local).count());
+    let count =
+        |local: bool| ai.get("models").and_then(Value::as_array).map_or(0, |ms| ms.iter().filter(|m| m.is_object() && is_local_model(m) == local).count());
     let (clouds, locals) = (count(false), count(true));
     // A cloud model without its key can't run: say so here.
     let keys = f.get(KEYS).and_then(Value::as_object);
@@ -2139,11 +2145,13 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         .map(Provider::label)
         .collect();
     // What the last Connect / Scan said about the server.
-    let status = f.get(STATUS).and_then(Value::as_object).map(|status| {
-        (status.get("text").and_then(Value::as_str).unwrap_or("").to_string(), status.get("error").and_then(Value::as_bool).unwrap_or(false))
-    });
+    let status = f
+        .get(STATUS)
+        .and_then(Value::as_object)
+        .map(|status| (status.get("text").and_then(Value::as_str).unwrap_or("").to_string(), status.get("error").and_then(Value::as_bool).unwrap_or(false)));
     let off = tr("Switched off, they are left out of the AI Gen panel's model lists; they stay set up.");
-    let cloud_tip = format!("{} {off}", tr("Cloud models are run by their provider with your API key, and billed by it for each image. Best quality; nothing to install."));
+    let cloud_tip =
+        format!("{} {off}", tr("Cloud models are run by their provider with your API key, and billed by it for each image. Best quality; nothing to install."));
     let local_tip = format!("{} {}. {off}", tr("Local models are run on this computer by ComfyUI, free of charge, at"), text_of(ai, "comfyUrl"));
     let add_width = 132.0;
     ui.horizontal(|ui| {
@@ -2283,7 +2291,10 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         if on || resp.hovered() {
                             let mut tools = ui.new_child(
                                 egui::UiBuilder::new()
-                                    .max_rect(egui::Rect::from_min_max(egui::pos2(rect.left() + 30.0, rect.top()), egui::pos2(rect.right() - 4.0, rect.bottom())))
+                                    .max_rect(egui::Rect::from_min_max(
+                                        egui::pos2(rect.left() + 30.0, rect.top()),
+                                        egui::pos2(rect.right() - 4.0, rect.bottom()),
+                                    ))
                                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
                             );
                             tools.spacing_mut().item_spacing.x = 0.0;
@@ -2292,8 +2303,16 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             }
                             used = 24.0;
                             if on {
-                                let down = tools.add_enabled_ui(below.is_some(), |ui| crate::icons::button(ui, "chevron-down", 20.0, false, tr("Move down: later in the AI Gen panel's model list"))).inner;
-                                let up = tools.add_enabled_ui(above.is_some(), |ui| crate::icons::button(ui, "chevron-up", 20.0, false, tr("Move up: earlier in the AI Gen panel's model list"))).inner;
+                                let down = tools
+                                    .add_enabled_ui(below.is_some(), |ui| {
+                                        crate::icons::button(ui, "chevron-down", 20.0, false, tr("Move down: later in the AI Gen panel's model list"))
+                                    })
+                                    .inner;
+                                let up = tools
+                                    .add_enabled_ui(above.is_some(), |ui| {
+                                        crate::icons::button(ui, "chevron-up", 20.0, false, tr("Move up: earlier in the AI Gen panel's model list"))
+                                    })
+                                    .inner;
                                 if let (true, Some(to)) = (down.clicked(), below) {
                                     moved = Some((i, to));
                                 }
@@ -2313,7 +2332,10 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         let color = if enabled { t.text } else { t.text_faint };
                         let title = line(name.clone(), 12.5, color);
                         // What it is used for; or that the server doesn't have its file.
-                        let lost = model.zip(listing.as_ref()).filter(|(model, listing)| !photocraft_aigen::detect::on_server(listing, model)).map(|(model, _)| model.main_file());
+                        let lost = model
+                            .zip(listing.as_ref())
+                            .filter(|(model, listing)| !photocraft_aigen::detect::on_server(listing, model))
+                            .map(|(model, _)| model.main_file());
                         let (caption, caption_color) = match (lost, model) {
                             (Some(_), _) => (tr("File not on the server").to_string(), t.warning),
                             (None, Some(model)) => (uses(model).into_iter().map(tr).collect::<Vec<_>>().join(" · "), t.text_faint),
@@ -2324,7 +2346,11 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 4.0), title, color);
                         ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 20.0), under, caption_color);
                         if let Some(file) = lost {
-                            resp.on_hover_text(format!("{name}\n{}: {file}. {}", tr("The ComfyUI server doesn't list"), tr("Download it, press Scan Server, or choose another file")));
+                            resp.on_hover_text(format!(
+                                "{name}\n{}: {file}. {}",
+                                tr("The ComfyUI server doesn't list"),
+                                tr("Download it, press Scan Server, or choose another file")
+                            ));
                         } else if elided {
                             resp.on_hover_text(format!("{name}\n{caption}"));
                         }
@@ -2833,5 +2859,6 @@ pub fn load_keys(app: &mut PhotocraftApp) {
     }
 }
 
+mod refs;
 #[cfg(test)]
 mod tests;

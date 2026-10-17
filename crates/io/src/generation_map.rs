@@ -11,7 +11,7 @@
 
 use std::collections::HashMap;
 
-use photocraft_doc::{Document, Generation, GenerationSource, Layer, LayerId};
+use photocraft_doc::{Document, Generation, GenerationReference, GenerationSource, Layer, LayerId};
 use photocraft_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
 
 /// The `shmd` item key.
@@ -20,14 +20,14 @@ pub const KEY: [u8; 4] = *b"pcGn";
 const MAX_LEN: usize = 1 << 20;
 
 /// `g` with the layers it names passed through `layer` (`None`: the layer is gone, and so is the
-/// reference to it) and other documents dropped.
+/// reference to it) and other documents (and their layers) dropped. A reference keeps its name.
 fn remap(mut g: Generation, layer: impl Fn(u64) -> Option<u64>) -> Generation {
     let map = |s: GenerationSource| match s {
         GenerationSource::Layer(id) => layer(id).map(GenerationSource::Layer),
-        GenerationSource::Document(_) => None,
+        GenerationSource::Document(_) | GenerationSource::DocumentLayer { .. } => None,
     };
     g.source = g.source.and_then(map);
-    g.references = g.references.into_iter().filter_map(map).collect();
+    g.references = std::mem::take(&mut g.references).into_iter().filter_map(|r| Some(GenerationReference { source: map(r.source)?, ..r })).collect();
     g
 }
 
@@ -133,7 +133,12 @@ mod tests {
             alpha: true,
             seed: 0xFFFF_FFFF_FFFF,
             source: Some(GenerationSource::Layer(40)),
-            references: vec![GenerationSource::Layer(41), GenerationSource::Document(9), GenerationSource::Layer(99)],
+            references: vec![
+                GenerationReference { source: GenerationSource::Layer(41), name: "Luna".into() },
+                GenerationSource::Document(9).into(),
+                GenerationSource::DocumentLayer { document: 9, layer: 41 }.into(),
+                GenerationSource::Layer(99).into(),
+            ],
             quality: GenerationQuality::Detail,
         }
     }
@@ -152,9 +157,12 @@ mod tests {
         let it = item(&raw).unwrap();
         assert!(it.copy && it.data.len().is_multiple_of(2) && &it.signature == b"8BIM");
         let g = decode(&it.data).unwrap();
-        // The source and the first reference by PSD id; the other document and the layer that
-        // is not in the file are gone.
-        assert_eq!((g.source, g.references.clone()), (Some(GenerationSource::Layer(7)), vec![GenerationSource::Layer(8)]));
+        // The source and the first reference by PSD id, with its name; the other document, its
+        // layer and the layer that is not in the file are gone.
+        assert_eq!(
+            (g.source, g.references.clone()),
+            (Some(GenerationSource::Layer(7)), vec![GenerationReference { source: GenerationSource::Layer(8), name: "Luna".into() }])
+        );
         assert_eq!(Generation { source: None, references: vec![], ..g }, Generation { source: None, references: vec![], ..generation() });
         // Writing again replaces it; a layer with no generation loses it and keeps the rest.
         put(&mut raw, &layer(Some(Generation { prompt: "x".into(), ..Default::default() })), &ids);

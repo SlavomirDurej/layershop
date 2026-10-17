@@ -2,7 +2,7 @@
 //! of the layer's `shmd` block (`photocraft_io::generation_map`).
 
 use photocraft_color::{ColorMode, SampleType};
-use photocraft_doc::{Document, Generation, GenerationMode, GenerationQuality, GenerationSource, Layer, Size};
+use photocraft_doc::{Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, Size};
 use photocraft_io::{ExportOptions, export, generation_map, import};
 use photocraft_psd::PsdFile;
 use photocraft_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
@@ -37,7 +37,11 @@ fn document(depth: SampleType) -> Document {
         seed: 7,
         source: Some(GenerationSource::Layer(photo_id)),
         // Another open document means nothing in a file; a layer that is gone is not named.
-        references: vec![GenerationSource::Layer(other_id), GenerationSource::Document(3), GenerationSource::Layer(u64::MAX)],
+        references: vec![
+            GenerationReference { source: GenerationSource::Layer(other_id), name: "Luna".into() },
+            GenerationSource::Document(3).into(),
+            GenerationSource::Layer(u64::MAX).into(),
+        ],
         quality: GenerationQuality::Draft,
     });
     // In a group: the walk reaches it.
@@ -55,7 +59,8 @@ fn check(back: &Document, original: &Document) {
     let edit = layer(back, "[q] make it night").generation.clone().unwrap();
     // The source and the reference name the layers the file gave new ids.
     assert_eq!(edit.source, Some(GenerationSource::Layer(layer(back, "Photo").id.0)));
-    assert_eq!(edit.references, vec![GenerationSource::Layer(layer(back, "Other").id.0)]);
+    // A reference keeps its name in the file.
+    assert_eq!(edit.references, vec![GenerationReference { source: GenerationSource::Layer(layer(back, "Other").id.0), name: "Luna".into() }]);
     let was = layer(original, "[q] make it night").generation.clone().unwrap();
     assert_eq!(Generation { source: None, references: vec![], ..edit }, Generation { source: None, references: vec![], ..was });
     assert_eq!((&layer(back, "Photo").generation, &layer(back, "Group").generation), (&None, &None));

@@ -1145,10 +1145,91 @@ fn an_edit_is_given_its_references_and_its_quality() {
     let d = s.active().unwrap();
     let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
     let g = layer.generation.clone().unwrap();
-    assert_eq!(g.references, vec![GenerationSource::Layer(red), GenerationSource::Document(big)]);
+    assert_eq!(g.references, vec![GenerationSource::Layer(red).into(), GenerationSource::Document(big).into()]);
     assert_eq!(g.quality, GenerationQuality::Draft);
     assert_eq!(crate::inspect::layer(layer)["generation"]["references"], json!([{"layer": red}, {"document": big}]));
     assert_eq!(crate::inspect::layer(layer)["generation"]["quality"], "draft");
+}
+
+#[test]
+fn references_named_in_the_prompt_are_the_ones_sent() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 20, "height": 10})).unwrap();
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    let red = s.active().unwrap().active_layer.unwrap().0;
+    // Another document, and a layer of it that has pixels (a tall blue one).
+    s.execute("file.new", json!({"width": 100, "height": 50})).unwrap();
+    let other = s.active().unwrap().doc.id.0;
+    s.execute("layer.new.layer", json!({"name": "Luna portrait.png"})).unwrap();
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 10, "height": 40})).unwrap();
+    s.execute("edit.fill", json!({"color": "#0000ff"})).unwrap();
+    s.execute("select.deselect", json!({})).unwrap();
+    let luna = s.active().unwrap().active_layer.unwrap().0;
+    assert!(s.set_active(0));
+    // It is offered to refer to, after its document, and named after its layer.
+    let offered = reference_sources(&s);
+    let at = offered.iter().position(|(r, _)| *r == SourceRef::Document(other)).unwrap();
+    let theirs = SourceRef::DocumentLayer { document: other, layer: luna };
+    assert_eq!(offered.get(at + 1).map(|(r, _)| *r), Some(theirs));
+    assert!(offered[at + 1].1.ends_with("(Untitled-2)") || offered[at + 1].1.contains("Luna portrait.png"), "{:?}", offered[at + 1]);
+    assert!(!edit_sources(&s).iter().any(|(r, _)| *r == theirs), "it is a reference, not a picture to change");
+    assert_eq!(reference_name(&s, theirs), "Luna_portrait");
+    assert_eq!(reference_name(&s, SourceRef::Layer(999)), "");
+    let listed = s.execute("ai.sources", json!({"mode": "reference"})).unwrap();
+    assert!(listed["sources"].as_array().unwrap().iter().any(|e| e["source"] == json!({"document": other, "layer": luna})));
+    // Mentions decide: only Luna goes, as image 2, and the model is told so; the prompt the layer
+    // keeps is the one typed, with every reference and its name.
+    let references = json!([{"layer": red, "name": "Patch"}, {"document": other, "layer": luna, "name": "Luna"}, {"layer": background}]);
+    let r = s
+        .execute("ai.generate", json!({"prompt": "@luna waves", "mode": "imgEdit", "source": {"layer": background}, "references": references, "seed": 1}))
+        .unwrap();
+    assert_eq!(r["modelPrompt"], "Luna (image 2) waves");
+    let one = fake.uploaded("photocraft_edit_reference_1.png");
+    assert!(one.height() > one.width(), "the tall layer of the other document, cropped to its pixels");
+    let text = fake.queued().to_string();
+    assert!(text.contains("Luna (image 2) waves") && text.contains("images.image_2") && !text.contains("images.image_3"), "{text}");
+    let d = s.active().unwrap();
+    let g = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.clone().unwrap();
+    assert_eq!(g.prompt, "@luna waves");
+    assert_eq!(g.references.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Patch", "Luna", ""]);
+    assert_eq!(g.references[1].source, GenerationSource::DocumentLayer { document: other, layer: luna });
+    // No mention: all three go, the prompt as typed.
+    let r = s.execute("ai.generate", json!({"prompt": "use image 3", "mode": "imgEdit", "references": references, "seed": 1})).unwrap();
+    assert_eq!(r["modelPrompt"], "use image 3");
+    let last = fake.seen.lock().unwrap().iter().rev().find(|(u, _)| u.ends_with("/prompt")).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).unwrap();
+    assert!(last.contains("images.image_4"), "{last}");
+    // Names are cleaned, and two alike are refused.
+    let twice = json!([{"layer": red, "name": "Luna"}, {"layer": background, "name": "LUNA"}]);
+    let e = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "references": twice})).unwrap_err().to_string();
+    assert!(e.contains("two references are named"), "{e}");
+    let odd = json!([{"layer": red, "name": "  my hat!! "}]);
+    let r = s.execute("ai.generate", json!({"prompt": "give him @my_hat", "mode": "imgEdit", "references": odd, "seed": 1})).unwrap();
+    assert_eq!(r["modelPrompt"], "give him my hat (image 2)");
+    // A layer of another document that is gone, or isn't one, is an error that says so.
+    for (bad, want) in [(json!({"document": other, "layer": 999_999}), "is not in"), (json!({"document": 999_999, "layer": luna}), "is not open")] {
+        let e = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "references": [bad]})).unwrap_err().to_string();
+        assert!(e.contains(want), "{e}");
+    }
+    // It can be the picture to change too: fitted to the area like its document.
+    let plan = edit_plan(&s, Some(theirs), 0.0, None).unwrap();
+    assert_eq!(plan.area, s.active().unwrap().doc.bounds());
+    // Of the active document, it is that document's layer.
+    let mine = SourceRef::DocumentLayer { document: s.active().unwrap().doc.id.0, layer: red };
+    assert_eq!(mine.settled(&s), SourceRef::Layer(red));
+    // And the layer keeps it so, which is what a saved file can keep.
+    let r = s
+        .execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "references": [{"document": s.active().unwrap().doc.id.0, "layer": red}], "seed": 1}))
+        .unwrap();
+    let d = s.active().unwrap();
+    let g = d.doc.layer(photocraft_doc::LayerId(r["layer"].as_u64().unwrap())).unwrap().generation.clone().unwrap();
+    assert_eq!(g.references, [GenerationSource::Layer(red).into()]);
+    assert_eq!(serde_json::to_value(theirs).unwrap(), json!({"document": other, "layer": luna}));
+    assert_eq!(serde_json::from_value::<SourceRef>(json!({"layer": 4})).unwrap(), SourceRef::Layer(4));
+    assert!(serde_json::from_value::<SourceRef>(json!({"name": "x"})).is_err());
 }
 
 #[test]

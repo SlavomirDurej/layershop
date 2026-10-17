@@ -214,16 +214,18 @@ fn layer_m(l: &Layer, sink: &mut dyn Sink) -> LayerM {
 }
 
 /// A generation's source follows its layer through id remapping; one that is gone, and another
-/// document (whose id only lasted for its session), is forgotten.
+/// document or its layer (whose id only lasted for its session), is forgotten. A reference keeps
+/// its name.
 fn remap_generation_sources(l: &mut Layer, ids: &std::collections::HashMap<u64, LayerId>, depth: usize) {
     use photocraft_doc::GenerationSource;
     if let Some(g) = &mut l.generation {
         let remap = |source: GenerationSource| match source {
             GenerationSource::Layer(raw) => ids.get(&raw).map(|id| GenerationSource::Layer(id.0)),
-            GenerationSource::Document(_) => None,
+            GenerationSource::Document(_) | GenerationSource::DocumentLayer { .. } => None,
         };
         g.source = g.source.and_then(remap);
-        g.references = g.references.iter().copied().filter_map(remap).collect();
+        g.references =
+            std::mem::take(&mut g.references).into_iter().filter_map(|r| Some(photocraft_doc::GenerationReference { source: remap(r.source)?, ..r })).collect();
     }
     // The loader refused anything deeper already.
     if depth <= MAX_GROUP_DEPTH
