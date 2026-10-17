@@ -27,7 +27,7 @@
 param(
   [int] $Preview = 0,
   [switch] $Draft,
-  [string] $Repo = 'SlavomirDurej/photocraft',
+  [string] $Repo = 'SlavomirDurej/layershop',
   [string] $NotesFile
 )
 $ErrorActionPreference = 'Stop'

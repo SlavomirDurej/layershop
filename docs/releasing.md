@@ -12,7 +12,7 @@ and ids stay lowercase (`photocraft-<version>-<platform>-<arch>.<ext>`, `ai.stor
 ## LayerShop (this fork)
 
 The fork's previews are built on a Windows PC, not by the workflow (it needs the `release`
-environment and its signing secrets), and published on `SlavomirDurej/photocraft`. Two scripts,
+environment and its signing secrets), and published on `SlavomirDurej/layershop`. Two scripts,
 also ProjectManager's Deploy buttons:
 
 1. `pwsh -File packaging/windows/layershop-build.ps1` builds and packages Windows x64:

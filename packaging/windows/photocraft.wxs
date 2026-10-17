@@ -45,7 +45,7 @@
     <Property Id="ARPPRODUCTICON" Value="PhotocraftIcon.exe" />
     <Property Id="ARPURLINFOABOUT" Value="https://layershop.aardvarkstudios.net" />
     <Property Id="ARPURLUPDATEINFO" Value="https://layershop.aardvarkstudios.net" />
-    <Property Id="ARPHELPLINK" Value="https://github.com/SlavomirDurej/photocraft/issues" />
+    <Property Id="ARPHELPLINK" Value="https://github.com/SlavomirDurej/layershop/issues" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
       <Directory Id="INSTALLFOLDER" Name="$(var.ProductName)" />

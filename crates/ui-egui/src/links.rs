@@ -13,8 +13,8 @@ use crate::PhotocraftApp;
 pub const DISCORD: &str = "https://discord.gg/artcraft";
 pub const ARTCRAFT_WEBSITE: &str = "https://getartcraft.com";
 pub const APP_PAGE: &str = "https://layershop.aardvarkstudios.net";
-pub const GITHUB: &str = "https://github.com/SlavomirDurej/photocraft";
-pub const ISSUES: &str = "https://github.com/SlavomirDurej/photocraft/issues";
+pub const GITHUB: &str = "https://github.com/SlavomirDurej/layershop";
+pub const ISSUES: &str = "https://github.com/SlavomirDurej/layershop/issues";
 
 /// Show the "Join us on Discord" buttons (start screen, About, title bar)? They open upstream's
 /// server, and "us" under this fork's name would say it is LayerShop's. Off here; Help › Join the
