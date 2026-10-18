@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "layershop-site",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["E:/layer-shop-website/build.mjs", "--serve"],
+      "port": 4173
+    }
+  ]
+}
