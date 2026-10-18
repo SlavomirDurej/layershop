@@ -65,6 +65,8 @@ fn family_of(file: &str) -> Option<Family> {
             return None;
         }
         Family::MingImage
+    } else if n.contains("moss_image") || n.contains("moss-image") {
+        Family::MossImage
     } else if n.contains("qwen_image_2.1") || n.contains("qwen-image-2.1") || n.contains("qwen_image_21") {
         Family::QwenImage21
     } else if n.contains("qwen_image") || n.contains("qwen-image") {
@@ -246,6 +248,8 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::QwenImage | Family::QwenEdit => &["qwen_2.5_vl"],
             Family::QwenImage21 => &["qwen3vl_8b"],
             Family::MingImage => &["ling_mini", "ming_image"],
+            // Not the other Qwen 3.5 9B files beside it: FLUX.3's and Qwen Image 2.1's prompt writers.
+            Family::MossImage => &["qwen3.5_9b_w4a8", "qwen3.5_9b_int8", "qwen3.5_9b_bf16"],
             _ => &[],
         };
         m.clip = choose(clips, &m.clip, clip_needles);
@@ -262,6 +266,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         let vae_needles: &[&str] = match family {
             Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
             Family::MingImage => &["ming_image_vae", "ming_image"],
+            Family::MossImage => &["flux2-vae_small", "flux2_vae_small", "flux2-vae"],
             Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
             Family::Krea2 | Family::QwenImage | Family::QwenEdit => &["qwen_image_vae"],
             _ => &["ae.safetensors"],
@@ -356,6 +361,7 @@ mod tests {
                     "qwen_image_edit_2511_bf16.safetensors",
                     "ming_image_0.1_design_int8_convrot.safetensors",
                     "ming_image_0.1_design_layer_int8_convrot.safetensors",
+                    "moss_image_base_bf16.safetensors",
                     "ltx-2.3-22b-dev_transformer_only_fp8_scaled.safetensors",
                     "hunyuanvideo1.5_720p_i2v_fp16.safetensors",
                     "mystery.safetensors",
@@ -373,6 +379,8 @@ mod tests {
                     "t5xxl_fp16.safetensors",
                     "ministral-3-3b.safetensors",
                     "ming_image_0.1_ling_mini_2.0_fp8_scaled.safetensors",
+                    "qwen3.5_9b_flux3_prompt_upsampler_w4a8.safetensors",
+                    "qwen3.5_9b_int8_convrot.safetensors",
                 ]),
             ),
             (
@@ -383,6 +391,7 @@ mod tests {
                     "qwen_image_vae.safetensors",
                     "qwen_image_2.1_vae_bf16.safetensors",
                     "ming_image_vae_fp16.safetensors",
+                    "flux2-vae_small.safetensors",
                 ]),
             ),
             ("checkpoints".to_string(), v(&["hidream_o1_image_bf16.safetensors", "ltx-2.3-22b-dev-fp8.safetensors", "sdxl_base_1.0.safetensors"])),
@@ -393,7 +402,7 @@ mod tests {
     fn recognises_image_models_only() {
         let found = detect(&folders());
         let names: Vec<&str> = found.iter().map(|m| m.unet.as_str()).filter(|u| !u.is_empty()).collect();
-        assert_eq!(names.len(), 16, "{names:?}");
+        assert_eq!(names.len(), 17, "{names:?}");
         for skipped in ["kontext", "ltx", "hunyuan", "mystery", "unconditional", "layer"] {
             assert!(!names.iter().any(|n| n.contains(skipped)), "{skipped} in {names:?}");
         }
@@ -539,6 +548,15 @@ mod tests {
         );
         assert_eq!((ming.steps, ming.cfg, ming.megapixels, ming.alpha), (12, 1.0, 2.0, true));
         assert!(ming.can_generate() && ming.can_edit() && problem(ming).is_none());
+        // MOSS Image: its Qwen 3.5 encoder (not the prompt writer of the same size beside it), the
+        // small FLUX.2 VAE, its template's settings, at the selection's own size.
+        let moss = by("moss_image_base_bf16.safetensors");
+        assert_eq!(
+            (moss.family, moss.clip.as_str(), moss.vae.as_str()),
+            (Family::MossImage, "qwen3.5_9b_int8_convrot.safetensors", "flux2-vae_small.safetensors")
+        );
+        assert_eq!((moss.steps, moss.cfg, moss.sampler.as_str(), moss.megapixels), (25, 2.5, "er_sde", 0.0));
+        assert!(moss.can_generate() && !moss.can_edit() && !moss.can_inpaint());
     }
 
     #[test]

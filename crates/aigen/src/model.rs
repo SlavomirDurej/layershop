@@ -91,6 +91,9 @@ pub enum Family {
     /// Ming Image (0.1 Design): a model for layouts with text (pages, posters, UI). It generates
     /// and edits with the same weights, and can render a transparent background.
     MingImage,
+    /// MOSS Image (SFT, Base): text to image from a layout prompt, JSON that places what it
+    /// describes in boxes on the canvas ([`crate::comfy`] writes one for a typed prompt).
+    MossImage,
     /// FLUX.1 Fill (Fill Dev, OneReward): BFL's inpainting model. It is given the picture and
     /// the mask as conditioning, so it knows where it paints; it can't generate from text alone.
     Flux1Fill,
@@ -107,7 +110,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 17] = [
+    pub const ALL: [Family; 18] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux3,
@@ -120,6 +123,7 @@ impl Family {
         Family::QwenImage,
         Family::QwenImage21,
         Family::MingImage,
+        Family::MossImage,
         Family::Flux1Fill,
         Family::QwenInpaint,
         Family::QwenEdit,
@@ -141,6 +145,7 @@ impl Family {
             Family::QwenImage => "qwenImage",
             Family::QwenImage21 => "qwenImage21",
             Family::MingImage => "mingImage",
+            Family::MossImage => "mossImage",
             Family::Flux1Fill => "flux1Fill",
             Family::QwenInpaint => "qwenInpaint",
             Family::QwenEdit => "qwenEdit",
@@ -167,6 +172,7 @@ impl Family {
             Family::QwenImage => "Qwen Image",
             Family::QwenImage21 => "Qwen Image 2.1",
             Family::MingImage => "Ming Image",
+            Family::MossImage => "MOSS Image",
             Family::Flux1Fill => "FLUX.1 Fill (inpainting)",
             Family::QwenInpaint => "Qwen Image + InstantX ControlNet (inpainting)",
             Family::QwenEdit => "Qwen Image Edit (editing)",
@@ -207,6 +213,14 @@ impl Family {
     /// the selection's own size: the user's to choose).
     pub fn render_size(self, width: u32, height: u32, megapixels: f64) -> (u32, u32) {
         use crate::size::{HIDREAM_O1_SIZES, nearest_ratio, render_size};
+        // MOSS Image renders any shape at its own size from 0.25 to 4 megapixels (its authors'
+        // range): the selection's size within it, and the nearest end of it outside.
+        if self == Family::MossImage && !(megapixels.is_finite() && megapixels > 0.0) {
+            let area = f64::from(width.max(1)) * f64::from(height.max(1)) / 1e6;
+            let (low, high) = MOSS_MEGAPIXELS;
+            let megapixels = if (low..=high).contains(&area) { 0.0 } else { area.clamp(low, high) };
+            return render_size(width, height, megapixels, self.size_multiple());
+        }
         if self == Family::HidreamO1
             && megapixels.is_finite()
             && megapixels > 0.0
@@ -412,6 +426,22 @@ impl Family {
             // 1024 x 1024, 14 of 20 above it). At four (2672 x 1504) a photographic scene came out
             // waxy, with a third person the prompt did not ask for; the same graph and seed at
             // 1928 x 1088 matched the template's result.
+            // ComfyUI's MOSS Image templates (SFT): faster than its authors' 50 steps at CFG 3
+            // with the Euler sampler, the authors' negative prompt. 0 megapixels: the
+            // selection's own size ([`Family::render_size`]).
+            Family::MossImage => Model {
+                name: "MOSS Image".into(),
+                unet: "moss_image_sft_int8_convrot.safetensors".into(),
+                clip: "qwen3.5_9b_w4a8_gptq.safetensors".into(),
+                vae: "flux2-vae_small.safetensors".into(),
+                steps: 25,
+                cfg: 2.5,
+                sampler: "er_sde".into(),
+                scheduler: "simple".into(),
+                negative_prompt: MOSS_NEGATIVE.into(),
+                megapixels: 0.0,
+                ..base
+            },
             Family::MingImage => Model {
                 name: "Ming Image 0.1 Design".into(),
                 unet: "ming_image_0.1_design_int8_convrot.safetensors".into(),
@@ -461,6 +491,11 @@ impl Family {
         }
     }
 }
+
+/// The sizes MOSS Image renders well, in megapixels: its authors' range.
+pub const MOSS_MEGAPIXELS: (f64, f64) = (0.25, 4.0);
+/// MOSS Image's negative prompt, as its authors recommend it.
+pub const MOSS_NEGATIVE: &str = "nsfw, worst quality, bad anatomy, watermark, jpeg artifact";
 
 /// The most reference pictures an edit is given besides the one it edits (`ai.generate`'s
 /// `references`, the Edit tab's rows).
@@ -676,6 +711,9 @@ impl Model {
             // In place of FLUX.2 Klein 9B since 2026-10-16 (not in that comparison): tried
             // against it on the same server, faster and as good, at its template's settings.
             Some(local(Family::Flux3, "FLUX.3 Klein")),
+            // Added 2026-10-18 (not in that comparison): renders at the selection's own size and
+            // places its subject to fill it.
+            Some(local(Family::MossImage, "MOSS Image")),
             Some(local(Family::Ideogram4, "Ideogram 4")),
             // With its prompt written by Gemma 4 and the result refined by Z-Image Turbo.
             Some(Model {
@@ -723,11 +761,12 @@ impl Model {
             "flux-2",
             "grok-imagine",
         ];
-        const LOCAL: [Family; 17] = [
+        const LOCAL: [Family; 18] = [
             Family::QwenImage21,
             Family::Krea2,
             Family::ZImage,
             Family::Flux3,
+            Family::MossImage,
             Family::Flux2,
             Family::Ideogram4,
             Family::HidreamO1,
@@ -958,6 +997,7 @@ mod tests {
                 "krea-2-turbo",
                 "z-image-turbo",
                 "flux-3-klein",
+                "moss-image",
                 "ideogram-4",
                 "hidream-o1",
                 "ernie-image-turbo",

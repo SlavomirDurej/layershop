@@ -53,6 +53,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::Krea2 => "krea2",
         Family::Flux2 | Family::Ernie => "flux2",
         Family::Flux3 => "flux3",
+        Family::MossImage => "moss_image",
         Family::Ideogram4 => "ideogram4",
         // Ming Image's encoder is recognised by its weights; its templates load it as this type.
         Family::QwenImage | Family::QwenImage21 | Family::MingImage | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
@@ -63,7 +64,7 @@ fn clip_type(family: Family) -> &'static str {
 fn latent_node(family: Family) -> &'static str {
     match family {
         Family::ZImage | Family::Flux1 | Family::HidreamI1 | Family::QwenImage => "EmptySD3LatentImage",
-        Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 => "EmptyFlux2LatentImage",
+        Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 | Family::MossImage => "EmptyFlux2LatentImage",
         Family::HidreamO1 => "EmptyHiDreamO1LatentImage",
         _ => "EmptyLatentImage",
     }
@@ -122,15 +123,84 @@ fn transparent(model: &Model, job: &Job, from_picture: bool) -> bool {
     model.family == Family::MingImage && job.alpha && !from_picture
 }
 
-/// `job`'s prompt as a text-to-image with `model` is given it: for a transparent background
-/// from Ming Image, behind the phrase that asks for one, unless the prompt starts with one itself.
+/// `job`'s prompt as a text-to-image with `model` is given it: for MOSS Image, a layout prompt
+/// ([`moss_layout`]); for a transparent background from Ming Image, behind the phrase that asks
+/// for one, unless the prompt starts with one itself.
 fn prompt_for(model: &Model, job: &Job) -> String {
+    if model.family == Family::MossImage {
+        return moss_layout(&job.prompt, job.width, job.height);
+    }
     let prompt = job.prompt.trim_start();
     let lower = prompt.to_lowercase();
     if !transparent(model, job, false) || MING_TRANSPARENT.iter().any(|phrase| lower.starts_with(&phrase.to_lowercase())) {
         return job.prompt.clone();
     }
     format!("{}, {prompt}", MING_TRANSPARENT[0])
+}
+
+/// How far in from the canvas's edges the box of a typed prompt's subject is, as a fraction of
+/// each edge. At 0 the subject filled the canvas but was cropped by it (a car lost its wheels,
+/// 2026-10-18); at 5% it filled it whole. Without a box it sat small in the middle.
+const MOSS_INSET: f64 = 0.05;
+
+/// Is `prompt` a MOSS Image layout prompt already: a JSON object with a `summary` or `items`?
+fn moss_layout_of(prompt: &str) -> Option<Map<String, Value>> {
+    let trimmed = prompt.trim();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(Value::Object(o)) if o.get("summary").is_some_and(Value::is_object) || o.get("items").is_some_and(Value::is_array) => Some(o),
+        _ => None,
+    }
+}
+
+/// `prompt` as MOSS Image's layout prompt for a `width` × `height` canvas (its authors' JSON, as
+/// ComfyUI's MOSS-Image Layout Prompt node writes it): the prompt describes the whole picture and
+/// one object filling the canvas, in a box [`MOSS_INSET`] in from its edges, so what is asked for
+/// fills the selection it is generated for. A prompt that is a layout already goes as written.
+pub fn moss_layout(prompt: &str, width: u32, height: u32) -> String {
+    if moss_layout_of(prompt).is_some() {
+        return prompt.trim().to_string();
+    }
+    let caption = prompt.trim();
+    let (w, h) = (i64::from(width), i64::from(height));
+    let (inset_x, inset_y) = ((w as f64 * MOSS_INSET).round() as i64, (h as f64 * MOSS_INSET).round() as i64);
+    // Pixels from the canvas's centre, [y0, x0, y1, x1].
+    let bbox = [inset_y - h / 2, inset_x - w / 2, h - h / 2 - inset_y, w - w / 2 - inset_x];
+    json!({
+        "summary": {"caption": caption},
+        "items": [{"label": "object", "caption": caption, "bbox": bbox}],
+        "bbox_coord_space": "abs_centralized",
+        "bbox_format": "yxyx",
+    })
+    .to_string()
+}
+
+/// A layout prompt written for a `from` canvas (the selection, in its pixels) with its boxes
+/// scaled to the `to` canvas the model renders, which differs when the selection is outside the
+/// sizes MOSS Image renders well or not a multiple of 16. Any other prompt is returned as it is.
+pub fn moss_scaled(prompt: &str, from: (u32, u32), to: (u32, u32)) -> String {
+    let Some(mut layout) = moss_layout_of(prompt) else { return prompt.to_string() };
+    if from == to || from.0 == 0 || from.1 == 0 {
+        return prompt.to_string();
+    }
+    let (sx, sy) = (f64::from(to.0) / f64::from(from.0), f64::from(to.1) / f64::from(from.1));
+    let Some(Value::Array(items)) = layout.get_mut("items") else { return prompt.to_string() };
+    for item in items.iter_mut() {
+        let Some(Value::Array(bbox)) = item.get_mut("bbox") else { continue };
+        if bbox.len() != 4 {
+            continue;
+        }
+        // [y0, x0, y1, x1]: even places are rows, odd ones columns.
+        for (i, v) in bbox.iter_mut().enumerate() {
+            if let Some(n) = v.as_f64().filter(|n| n.is_finite()) {
+                let scaled = (n * if i % 2 == 0 { sy } else { sx }).round().clamp(-1e9, 1e9) as i64;
+                *v = json!(scaled);
+            }
+        }
+    }
+    Value::Object(layout).to_string()
 }
 
 /// The nodes that decode `samples` into the image to show. Ming Image's VAE decodes four
@@ -385,6 +455,14 @@ fn loaders(g: &mut Graph, model: &Model) -> Result<(Link, Link, Link)> {
             Family::HidreamO1 => g.node("ModelNoiseScale", json!({"model": unet, "noise_scale": shift})),
             _ => g.node("ModelSamplingAuraFlow", json!({"model": unet, "shift": shift})),
         };
+    }
+    // ComfyUI's MOSS Image templates: the negative side of the guidance skips layer 22 over the
+    // first half of the schedule (its authors' setting), which keeps detail with CFG.
+    if f == Family::MossImage {
+        unet = g.node(
+            "SkipLayerGuidanceDiTSimple",
+            json!({"model": unet, "double_layers": "", "single_layers": "22", "start_percent": 0.0, "end_percent": 0.5}),
+        );
     }
     // ComfyUI's HiDream O1 template: the model works on pixels in patches, and this blends
     // shifted passes over the last fifth of the schedule so their edges don't show. Its Dev
@@ -813,6 +891,7 @@ pub fn parse_models(body: &[u8]) -> Result<Vec<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::MOSS_NEGATIVE;
 
     fn job() -> Job {
         Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false, source: None }
@@ -1045,6 +1124,70 @@ mod tests {
         let guider = w.as_object().unwrap().values().find(|n| n["class_type"] == "DualModelGuider").unwrap();
         assert!(guider["inputs"]["model_negative"].is_array());
         assert_eq!(classes(&w).iter().filter(|x| *x == "UNETLoader").count(), 2);
+    }
+
+    #[test]
+    fn moss_image_follows_its_templates_with_a_layout_prompt() {
+        let m = Family::MossImage.preset();
+        let w = workflow(&m, &job()).unwrap();
+        assert_well_formed(&w);
+        let c = classes(&w);
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["type"], "moss_image");
+        assert_eq!(
+            (&node(&w, "UNETLoader")["inputs"]["unet_name"], &node(&w, "VAELoader")["inputs"]["vae_name"]),
+            (&json!("moss_image_sft_int8_convrot.safetensors"), &json!("flux2-vae_small.safetensors"))
+        );
+        // Skip layer guidance on layer 22 over the first half, sampled by KSampler at the template's settings.
+        let slg = &node(&w, "SkipLayerGuidanceDiTSimple")["inputs"];
+        assert_eq!((&slg["double_layers"], &slg["single_layers"], &slg["start_percent"], &slg["end_percent"]), (&json!(""), &json!("22"), &json!(0.0), &json!(0.5)));
+        let k = &node(&w, "KSampler")["inputs"];
+        assert_eq!((&k["steps"], &k["cfg"], &k["sampler_name"], &k["scheduler"]), (&json!(25), &json!(2.5), &json!("er_sde"), &json!("simple")));
+        assert_eq!(w[k["model"][0].as_str().unwrap()]["class_type"], "SkipLayerGuidanceDiTSimple");
+        let latent = &node(&w, "EmptyFlux2LatentImage")["inputs"];
+        assert_eq!((&latent["width"], &latent["height"]), (&json!(1024), &json!(768)));
+        assert!(!c.iter().any(|x| x == "ModelSamplingAuraFlow" || x == "ConditioningZeroOut"), "{c:?}");
+        // The prompt is a layout: the whole picture, and one object in a box 5% in from the edges.
+        let texts: Vec<String> = nodes_with(&w, "CLIPTextEncode").iter().map(|n| n["inputs"]["text"].as_str().unwrap().to_string()).collect();
+        assert!(texts.contains(&MOSS_NEGATIVE.to_string()), "{texts:?}");
+        let layout: Value = serde_json::from_str(texts.iter().find(|t| t.starts_with('{')).unwrap()).unwrap();
+        assert_eq!(layout["summary"]["caption"], "a red frog");
+        assert_eq!(layout["items"], json!([{"label": "object", "caption": "a red frog", "bbox": [-346, -461, 346, 461]}]));
+        assert_eq!((&layout["bbox_coord_space"], &layout["bbox_format"]), (&json!("abs_centralized"), &json!("yxyx")));
+        // A layout typed as the prompt goes as written; an odd size still gives a box inside it.
+        let own = r#"{"summary":{"caption":"poster"},"items":[{"label":"text","caption":"title","text":"EXPLORE","bbox":[-300,-200,-200,200]}]}"#;
+        assert_eq!(moss_layout(&format!("  {own}
+"), 1024, 768), own);
+        let odd: Value = serde_json::from_str(&moss_layout("x", 17, 3)).unwrap();
+        assert_eq!(odd["items"][0]["bbox"], json!([-1, -7, 2, 8]));
+        // JSON that is not a layout, and text that only starts like it, are a prompt like any other.
+        for prompt in [r#"{"a": 1}"#, "{not json", "[1, 2]"] {
+            let v: Value = serde_json::from_str(&moss_layout(prompt, 64, 64)).unwrap();
+            assert_eq!(v["summary"]["caption"], prompt);
+        }
+        // Text to image only.
+        assert!(m.can_generate() && !m.can_edit() && !m.can_inpaint() && !m.alpha);
+        assert!(edit_workflow(&m, &job(), &Edit { image: "src.png", references: &[] }).unwrap_err().to_string().contains("MOSS Image can't edit"));
+        // Image to image is given the prompt as typed: there is a picture to follow, not a canvas to lay out.
+        let w = inpaint_workflow(&m, &job(), &Inpaint { image: "src.png", mask: None, denoise: 0.6 }).unwrap();
+        assert!(nodes_with(&w, "CLIPTextEncode").iter().any(|n| n["inputs"]["text"] == "a red frog"));
+    }
+
+    #[test]
+    fn moss_layouts_are_scaled_to_the_render() {
+        let own = r#"{"summary":{"caption":"p"},"items":[{"label":"object","caption":"c","bbox":[-100,-200,100,200]},{"label":"text","bbox":[1,2,3]},{"bbox":["a",null,4.6,-8]},{"caption":"no box"}]}"#;
+        let scaled: Value = serde_json::from_str(&moss_scaled(own, (400, 200), (800, 300))).unwrap();
+        assert_eq!(scaled["items"][0]["bbox"], json!([-150, -400, 150, 400]));
+        // What is not four numbers is left as it is.
+        assert_eq!(scaled["items"][1]["bbox"], json!([1, 2, 3]));
+        assert_eq!(scaled["items"][2]["bbox"], json!(["a", null, 7, -16]));
+        assert_eq!(scaled["items"][3]["caption"], "no box");
+        assert_eq!(scaled["summary"]["caption"], "p");
+        // The same size, an empty one, and a prompt that is not a layout are returned unchanged.
+        assert_eq!(moss_scaled(own, (400, 200), (400, 200)), own);
+        assert_eq!(moss_scaled(own, (0, 200), (400, 200)), own);
+        assert_eq!(moss_scaled("a frog", (400, 200), (800, 300)), "a frog");
+        let huge = r#"{"items":[{"bbox":[1e308,-1e308,1,1]}]}"#;
+        assert!(moss_scaled(huge, (1, 1), (4096, 4096)).contains("1000000000"));
     }
 
     #[test]

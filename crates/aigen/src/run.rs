@@ -234,7 +234,11 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
         Some(source) => (source.width, source.height),
         None => model.family.render_size(job.width, job.height, model.megapixels),
     };
-    let render = Job { width, height, source: None, ..job.clone() };
+    let mut render = Job { width, height, source: None, ..job.clone() };
+    // A layout prompt's boxes are in the selection's pixels: put them where the render has them.
+    if model.family == crate::model::Family::MossImage && job.source.is_none() {
+        render.prompt = comfy::moss_scaled(&job.prompt, (job.width, job.height), (width, height));
+    }
     let workflow = match &job.source {
         Some(source) if source.edit => {
             comfy::check_edit(model)?;
@@ -283,7 +287,7 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
     };
     (control.progress)(0.02, "Sending to ComfyUI…");
     let queued = transport.send(&Request::post_json(format!("{base}/prompt"), comfy::queue_body(&workflow, "photocraft"))).map_err(unreachable)?;
-    let id = comfy::parse_queued(queued.status, &queued.body)?;
+    let id = comfy::parse_queued(queued.status, &queued.body).map_err(|e| too_old(model, e))?;
     let label = if model.name.is_empty() { model.family.label() } else { model.name.as_str() };
     let message = format!("Generating with {label}…");
     let polls = (timeout * 1000 / POLL.as_millis().max(1) as u64).max(1);
@@ -322,6 +326,18 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
     }
     let _ = transport.send(&Request::post_json(format!("{base}/interrupt"), b"{}".to_vec()).timeout(5));
     Err(Error::Server(format!("ComfyUI did not finish within {timeout} seconds (raise the timeout in Preferences › Generative AI)")))
+}
+
+/// `e`, ComfyUI's refusal of `model`'s workflow, with what to do when the server is older than
+/// the model: MOSS Image came to ComfyUI after its 0.41.0 release, and an older server rejects
+/// its text encoder type.
+fn too_old(model: &Model, e: Error) -> Error {
+    match e {
+        Error::Server(msg) if model.family == crate::model::Family::MossImage && msg.contains("moss_image") => Error::Server(format!(
+            "{msg}. This ComfyUI predates MOSS Image, which it supports since 2026-10-16 (after its 0.41.0 release): update ComfyUI"
+        )),
+        e => e,
+    }
 }
 
 /// The model files a ComfyUI server offers, by folder (see [`comfy::FOLDERS`]), for the file
@@ -588,6 +604,51 @@ mod tests {
         });
         let m = Model::cloud(Provider::Gemini, "Nano Banana 2", "gemini-3.1-flash-image-preview", false);
         assert_eq!(generate(&gem, &settings(), &m, "k", &job, &control(&|| false)).unwrap().bytes, b"hello");
+    }
+
+    #[test]
+    fn moss_image_renders_the_selections_own_size_and_its_layout_follows() {
+        let moss = Family::MossImage.preset();
+        // Its own size, to a multiple of 16, from a quarter to four megapixels; outside, the nearest end.
+        assert_eq!(moss.family.render_size(1200, 500, moss.megapixels), (1200, 496));
+        assert_eq!(moss.family.render_size(1920, 1080, moss.megapixels), (1920, 1088));
+        let (w, h) = moss.family.render_size(300, 200, moss.megapixels);
+        assert!((f64::from(w * h) / 1e6 - 0.25).abs() < 0.01 && (f64::from(w) / f64::from(h) - 1.5).abs() < 0.05, "{w}x{h}");
+        let (w, h) = moss.family.render_size(6000, 4000, moss.megapixels);
+        assert!((f64::from(w * h) / 1e6 - 4.0).abs() < 0.05, "{w}x{h}");
+        // A size the user sets is theirs.
+        assert_eq!(moss.family.render_size(1200, 500, 1.0), render_size(1200, 500, 1.0, 16));
+        // A layout typed for a 300 x 200 selection has its boxes where the render puts them.
+        let layout = r#"{"summary":{"caption":"a poster"},"items":[{"label":"text","text":"HI","bbox":[-50,-100,50,100]}]}"#;
+        let fake = Fake::new(|r, _| match r.url.as_str() {
+            u if u.ends_with("/prompt") => {
+                let w = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].clone();
+                let text = w.as_object().unwrap().values().find(|n| n["inputs"]["text"].as_str().is_some_and(|t| t.starts_with('{'))).unwrap()["inputs"]["text"].clone();
+                let sent: serde_json::Value = serde_json::from_str(text.as_str().unwrap()).unwrap();
+                let latent = w.as_object().unwrap().values().find(|n| n["class_type"] == "EmptyFlux2LatentImage").unwrap()["inputs"].clone();
+                let (lw, lh) = (latent["width"].as_f64().unwrap(), latent["height"].as_f64().unwrap());
+                let bbox = &sent["items"][0]["bbox"];
+                assert_eq!((bbox[1].as_f64().unwrap(), bbox[3].as_f64().unwrap()), ((-100.0 * lw / 300.0).round(), (100.0 * lw / 300.0).round()), "{sent}");
+                assert_eq!(bbox[2].as_f64().unwrap(), (50.0 * lh / 200.0).round(), "{sent}");
+                ok(r#"{"prompt_id":"abc"}"#)
+            }
+            u if u.ends_with("/history/abc") => ok(DONE),
+            u if u.contains("/view?") => ok("PNGDATA"),
+            u => panic!("unexpected request {u}"),
+        });
+        let job = Job { prompt: layout.into(), width: 300, height: 200, ..job() };
+        let g = generate(&fake, &settings(), &moss, "", &job, &control(&|| false)).unwrap();
+        assert!(g.width * g.height >= 240_000 && g.width > g.height, "{}x{}", g.width, g.height);
+        // A server older than the model says so, and what to do.
+        let old = Fake::new(|r, _| {
+            assert!(r.url.ends_with("/prompt"));
+            ok(r#"{"error":{"message":"Prompt outputs failed validation"},"node_errors":{"2":{"class_type":"CLIPLoader","errors":[{"message":"Value not in list","details":"type: 'moss_image' not in ['stable_diffusion']"}]}}}"#)
+        });
+        let e = generate(&old, &settings(), &moss, "", &job, &control(&|| false)).unwrap_err().to_string();
+        assert!(e.contains("Value not in list") && e.contains("update ComfyUI"), "{e}");
+        // Another model's refusal is left as it is.
+        let e = generate(&old, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
+        assert!(!e.contains("update ComfyUI"), "{e}");
     }
 
     #[test]

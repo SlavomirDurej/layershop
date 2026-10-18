@@ -56,8 +56,9 @@ back end you set up, and places the answer on a new layer.
 in multiples of 16, so a model renders at about its **Render size (MP)** in the selection's
 aspect ratio, and the result is scaled to cover the selection and cropped to it. Set it to 0 to
 render at the selection's own size. The panel shows what will be asked (`Selection 520 × 571 px
-→ 976 × 1072 px`). Ming Image is the exception: it renders at two megapixels (see *Ming Image*
-under *Local models*).
+→ 976 × 1072 px`). Ming Image is an exception: it renders at two megapixels (see *Ming Image*
+under *Local models*). MOSS Image is the other: it renders at the selection's own size (see
+*MOSS Image*).
 
 ## Create and Edit
 
@@ -423,6 +424,7 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 | Krea 2 Turbo | local | 8 steps, CFG 1, 1 MP |
 | Z-Image Turbo | local | 8 steps, CFG 2, `res_multistep`, shift 3, 1 MP |
 | FLUX.3 Klein | local | 50 steps, CFG 3.5, 1 MP |
+| MOSS Image | local | 25 steps, CFG 2.5, `er_sde`, the selection's own size |
 | Ideogram 4 | local | 28 steps, CFG 5, shift 5, 1 MP |
 | HiDream O1 | local | 40 steps, CFG 5, `dpmpp_2m_sde_gpu`, noise scale 8, its trained sizes; prompt written by Gemma 4, result refined by Z-Image Turbo at 0.35 |
 | Ernie Image Turbo | local | 8 steps, CFG 1, 2 MP |
@@ -481,6 +483,7 @@ loads. The workflows follow ComfyUI's own text-to-image templates and use only b
 | Qwen Image | diffusion model, text encoder (`qwen_image`, Qwen 2.5 VL), VAE | AuraFlow shift, KSampler |
 | Qwen Image 2.1 | diffusion model, text encoder (`qwen_image`, Qwen 3 VL 8B), the 2.1 VAE | its own prompt node, KSampler; edges in multiples of 32 |
 | Ming Image (0.1 Design) | diffusion model, text encoder (`qwen_image`, Ling mini 2.0), its own VAE | FLUX shift by size, a guider without CFG, 12 steps; see below |
+| MOSS Image (SFT, Base) | diffusion model, text encoder (`moss_image`, Qwen 3.5 9B), the small FLUX.2 VAE | skip layer guidance (layer 22), KSampler; a layout prompt; see below |
 | FLUX.1 Fill (inpainting only) | diffusion model, two text encoders, VAE | Inpaint Model Conditioning, FLUX guidance, KSampler |
 | Qwen Image + InstantX ControlNet (inpainting only) | diffusion model, text encoder (`qwen_image`), VAE, ControlNet | ControlNet Inpainting Apply, AuraFlow shift, KSampler |
 | Checkpoint (SD / SDXL) | one checkpoint | KSampler |
@@ -567,6 +570,47 @@ Tried against ComfyUI 0.39 (RTX 4090, models loaded): text to image in 3 s at 10
 the rest of the page unchanged; a restyle at 60% in 22 s. Ticked **Supports inpainting**, it
 replaced a cup with a teapot inside a selection, in the scene's light, at 80% and 100% strength
 (two tries, one picture).
+
+**MOSS Image** (from OpenMOSS, Apache 2.0) renders text to image from a *layout prompt*: JSON
+that describes the whole picture and places what it describes in boxes on the canvas. That suits
+a selection: what you ask for is drawn to fill it. It follows ComfyUI's MOSS Image templates
+(25 steps, CFG 2.5, `er_sde`, the authors' negative prompt, skip layer guidance on layer 22 over
+the first half of the schedule), and differs from the other models in three ways:
+
+- **It renders at the selection's own size** (the whole canvas without one), in multiples of
+  16, so the result is not scaled to fit. Its authors give 0.25 to 4 megapixels as the range it
+  renders well: a smaller or larger selection is rendered at the nearest end of it, in its
+  shape, and scaled. A **Render size (MP)** above 0 in its settings renders at that size instead.
+- **A typed prompt becomes a layout**: the prompt as the picture's caption, and one object with
+  the same caption in a box 5% in from the canvas's edges. Without the box the subject sat small
+  in the middle of a wide selection; with a box at the very edge it filled the selection but was
+  cropped by it (a car without its wheels); at 5% it filled it whole (2026-10-18). A scene
+  described this way still comes out as a scene.
+- **A prompt that is a layout already goes as written**: a JSON object with `summary` or `items`,
+  in the authors' format (see [MOSS Image](https://openmoss.ai/MOSS-Image/)):
+
+  ```json
+  {"summary": {"caption": "A minimalist travel poster, cream background, a blue mountain"},
+   "items": [
+     {"label": "text", "caption": "Large dark-blue uppercase title", "text": "EXPLORE", "bbox": [-416, -384, -288, 384]},
+     {"label": "object", "caption": "A flat blue mountain illustration", "bbox": [-192, -288, 384, 288]}],
+   "bbox_coord_space": "abs_centralized", "bbox_format": "yxyx"}
+  ```
+
+  Boxes are `[top, left, bottom, right]` in pixels of the selection (the canvas without one),
+  measured from its centre: a 1024 × 1024 selection runs from -512 to 512 each way. Labels are
+  `object`, `character` and `text` (with the words to render in `text`). When the render size
+  differs from the selection's, the boxes are scaled with it.
+
+It can't change a picture following an instruction or inpaint (the Edit tab doesn't offer it);
+Restyle (image to image) gives it the prompt as typed. Not run: the templates' prompt upsampler (the same Qwen 3.5 9B
+rewriting the prompt as a caption), which can rewrite a layout away.
+
+MOSS Image came to ComfyUI on 2026-10-16, after its 0.41.0 release, so it needs a later
+ComfyUI (ComfyUI Desktop has it); an older server rejects its text encoder type, and the error
+says to update. The Local AI setup's pinned ComfyUI (0.39) predates it, so the wizard does not
+offer it yet; Scan Server finds it on a ComfyUI that has its files (`moss_image_sft_…` or
+`moss_image_base_…`, `qwen3.5_9b_w4a8_gptq…`, `flux2-vae_small…`).
 
 **Custom workflow.** For anything the built-in graphs don't cover (LoRA stacks, prompt
 enhancers, custom nodes): in ComfyUI use **Workflow › Export (API)** and paste the JSON. Put
