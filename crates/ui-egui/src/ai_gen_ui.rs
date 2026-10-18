@@ -877,6 +877,9 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
     let t = Tokens::get(ui.ctx());
     let has_doc = app.session.active().is_some();
     let painting = mask_brushing(app);
+    // A narrow panel keeps the brush size field but not its − and + (the field still takes the
+    // wheel and typing), so nothing runs into the bin.
+    let roomy = ui.available_width() >= 280.0;
     ui.add_enabled_ui(!busy && has_doc, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -908,14 +911,14 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
             ui.add_enabled_ui(painting, |ui| {
                 let size = app.session.tools.brush.size;
                 let mut next = None;
-                if crate::icons::button(ui, "minus", 22.0, false, tr("Smaller brush")).clicked() {
+                if roomy && crate::icons::button(ui, "minus", 22.0, false, tr("Smaller brush")).clicked() {
                     next = Some(size / 1.25);
                 }
                 let mut v = size;
                 if widgets::value_field(ui, &mut v, 1.0..=2000.0, "px", 58.0).on_hover_text(tr("Brush size")).changed() {
                     next = Some(v);
                 }
-                if crate::icons::button(ui, "plus", 22.0, false, tr("Larger brush")).clicked() {
+                if roomy && crate::icons::button(ui, "plus", 22.0, false, tr("Larger brush")).clicked() {
                     next = Some(size * 1.25);
                 }
                 if let Some(n) = next.filter(|n| n.is_finite()) {
@@ -928,7 +931,9 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
                 if clear.clicked() {
                     mask_run(app, "ai.mask", json!({"clear": true}));
                 }
-                if !marked {
+                // In a narrow panel the word gives way to the brush size rather than cover it.
+                let word = ui.painter().layout_no_wrap(tr("Mask").to_string(), egui::FontId::proportional(NOTE_SIZE), t.text_faint).size().x;
+                if !marked && ui.available_width() >= word + ui.spacing().item_spacing.x {
                     ui.label(RichText::new(tr("Mask")).color(t.text_faint).size(NOTE_SIZE));
                 }
             });
@@ -1157,6 +1162,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         let options: Vec<(String, &str)> = models.iter().map(|m| (m.id.clone(), m.name.as_str())).collect();
         let headings = model_headings(&models);
         ui.add_enabled_ui(!busy, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             widgets::dropdown_sectioned(ui, "ai-gen-model", &mut chosen, &options, &headings, (width - 34.0).max(80.0));
         });
         settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
@@ -1175,6 +1181,9 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         let offered = if edit { photocraft_engine::ai_cmds::edit_sources(&app.session) } else { photocraft_engine::ai_cmds::img2img_sources(&app.session) };
         ui.add_enabled_ui(!busy && !offered.is_empty(), |ui| {
             ui.horizontal(|ui| {
+                // A long layer name (a generated layer is named after its prompt) is cut short:
+                // grown to fit, the dropdown would push Generate out of a narrow panel.
+                ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                 edit_label(ui, tr("Source"));
                 let left = (ui.available_width() - 2.0).max(80.0);
                 match if edit { edit_source(app) } else { img_source(app) } {

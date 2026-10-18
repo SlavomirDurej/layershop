@@ -1839,3 +1839,40 @@ fn the_panels_own_look_at_the_server_ends_quietly() {
     assert!(on_job_event(&mut app, &event(10, JobOutcome::Done(json!({"folders": {"diffusion_models": ["a.safetensors"]}})))));
     assert_eq!(app.ui.ai_gen.server_files.as_ref().unwrap()["diffusion_models"], ["a.safetensors"]);
 }
+
+#[test]
+fn a_narrow_panel_keeps_everything_inside_it() {
+    let mut app = app();
+    add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let doc = app.session.active().unwrap().doc.id.0;
+    // A layer named after a long prompt (as generated layers are), the source and a reference.
+    let long = "[qwen_image_2.1] Create a breathtaking, photorealistic nature scene at dawn";
+    app.run("layer.new.layer", json!({"name": long})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("edit.fill", json!({"color": "#336699"})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    let layer = app.session.active().unwrap().active_layer.unwrap().0;
+    (app.ui.ai_gen.mode, app.ui.ai_gen.task, app.ui.ai_gen.edit_model) = (Mode::Edit, EditTask::Change, "q21".into());
+    app.ui.ai_gen.prompt = "add @dracco rising from the lake".into();
+    let reference = |name: &str| NamedRef { source: SourceRef::DocumentLayer { document: doc, layer }, name: name.into() };
+    app.ui.ai_gen.edit_references = vec![reference("dracco_the_dragon_king"), reference("another_long_name"), reference("and_a_third_one")];
+    app.ui.ai_gen.editing_ref = Some(0);
+    // The dock is 250 wide at its narrowest (`panels::DOCK_WIDTH`), its content a little less.
+    for width in [234.0, 260.0, 300.0, 360.0] {
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, Default::default());
+        let input = || egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 900.0))), ..Default::default() };
+        let mut used = 0.0f32;
+        for _ in 0..3 {
+            ctx.run_ui(input(), |ui| {
+                let inner = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 900.0));
+                let r = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui, false)).response.rect;
+                used = r.width();
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(used <= width + 0.5, "the panel's content is {used} wide in a panel {width} wide");
+    }
+}

@@ -116,11 +116,15 @@ pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max:
         ui.horizontal(|ui| {
             edit_label(ui, tr("Refs"));
             ui.spacing_mut().item_spacing.x = 4.0;
+            // The chips share the row (with room for + while there is one to add): a long name is
+            // shortened rather than pushing the panel wider.
+            let plus = if refs.len() < max { 22.0 + 4.0 } else { 0.0 };
+            let each = ((ui.available_width() - plus) / refs.len().max(1) as f32 - 4.0).max(40.0);
             for (i, r) in refs.iter().enumerate() {
                 let (state, number) = states.get(i).copied().unwrap_or((Sent::All, None));
                 let label = if r.name.is_empty() { format!("{} {}", tr("Image"), number.unwrap_or(i + 2)) } else { format!("@{}", r.name) };
                 let picture = offered.iter().find(|(o, _)| *o == r.source).map_or("", |(_, l)| l.as_str());
-                let (body, close) = chip(ui, &label, thumbs.get(i).copied().flatten(), state, open == Some(i));
+                let (body, close) = chip(ui, &label, thumbs.get(i).copied().flatten(), state, open == Some(i), each);
                 if close {
                     remove = Some(i);
                 } else if body.clicked() {
@@ -135,7 +139,7 @@ pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max:
                 add = true;
             }
             if refs.is_empty() {
-                ui.label(RichText::new(tr("Characters, objects, places…")).color(t.text_faint).size(super::NOTE_SIZE));
+                ui.add(egui::Label::new(RichText::new(tr("Characters, objects, places…")).color(t.text_faint).size(super::NOTE_SIZE)).truncate());
             }
         });
     });
@@ -186,9 +190,9 @@ fn chip_tip(r: &NamedRef, picture: &str, state: Sent, number: Option<usize>) -> 
     format!("{picture}\n{what}\n{}", tr("Click to rename it or choose another picture; × takes it out."))
 }
 
-/// One chip: the picture's thumbnail, the name and a × at its end. Returns the chip's response
-/// and whether the × was clicked.
-fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: Sent, open: bool) -> (egui::Response, bool) {
+/// One chip, `max` wide at most: the picture's thumbnail, the name (shortened with … to fit) and
+/// a × at its end. Returns the chip's response and whether the × was clicked.
+fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: Sent, open: bool, max: f32) -> (egui::Response, bool) {
     const H: f32 = 22.0;
     const THUMB: f32 = 16.0;
     const CLOSE: f32 = 14.0;
@@ -198,9 +202,23 @@ fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: S
         Sent::All => t.text,
         Sent::No => t.text_faint,
     };
-    let shown: String = if label.chars().count() > 14 { label.chars().take(13).chain(['…']).collect() } else { label.to_string() };
-    let galley = ui.painter().layout_no_wrap(shown, egui::FontId::proportional(12.0), color);
-    let width = 3.0 + THUMB + 5.0 + galley.size().x + 3.0 + CLOSE + 3.0;
+    // Short of room the thumbnail goes first, so the name keeps a few letters.
+    let thumbed = max >= 3.0 + THUMB + 5.0 + 3.0 + CLOSE + 3.0 + 34.0;
+    let lead = if thumbed { 3.0 + THUMB + 5.0 } else { 6.0 };
+    let frame = lead + 3.0 + CLOSE + 3.0;
+    let font = egui::FontId::proportional(12.0);
+    // Without its thumbnail the chip is short of room: the name keeps the letters the @ took.
+    let label = if thumbed { label } else { label.strip_prefix('@').unwrap_or(label) };
+    let chars = label.chars().count();
+    // 14 characters at most, fewer when the room is short.
+    let shown = |keep: usize| if keep >= chars { label.to_string() } else { label.chars().take(keep).chain(['…']).collect() };
+    let mut keep = chars.min(13 + usize::from(chars == 14));
+    let mut galley = ui.painter().layout_no_wrap(shown(keep), font.clone(), color);
+    while keep > 1 && frame + galley.size().x > max {
+        keep -= 1;
+        galley = ui.painter().layout_no_wrap(shown(keep), font.clone(), color);
+    }
+    let width = frame + galley.size().x;
     let (rect, body) = ui.allocate_exact_size(vec2(width, H), Sense::click());
     let close_rect = Rect::from_center_size(pos2(rect.right() - 3.0 - CLOSE / 2.0, rect.center().y), vec2(CLOSE, CLOSE));
     let close = ui.interact(close_rect, body.id.with("x"), Sense::click()).on_hover_text(tr("Take it out"));
@@ -217,15 +235,17 @@ fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: S
         p.rect_filled(rect, radius, fill);
         let edge = if open || state == Sent::Mentioned { t.accent } else { t.field_border };
         p.rect_stroke(rect, radius, Stroke::new(1.0, edge), StrokeKind::Inside);
-        let thumb_rect = Rect::from_min_size(pos2(rect.left() + 3.0, rect.center().y - THUMB / 2.0), vec2(THUMB, THUMB));
-        match thumb {
-            Some(tex) => {
-                widgets::checker(p, thumb_rect, 4.0);
-                p.image(tex, thumb_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+        if thumbed {
+            let thumb_rect = Rect::from_min_size(pos2(rect.left() + 3.0, rect.center().y - THUMB / 2.0), vec2(THUMB, THUMB));
+            match thumb {
+                Some(tex) => {
+                    widgets::checker(p, thumb_rect, 4.0);
+                    p.image(tex, thumb_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
+                }
+                None => crate::icons::paint(ui, thumb_rect, "image", 13.0, t.icon),
             }
-            None => crate::icons::paint(ui, thumb_rect, "image", 13.0, t.icon),
         }
-        let text_pos = pos2(thumb_rect.right() + 5.0, rect.center().y - galley.size().y / 2.0);
+        let text_pos = pos2(rect.left() + lead, rect.center().y - galley.size().y / 2.0);
         ui.painter().galley(text_pos, galley, color);
         if close.hovered() {
             ui.painter().rect_filled(close_rect, CLOSE / 2.0, t.hover);
@@ -270,6 +290,8 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, refs: &mut [NamedRef], i: 
         }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            // A long picture name is cut short, not let to push the panel wider.
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             edit_label(ui, tr("Picture"));
             let mut source = r.source;
             let options: Vec<(SourceRef, &str)> = offered.iter().map(|(s, label)| (*s, label.as_str())).collect();
