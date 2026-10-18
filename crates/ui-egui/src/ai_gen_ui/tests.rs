@@ -1141,14 +1141,14 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     // The layer keeps its own document's layer as one (what a saved file keeps).
     assert_eq!(made.references, [photocraft_doc::GenerationSource::Document(doc).into(), photocraft_doc::GenerationSource::Layer(background).into()]);
     assert_eq!((made.quality, made.prompt.as_str()), (GenerationQuality::Draft, "make the sky stormy"));
-    // Clicking that layer loads the edit back: tab, model, prompt, source, references, quality.
+    // Load Prompt puts the edit's prompt back, and only that: the tab, model, source,
+    // references and quality stay as they are.
     let layer = r["layer"].as_u64().unwrap();
-    app.ui.ai_gen = AiGenUi { prompt: "something else".into(), ..Default::default() };
-    assert!(load_layer(&mut app, layer));
-    let ui = app.ui.ai_gen.clone();
-    assert_eq!((ui.mode, ui.task, ui.method), (Mode::Edit, EditTask::Change, Method::Instruct));
-    assert_eq!((ui.edit_model.as_str(), ui.prompt.as_str(), ui.edit_quality), ("q21", "make the sky stormy", GenerationQuality::Draft));
-    assert_eq!((ui.edit_source, ui.edit_references.len(), ui.model.as_str()), (Some(SourceRef::Layer(background)), 2, ""));
+    (app.ui.ai_gen.prompt, app.ui.ai_gen.mode, app.ui.ai_gen.edit_model) = ("something else".into(), Mode::Create, "z".into());
+    let kept = app.ui.ai_gen.clone();
+    assert!(load_prompt(&mut app, layer));
+    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "make the sky stormy".into(), ..kept });
+    (app.ui.ai_gen.mode, app.ui.ai_gen.edit_model) = (Mode::Edit, "q21".into());
     draw_panel(&mut app);
     // A cloud model edits too (its quality is its own setting); so does every tab's draw.
     app.ui.ai_gen.edit_model = "gpt-image-2".into();
@@ -1250,16 +1250,12 @@ fn references_are_named_chips_the_prompt_calls_by_name() {
     app.ui.ai_gen.edit_references[2].name = "LUNA".into();
     let q21 = current_model(&app).cloned().unwrap();
     assert!(generate_blocked(&app, &q21).unwrap().contains("Two references are named"));
-    // Clicking the layer loads its chips back, names and all; this document's layer by its
-    // document again.
-    (app.ui.ai_gen.edit_references, app.ui.ai_gen.prompt, app.ui.ai_gen.mode) = (Vec::new(), String::new(), Mode::Create);
-    assert!(load_layer(&mut app, layer));
-    let back: Vec<(SourceRef, String)> = app.ui.ai_gen.edit_references.iter().map(|r| (r.source, r.name.clone())).collect();
-    assert_eq!(
-        back,
-        [(theirs, "Luna".into()), (SourceRef::DocumentLayer { document: here, layer: max }, "Max".into()), (SourceRef::Document(there), String::new())]
-    );
-    assert_eq!(app.ui.ai_gen.prompt, "@Luna sits beside @Max");
+    // Load Prompt puts the text back, names and all, and leaves the chips and the tab alone.
+    (app.ui.ai_gen.prompt, app.ui.ai_gen.mode) = (String::new(), Mode::Create);
+    let kept = app.ui.ai_gen.clone();
+    assert!(load_prompt(&mut app, layer));
+    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "@Luna sits beside @Max".into(), ..kept });
+    app.ui.ai_gen.mode = Mode::Edit;
     // An open chip draws its name and picture; the state is kept as the engine reads it, and an
     // old state's references (no names) still load.
     app.ui.ai_gen.editing_ref = Some(1);
@@ -1415,72 +1411,45 @@ fn generated_layers(app: &mut PhotocraftApp) -> [u64; 4] {
 }
 
 #[test]
-fn a_generated_layer_loads_its_settings_back_into_the_panel() {
+fn load_prompt_puts_a_generated_layers_prompt_in_the_box_and_nothing_else() {
     let mut app = app();
     let [background, txt, img, inpaint] = generated_layers(&mut app);
-    // Something else in the panel, to be replaced.
-    let other = AiGenUi { mode: Mode::Create, model: "z".into(), edit_model: "z2".into(), prompt: "something else".into(), ..Default::default() };
+    // Something else in the panel: only its prompt is replaced.
+    let other = AiGenUi { mode: Mode::Create, model: "z".into(), edit_model: "z".into(), prompt: "something else".into(), ..Default::default() };
     app.ui.ai_gen = other.clone();
     // A layer that was not generated, and one that is not there, change nothing.
-    assert!(!load_layer(&mut app, background));
-    assert!(!load_layer(&mut app, u64::MAX));
+    assert!(!load_prompt(&mut app, background));
+    assert!(!load_prompt(&mut app, u64::MAX));
     assert_eq!(app.ui.ai_gen, other);
-    // A fill: Edit's Change, asked as a fill, its own model, the prompt, strength and context.
-    app.ui.ai_gen.edit_model = String::new();
-    assert!(load_layer(&mut app, inpaint));
-    let ui = app.ui.ai_gen.clone();
-    assert_eq!((ui.mode, ui.task, ui.method), (Mode::Edit, EditTask::Change, Method::Fill));
-    assert_eq!((ui.edit_model.as_str(), ui.prompt.as_str(), ui.strength, ui.context), ("z2", "a pond", 0.75, 0.5));
-    assert_eq!(ui.model, "z", "the model of Create is left alone");
-    // A restyle: Edit's Restyle, the model, the prompt, its strength and the picture it was
-    // redrawn from.
-    assert!(load_layer(&mut app, img));
-    let ui = app.ui.ai_gen.clone();
-    assert_eq!((ui.mode, ui.task, ui.model.as_str(), ui.prompt.as_str(), ui.img_strength), (Mode::Edit, EditTask::Restyle, "z", "as a watercolour", 0.35));
-    assert_eq!((ui.img_source, img_source(&app)), (Some(SourceRef::Layer(background)), Some(SourceRef::Layer(background))));
-    assert_eq!((ui.strength, ui.context), (0.75, 0.5), "a fill's settings are its own");
-    // A creation: the tab, the model, the prompt. The seed is not loaded: generating again
-    // gives a new image.
-    assert!(load_layer(&mut app, txt));
-    let ui = app.ui.ai_gen.clone();
-    assert_eq!((ui.mode, ui.model.as_str(), ui.prompt.as_str(), ui.alpha, ui.seed), (Mode::Create, "z2", "a green field", false, None));
+    // A fill, a restyle and a creation: the prompt, and the tab, task, model and settings stay.
+    for (layer, prompt) in [(inpaint, "a pond"), (img, "as a watercolour"), (txt, "a green field")] {
+        assert!(load_prompt(&mut app, layer));
+        assert_eq!(app.ui.ai_gen, AiGenUi { prompt: prompt.into(), ..other.clone() });
+    }
     draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.model, "z2");
+    assert_eq!((app.ui.ai_gen.mode, app.ui.ai_gen.model.as_str()), (Mode::Create, "z"));
     // The command does the same, for the active layer when none is named.
     app.ui.ai_gen = other.clone();
-    assert_eq!(menu(&mut app, LOAD_LAYER, &json!({"layer": inpaint})), Some(Ok(json!({"loaded": true}))));
-    assert_eq!(app.ui.ai_gen.prompt, "a pond");
+    assert_eq!(menu(&mut app, LOAD_PROMPT, &json!({"layer": inpaint})), Some(Ok(json!({"loaded": true}))));
+    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "a pond".into(), ..other.clone() });
     app.run("layer.select", json!({"layer": txt})).unwrap();
-    assert_eq!(menu(&mut app, LOAD_LAYER, &json!({})), Some(Ok(json!({"loaded": true}))));
+    assert_eq!(menu(&mut app, LOAD_PROMPT, &json!({})), Some(Ok(json!({"loaded": true}))));
     assert_eq!(app.ui.ai_gen.prompt, "a green field");
-    assert_eq!(menu(&mut app, LOAD_LAYER, &json!({"layer": background})), Some(Ok(json!({"loaded": false}))));
-    assert!(menu(&mut app, LOAD_LAYER, &json!({"layer": "x"})).unwrap().is_err());
-}
-
-#[test]
-fn a_model_that_is_gone_keeps_the_panels_choice_and_loads_the_rest() {
-    let mut app = app();
-    let [_, txt, _, inpaint] = generated_layers(&mut app);
-    // "z2" made both layers; it is disabled, then removed.
-    let mut models = app.session.prefs().integrations.ai.models.clone();
-    models.iter_mut().filter(|m| m.id == "z2").for_each(|m| m.enabled = false);
-    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": models})).unwrap();
-    app.ui.ai_gen = AiGenUi { model: "z".into(), prompt: "something else".into(), ..Default::default() };
-    assert!(load_layer(&mut app, txt));
-    assert_eq!((app.ui.ai_gen.model.as_str(), app.ui.ai_gen.prompt.as_str()), ("z", "a green field"));
-    models.retain(|m| m.id != "z2");
-    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": models})).unwrap();
-    assert!(load_layer(&mut app, inpaint));
-    let ui = &app.ui.ai_gen;
-    assert_eq!((ui.mode, ui.edit_model.as_str(), ui.prompt.as_str(), ui.strength, ui.context), (Mode::Edit, "", "a pond", 0.75, 0.5));
-    draw_panel(&mut app);
+    assert_eq!(menu(&mut app, LOAD_PROMPT, &json!({"layer": background})), Some(Ok(json!({"loaded": false}))));
+    assert!(menu(&mut app, LOAD_PROMPT, &json!({"layer": "x"})).unwrap().is_err());
+    assert!(menu(&mut app, LOAD_PROMPT, &json!({"layer": -1})).unwrap().is_err());
+    // A generated layer whose prompt is empty has nothing to load.
+    let d = app.session.active_mut().unwrap();
+    std::sync::Arc::make_mut(&mut d.doc).layer_mut(photocraft_doc::LayerId(txt)).unwrap().generation.as_mut().unwrap().prompt = "  ".into();
+    assert!(!load_prompt(&mut app, txt));
+    assert_eq!(app.ui.ai_gen.prompt, "a green field");
 }
 
 mod clicks {
     use super::*;
     use crate::layer_row_ui::recorded;
-    use egui::{Modifiers, PointerButton, Pos2, pos2, vec2};
-    use egui_kittest::Harness;
+    use egui::{Modifiers, PointerButton, Pos2, vec2};
+    use egui_kittest::{Harness, kittest::Queryable};
 
     fn click(h: &mut Harness<'_, PhotocraftApp>, at: Pos2) {
         h.hover_at(at);
@@ -1492,42 +1461,37 @@ mod clicks {
     }
 
     #[test]
-    fn clicking_a_generated_layer_loads_it_and_its_eye_does_not() {
+    fn clicking_a_generated_layer_leaves_the_panel_and_load_prompt_loads_its_prompt() {
+        const LOAD: &str = "Load the prompt the selected layer was generated with";
+        const NOTHING: &str = "Load prompt: select a layer made with AI Gen";
         let mut app = app();
-        let [background, txt, _, inpaint] = generated_layers(&mut app);
-        app.ui.ai_gen = AiGenUi { prompt: "something else".into(), ..Default::default() };
+        let [background, _, _, inpaint] = generated_layers(&mut app);
+        app.ui.ai_gen = AiGenUi { model: "z".into(), prompt: "something else".into(), ..Default::default() };
+        menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
         let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
             PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
             app
         });
         h.run_steps(8);
         let row = |h: &Harness<'_, PhotocraftApp>, layer: u64| recorded(&h.ctx).into_iter().find(|r| r.layer == layer).unwrap();
-        let visible =
-            |h: &Harness<'_, PhotocraftApp>, layer: u64| h.state().session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().visible;
-        // The eye toggles the layer and leaves the panel as it is.
-        let r = row(&h, txt);
-        click(&mut h, pos2(r.row.left() + 15.0, r.row.center().y));
-        assert!(!visible(&h, txt), "the eye was hit");
-        assert_eq!(h.state().ui.ai_gen.prompt, "something else");
-        assert_eq!(h.state().ui.ai_gen.mode, Mode::Create);
-        // The name loads the layer's generation.
+        // Clicking the layer selects it and leaves the panel as it is.
         let at = row(&h, inpaint).name.unwrap().center();
         click(&mut h, at);
-        let ui = h.state().ui.ai_gen.clone();
-        assert_eq!((ui.mode, ui.task, ui.prompt.as_str(), ui.strength, ui.context), (Mode::Edit, EditTask::Change, "a pond", 0.75, 0.5));
         assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(inpaint)));
-        // So does the thumbnail, left of the name (and, on this layer, the mask between them).
-        let r = row(&h, inpaint);
-        click(&mut h, pos2(r.name.unwrap().left() - 12.0, r.row.center().y));
-        assert_eq!(h.state().ui.ai_gen.prompt, "a pond");
-        let r = row(&h, txt);
-        click(&mut h, pos2(r.name.unwrap().left() - 12.0, r.row.center().y));
-        assert_eq!(h.state().ui.ai_gen.prompt, "a green field");
-        // A layer that was not generated leaves what is loaded.
+        let before = h.state().ui.ai_gen.clone();
+        assert_eq!((before.mode, before.model.as_str(), before.prompt.as_str()), (Mode::Create, "z", "something else"));
+        // Load Prompt puts its prompt in the box: no other tab, no other model.
+        let at = h.get_by_label(LOAD).rect().center();
+        click(&mut h, at);
+        assert_eq!(h.state().ui.ai_gen, AiGenUi { prompt: "a pond".into(), ..before });
+        // A layer that was not generated has no prompt to load: the button is off.
         let at = row(&h, background).name.unwrap().center();
         click(&mut h, at);
         assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(background)));
-        assert_eq!(h.state().ui.ai_gen.prompt, "a green field");
+        assert!(h.query_by_label(LOAD).is_none());
+        let at = h.get_by_label(NOTHING).rect().center();
+        click(&mut h, at);
+        assert_eq!(h.state().ui.ai_gen.prompt, "a pond");
     }
 }
 

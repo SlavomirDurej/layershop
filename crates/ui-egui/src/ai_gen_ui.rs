@@ -30,9 +30,9 @@ use crate::widgets;
 
 /// Window › AI Gen.
 pub const PANEL: &str = "window.panel.aiGen";
-/// Load the settings a generated layer was made with into the panel: `{"layer": id?}` (the
-/// active layer without it). What clicking the layer in the Layers panel does.
-pub const LOAD_LAYER: &str = "window.panel.aiGen.loadLayer";
+/// Put the prompt a generated layer was made with into the prompt box: `{"layer": id?}` (the
+/// active layer without it). What the panel's Load Prompt button does.
+pub const LOAD_PROMPT: &str = "window.panel.aiGen.loadPrompt";
 /// The tab's position in the Properties dock group (Properties | Adjustments | AI Gen).
 pub const TAB: usize = 2;
 /// The engine command the panel runs.
@@ -308,12 +308,12 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
 /// Window › AI Gen: show the panel (its dock group, expanded, on its tab), or hide the group when
 /// it is already showing. `{"show": bool}` sets it instead of toggling.
 pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
-    if id == LOAD_LAYER {
+    if id == LOAD_PROMPT {
         let layer = match params.get("layer") {
             Some(v) => v.as_u64().ok_or_else(|| "`layer` must be a layer id".to_string()),
-            None => app.session.active().and_then(|d| d.active_layer).map(|id| id.0).ok_or_else(|| "no active layer".to_string()),
+            None => active_layer(app).ok_or_else(|| "no active layer".to_string()),
         };
-        return Some(layer.map(|layer| json!({"loaded": load_layer(app, layer)})));
+        return Some(layer.map(|layer| json!({"loaded": load_prompt(app, layer)})));
     }
     if id != PANEL {
         return None;
@@ -696,61 +696,28 @@ pub fn finished(app: &mut PhotocraftApp, result: &Value) {
     }
 }
 
-/// Load what `layer` was generated with (`Layer::generation`) into the panel: the tab and task
-/// it was made on, the prompt, the model when it is still set up and can do that (else the
-/// panel's choice stays), and that technique's own settings (a fill: strength and context; a
-/// restyle: strength and source; an instruction: source, references, quality, context and alpha;
-/// a creation: alpha). The seed is not: generating again gives a new image. `false`, and nothing
-/// changes, for a layer that was not generated and while a generation runs (the panel shows that
-/// one).
-pub fn load_layer(app: &mut PhotocraftApp, layer: u64) -> bool {
+/// The active layer of the document in front.
+fn active_layer(app: &PhotocraftApp) -> Option<u64> {
+    app.session.active().and_then(|d| d.active_layer).map(|id| id.0)
+}
+
+/// The prompt `layer` was generated with (`Layer::generation`), when it has one.
+fn layer_prompt(app: &PhotocraftApp, layer: u64) -> Option<&str> {
+    let d = app.session.active()?;
+    let g = d.doc.layer(photocraft_doc::LayerId(layer))?.generation.as_ref()?;
+    Some(g.prompt.as_str()).filter(|p| !p.trim().is_empty())
+}
+
+/// Put the prompt `layer` was generated with into the prompt box, in place of what is there.
+/// Only the text: the tab, the task, the model and the other settings stay as they are. `false`,
+/// and nothing changes, for a layer that was not generated (or has no prompt) and while a
+/// generation runs (the panel shows that one).
+pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
     if running(app).is_some() {
         return false;
     }
-    let found = app.session.active().and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer))).and_then(|l| l.generation.clone());
-    let Some(g) = found else { return false };
-    let can = |m: &Model| match g.mode {
-        GenerationMode::Inpaint => m.can_inpaint(),
-        GenerationMode::ImgEdit => m.can_edit(),
-        GenerationMode::Txt2img | GenerationMode::Img2img => m.can_generate(),
-    };
-    let available = app.session.prefs().integrations.ai.models.iter().any(|m| m.enabled && m.id == g.model && can(m));
-    // The layer's references name layers of its own document, which is the one in front.
-    let references: Vec<NamedRef> =
-        g.references.iter().cloned().map(NamedRef::from).map(|r| NamedRef { source: refs::absolute(&app.session, r.source), ..r }).collect();
-    let ui = &mut app.ui.ai_gen;
-    ui.prompt = g.prompt;
-    match g.mode {
-        GenerationMode::Txt2img => ui.mode = Mode::Create,
-        GenerationMode::Img2img => (ui.mode, ui.task) = (Mode::Edit, EditTask::Restyle),
-        GenerationMode::Inpaint | GenerationMode::ImgEdit => (ui.mode, ui.task) = (Mode::Edit, EditTask::Change),
-    }
-    if available {
-        *ui.chosen_mut() = g.model;
-    }
-    match g.mode {
-        GenerationMode::Inpaint => {
-            ui.method = Method::Fill;
-            ui.strength = g.strength;
-            ui.context = g.context;
-        }
-        GenerationMode::Img2img => {
-            ui.img_strength = g.strength;
-            // A source that is gone is not offered: the panel then shows its default.
-            ui.img_source = g.source.map(Into::into);
-        }
-        GenerationMode::ImgEdit => {
-            ui.method = Method::Instruct;
-            ui.context = g.context;
-            // Pictures that are gone are not offered: the panel then leaves them out.
-            ui.edit_source = g.source.map(Into::into);
-            ui.edit_references = references;
-            ui.editing_ref = None;
-            ui.edit_quality = g.quality;
-            ui.alpha = g.alpha;
-        }
-        GenerationMode::Txt2img => ui.alpha = g.alpha,
-    }
+    let Some(prompt) = layer_prompt(app, layer).map(str::to_owned) else { return false };
+    app.ui.ai_gen.prompt = prompt;
     true
 }
 
@@ -787,6 +754,8 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
     }
 }
 
+/// Room the prompt's text leaves on its right for Load Prompt, in the box's corner.
+const LOAD_PROMPT_GAP: i8 = 34;
 /// Height of the prompt box when the panel has no height of its own to fill.
 const PROMPT_HEIGHT: f32 = 84.0;
 /// The least the prompt box shrinks to in a short panel: two lines.
@@ -1274,7 +1243,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         if edit {
             refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
         }
-        egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+        let area = egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             let font = egui::TextStyle::Body.resolve(ui.style());
             let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
@@ -1290,7 +1259,9 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                     GenerationMode::Txt2img => "Describe what to generate…",
                 }))
                 .desired_width(width)
-                .min_size(vec2(width, height));
+                .min_size(vec2(width, height))
+                // The text keeps clear of Load Prompt, in the box's corner.
+                .margin(egui::Margin { left: 4, right: LOAD_PROMPT_GAP, top: 2, bottom: 2 });
             if edit {
                 // While names are offered for an `@`, Tab takes the first instead of moving on.
                 let tab = refs::offering(ui.ctx());
@@ -1307,6 +1278,16 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 refs::after_prompt(ui, &output, &app.ui.ai_gen.prompt, &names);
             }
         });
+        // Load Prompt, in the box's top right corner (clear of the scroll bar): the prompt the
+        // selected layer was generated with, the text only (the tab, model and settings stay).
+        let layer = active_layer(app).filter(|l| layer_prompt(app, *l).is_some());
+        let corner = egui::Rect::from_min_size(egui::pos2(area.inner_rect.right() - 24.0 - 8.0, area.inner_rect.top() + 2.0), vec2(24.0, 24.0));
+        let mut button = ui.new_child(egui::UiBuilder::new().max_rect(corner));
+        let tip = if layer.is_some() { "Load the prompt the selected layer was generated with" } else { "Load prompt: select a layer made with AI Gen" };
+        let load = button.add_enabled_ui(layer.is_some(), |ui| crate::icons::button(ui, "import", 24.0, false, tr(tip))).inner;
+        if let Some(layer) = layer.filter(|_| load.clicked()) {
+            load_prompt(app, layer);
+        }
     });
     ui.add_space(6.0);
 

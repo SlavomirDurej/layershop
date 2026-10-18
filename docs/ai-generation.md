@@ -40,14 +40,12 @@ back end you set up, and places the answer on a new layer.
 
 4. A generated layer **remembers what it was made with**: the model, the prompt, what was
    done (created, a selection filled, changed by instruction, restyled) and its settings
-   (strength, context, the source picture, alpha), and the seed. Click the layer in the Layers
-   panel (its name, thumbnail or mask) and the AI Gen panel loads them back, on the tab and task
-   they belong to, ready to generate again or to change. The seed is not loaded: generating
-   again gives a new image. The eye does not load anything: showing and hiding a layer leaves
-   the panel alone. So do ⌘/Ctrl- and Shift-clicks, which select several layers. If the model
-   has since been removed or disabled (or no longer does what the layer was made with), the
-   panel keeps the model it had and loads the rest. Nothing is loaded
-   while a generation is running. The settings are saved in `.pcraft` files, in PSD and PSB files and in
+   (strength, context, the source picture, alpha), and the seed. Select the layer and click
+   **Load Prompt** (the icon in the prompt box's top right corner) to put the prompt it was made with in
+   the prompt box, in place of what is there. Only the text is loaded: the tab, the task, the
+   model and the other settings stay as they are, so the prompt can be tried on another model
+   or another task. Selecting a layer by itself loads nothing. The button is off for a layer
+   that was not generated, and while a generation is running. The settings are saved in `.pcraft` files, in PSD and PSB files and in
    layered TIFFs, and copied with the layer (Duplicate Layer); flat formats (PNG, JPEG…) don't
    keep them. In a PSD they are one item (`pcGn`, JSON) of the layer's `shmd` metadata block,
    next to the items Photoshop keeps there: other programs step over it, so the file opens as
@@ -648,7 +646,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it (and, with `img2img` in place of the rectangle, image to image) against a real server without the app |
 | `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
-| `window.panel.aiGen.loadLayer {"layer"?: id}` → `{loaded}` | a shell command (the running app): load what a generated layer was made with into the panel, like clicking it; the active layer without `layer`. `loaded` is false for a layer that was not generated, and while a generation runs |
+| `window.panel.aiGen.loadPrompt {"layer"?: id}` → `{loaded}` | a shell command (the running app): put the prompt a generated layer was made with into the panel's prompt box, like its Load Prompt button (the text only; tab, model and settings stay); the active layer without `layer`. `loaded` is false for a layer that was not generated or has no prompt, and while a generation runs |
 | `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint, or to scope an edit, instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself, for `inpaint` and for `imgEdit` |
 | `ai.generate {"prompt", "mode": "imgEdit", "source"?, "references"?: [{"layer": id} or {"document": id}, …], "quality"?: "draft"/"standard"/"detail", "context"?, …}` | change a picture following the prompt as an instruction, onto a new layer; with a selection only the part around it is sent, and the layer is masked by it. `--example ai_inpaint` runs it with `edit` or `edit:x,y,w,h` in place of the rectangle |
 | `ai.sources {"mode"?: "img2img"/"imgEdit"}` | what img2img (or an edit, and its references) can start from now: the active document's layers with pixels, the other open documents, for an edit also the active document itself, and which is the default |

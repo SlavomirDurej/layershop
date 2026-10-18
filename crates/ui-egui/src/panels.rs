@@ -2587,10 +2587,6 @@ fn layers(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
     });
     for (id, p) in actions {
-        if id == crate::ai_gen_ui::LOAD_LAYER {
-            crate::ai_gen_ui::load_layer(app, p.as_u64().unwrap_or(0));
-            continue;
-        }
         // A row click commits even when it selects the layer already being edited (#5584).
         // Finish before selection changes so the existing type session keeps its own target.
         if id == "layer.select" && app.ui.text_edit.is_some() {
@@ -2955,11 +2951,6 @@ fn layer_row(
         let mode = select_mode(ui.input(|i| i.modifiers));
         actions.push(("layer.select".into(), json!({"layer": l.id.0, "mode": mode})));
         crate::smart_ui::deselect(ctx, doc.id);
-        // A plain click on a generated layer (its name, thumbnail or mask; never the eye) loads
-        // what it was generated with into the AI Gen panel.
-        if mode == "replace" && l.generation.is_some() {
-            actions.push((crate::ai_gen_ui::LOAD_LAYER.into(), json!(l.id.0)));
-        }
         // A thumbnail explicitly selects content or a mask. Selecting an adjustment/fill row
         // defaults to its mask, but clicking its content thumbnail must leave the mask target.
         let pos = resp.interact_pointer_pos();
