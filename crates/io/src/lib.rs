@@ -43,6 +43,7 @@ pub mod comps_map;
 pub mod effects_map;
 pub mod exr_parts;
 mod flat;
+pub mod ai_refs_map;
 pub mod generation_map;
 mod gradient_bake;
 pub use gradient_bake::{Method as GradientMethod, bake as bake_gradient};

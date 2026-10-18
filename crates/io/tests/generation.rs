@@ -122,3 +122,41 @@ fn clearing_a_generation_removes_the_item_and_a_broken_one_is_ignored() {
         assert_eq!(layer(&back, "Photo").generation, None, "{data:?}");
     }
 }
+
+#[test]
+fn the_documents_ai_references_survive_psd_and_psb() {
+    use photocraft_doc::{AiPicture, AiReference};
+    for depth in SampleType::ALL {
+        let mut doc = document(depth);
+        let other = layer(&doc, "Other").id.0;
+        let png = std::sync::Arc::new(b"\x89PNG\r\n\x1a\n a copied picture".to_vec());
+        doc.ai_references = vec![
+            AiReference { name: "Luna".into(), picture: AiPicture::Layer(other) },
+            AiReference { name: String::new(), picture: AiPicture::Document },
+            AiReference { name: "Max".into(), picture: AiPicture::Image { png: png.clone(), label: "Layer: Max (Other.psd)".into() } },
+        ];
+        for name in ["x.psd", "x.psb"] {
+            let opts = ExportOptions::default();
+            let back = import(name, &export(&doc, name, &opts).unwrap().bytes).unwrap().document;
+            // The layer is named by the id the file gave it; the copy comes back byte for byte.
+            let expected = vec![
+                AiReference { name: "Luna".into(), picture: AiPicture::Layer(layer(&back, "Other").id.0) },
+                doc.ai_references[1].clone(),
+                doc.ai_references[2].clone(),
+            ];
+            assert_eq!(back.ai_references, expected, "{name} {depth:?}");
+            assert!(!back.metadata.psd_resources.iter().any(|(id, _, _)| *id == photocraft_io::ai_refs_map::AI_REFERENCES), "the field, not a raw copy");
+            // A second save writes them once, from the field.
+            let again = import(name, &export(&back, name, &opts).unwrap().bytes).unwrap().document;
+            assert_eq!(again.ai_references.len(), 3);
+            assert_eq!(again.ai_references[2], expected[2]);
+            // None kept: no resource.
+            let mut none = back.clone();
+            none.ai_references.clear();
+            let bytes = export(&none, name, &opts).unwrap().bytes;
+            assert!(import(name, &bytes).unwrap().document.ai_references.is_empty());
+            let file = PsdFile::from_bytes(&bytes).unwrap();
+            assert!(!file.resources.iter().any(|r| r.id == photocraft_io::ai_refs_map::AI_REFERENCES));
+        }
+    }
+}

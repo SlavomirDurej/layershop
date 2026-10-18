@@ -36,7 +36,7 @@ pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
     GradientStyle, Satin, Shadow, StrokeFx, StrokePosition,
 };
-pub use generation::{Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource};
+pub use generation::{AiPicture, AiReference, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource};
 pub use mode::{ColorTable, Duotone, DuotoneInk, StackMode};
 pub use pattern::Pattern;
 pub use photocraft_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
@@ -921,6 +921,8 @@ pub struct Document {
     /// How the document's lossy file was encoded (its JPEG quality, WebP lossy or lossless), so
     /// a save writes it back the same way rather than at fixed defaults.
     pub file_encoding: FileEncoding,
+    /// The pictures the AI Gen panel's edits refer to by name (`@Luna`), kept with the document.
+    pub ai_references: Vec<AiReference>,
 }
 
 /// The encoder settings a document's file was opened or saved with: what File › Save and the
@@ -984,6 +986,7 @@ impl Document {
             variables: Variables::default(),
             timeline: None,
             file_encoding: FileEncoding::default(),
+            ai_references: Vec::new(),
         }
     }
 

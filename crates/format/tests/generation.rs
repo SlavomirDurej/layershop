@@ -93,3 +93,27 @@ fn an_edits_references_follow_their_layers_too() {
     assert_eq!((g.mode, g.quality), (GenerationMode::ImgEdit, GenerationQuality::Detail));
     assert_eq!(g.references, vec![GenerationSource::Layer(loaded.layers[0].id.0).into()]);
 }
+
+#[test]
+fn the_documents_ai_references_survive_a_pcraft_round_trip() {
+    use photocraft_doc::{AiPicture, AiReference};
+    let mut doc = Document::new("Refs", Size::new(2, 2), ColorMode::Rgb, SampleType::U8);
+    let luna = Layer::raster("Luna", doc.pixel_format());
+    let luna_id = luna.id.0;
+    doc.layers.push(luna);
+    let png = std::sync::Arc::new(b"\x89PNG a copy".to_vec());
+    doc.ai_references = vec![
+        AiReference { name: "Luna".into(), picture: AiPicture::Layer(luna_id) },
+        AiReference { name: "all".into(), picture: AiPicture::Document },
+        AiReference { name: "Max".into(), picture: AiPicture::Image { png, label: "Layer: Max (Other)".into() } },
+        AiReference { name: "gone".into(), picture: AiPicture::Layer(u64::MAX) },
+    ];
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    let same = photocraft_format::load_from_bytes(&bytes).unwrap();
+    // A layer that is not in the file goes; the rest come back as they were.
+    assert_eq!(same.ai_references, doc.ai_references[..3]);
+    // With fresh ids the layer is followed to its new id.
+    let fresh = photocraft_format::load_from_bytes_with(&bytes, &LoadOptions { preserve_ids: false, ..Default::default() }).unwrap();
+    assert_eq!(fresh.ai_references[0].picture, AiPicture::Layer(fresh.layers[0].id.0));
+    assert_eq!(fresh.ai_references[1..], doc.ai_references[1..3]);
+}

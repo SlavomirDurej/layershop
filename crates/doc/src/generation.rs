@@ -103,6 +103,28 @@ impl From<GenerationSource> for GenerationReference {
     }
 }
 
+/// A picture the document keeps for edits to refer to by name (the AI Gen panel's references,
+/// `@Luna` in a prompt; [`crate::Document::ai_references`]). Saved with the document, so a
+/// character or a prop is still there the next time it is opened.
+#[derive(Clone, Debug, PartialEq)]
+pub struct AiReference {
+    /// The name a prompt calls it by (letters, digits, `_` and `-`); empty: by number.
+    pub name: String,
+    pub picture: AiPicture,
+}
+
+/// Where an [`AiReference`]'s picture is.
+#[derive(Clone, Debug, PartialEq)]
+pub enum AiPicture {
+    /// A layer of this document, by id, read as it is when an edit runs.
+    Layer(u64),
+    /// This document as it shows, all layers together.
+    Document,
+    /// A copy kept in the document of a picture from elsewhere (another document, or a layer of
+    /// one), as a PNG, and what it was (to show).
+    Image { png: std::sync::Arc<Vec<u8>>, label: String },
+}
+
 /// The generation a layer came from ([`crate::Layer::generation`]).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]

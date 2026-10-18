@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use photocraft_color::{PixelFormat, SampleType};
 use photocraft_doc::{
-    AlphaChannel, CompAppearance, CompLayerState, DocId, Document, Effects, FillCache, Group, Layer, LayerComp, LayerContent, LayerId, LayerMask, Metadata,
-    NamedPath, Pattern, ShapeLayer, SmartContentsId, SmartObject, SmartSource, TextLayer,
+    AiPicture, AiReference, AlphaChannel, CompAppearance, CompLayerState, DocId, Document, Effects, FillCache, Group, Layer, LayerComp, LayerContent, LayerId,
+    LayerMask, Metadata, NamedPath, Pattern, ShapeLayer, SmartContentsId, SmartObject, SmartSource, TextLayer,
 };
 use photocraft_geom::{TILE_SIZE, TileCoord};
 use photocraft_raster::{Surface, Tile, decode_pixel, encode_pixel};
@@ -287,6 +287,18 @@ pub(crate) fn doc_m(d: &Document, sink: &mut dyn Sink) -> DocM {
         notes: d.notes.clone(),
         text_styles: d.text_styles.clone(),
         slices: d.slices.clone(),
+        ai_references: d
+            .ai_references
+            .iter()
+            .map(|r| AiReferenceM {
+                name: r.name.clone(),
+                picture: match &r.picture {
+                    AiPicture::Layer(id) => AiPictureM::Layer(*id),
+                    AiPicture::Document => AiPictureM::Document,
+                    AiPicture::Image { png, label } => AiPictureM::Image { png: sink.blob(png), label: label.clone() },
+                },
+            })
+            .collect(),
     }
 }
 
@@ -655,6 +667,20 @@ impl Loader<'_> {
                 vd.layer = self.id_map.get(&vd.layer.0).copied().unwrap_or(LayerId(u64::MAX - vd.layer.0.min(u64::MAX / 2)));
             }
         }
+        // AI references follow their layer through id remapping; one whose layer is gone is
+        // dropped.
+        let mut ai_references = Vec::with_capacity(m.ai_references.len());
+        for r in &m.ai_references {
+            let picture = match &r.picture {
+                AiPictureM::Layer(raw) => match self.id_map.get(raw) {
+                    Some(id) => AiPicture::Layer(id.0),
+                    None => continue,
+                },
+                AiPictureM::Document => AiPicture::Document,
+                AiPictureM::Image { png, label } => AiPicture::Image { png: self.fetch.blob(png)?, label: label.clone() },
+            };
+            ai_references.push(AiReference { name: r.name.clone(), picture });
+        }
         let id = if self.preserve_ids { DocId(m.id) } else { DocId::fresh() };
         Ok(Document {
             id,
@@ -689,6 +715,7 @@ impl Loader<'_> {
             notes: m.notes.clone(),
             text_styles: m.text_styles.clone(),
             slices,
+            ai_references,
         })
     }
 

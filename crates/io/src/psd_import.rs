@@ -1069,6 +1069,8 @@ pub(crate) fn psd_to_document_decoded(
     // What generated layers were made from (the `pcGn` item of their `shmd`), which names layers
     // by id too.
     crate::generation_map::import(&mut doc);
+    // The AI Gen panel's references (PhotoCraft's resource 4000), which name layers by id too.
+    crate::ai_refs_map::import(&mut doc);
     // Character and paragraph styles from the type layers' engine data.
     cx.warnings.extend(crate::text_styles_map::import(&mut doc));
 

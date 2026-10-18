@@ -1758,6 +1758,11 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
         if !keep_imported_resource(doc, *id, data) {
             continue;
         }
+        // The AI references: written afresh below from the document's, kept as they came only
+        // while the document has none (a resource that could not be read).
+        if crate::ai_refs_map::is_ours(*id, data) && !doc.ai_references.is_empty() {
+            continue;
+        }
         let mut r = ImageResource::new(*id, data.to_vec());
         r.name = legacy_name(name);
         resources.push(r);
@@ -1770,6 +1775,11 @@ fn document_to_psd_nested(doc: &Document, opts: &PsdExportOptions, depth: u32, c
     }
     if let Some(Some(data)) = slices_resource {
         resources.push(ImageResource::new(crate::slices_map::SLICES, data));
+    }
+    if let Some(data) = crate::ai_refs_map::encode(doc, &ex.layer_ids) {
+        let mut r = ImageResource::new(crate::ai_refs_map::AI_REFERENCES, data);
+        r.name = legacy_name(crate::ai_refs_map::NAME);
+        resources.push(r);
     }
     resources.push(version_info_resource(real_merged));
 

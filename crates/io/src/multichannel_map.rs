@@ -135,6 +135,9 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
         if LAYER_ONLY_RESOURCES.contains(id) || written.contains(id) || !crate::psd_export::keep_imported_resource(doc, *id, data) {
             continue;
         }
+        if crate::ai_refs_map::is_ours(*id, data) && !doc.ai_references.is_empty() {
+            continue;
+        }
         // Alpha identifiers: one u32 per channel, only while they still match the channels.
         if *id == ALPHA_IDENTIFIERS && data.len() != channels.len().saturating_mul(4) {
             continue;
@@ -145,6 +148,13 @@ pub(crate) fn document_to_psd(doc: &Document, force_psb: bool) -> (PsdFile, Vec<
     }
     if let Some(data) = crate::annotations_map::fresh_scale_resource(doc) {
         resources.push(ImageResource::new(crate::annotations_map::MEASUREMENT_SCALE, data));
+    }
+    // The AI references; a multichannel document has no layers, so only copied pictures and the
+    // document itself are written.
+    if let Some(data) = crate::ai_refs_map::encode(doc, &Default::default()) {
+        let mut r = ImageResource::new(crate::ai_refs_map::AI_REFERENCES, data);
+        r.name = crate::psd_export::legacy_name(crate::ai_refs_map::NAME);
+        resources.push(r);
     }
     resources.push(version_info_resource(true));
     // Document-level tagged blocks (patterns, notes, ...) are valid without a layer section; a

@@ -17,10 +17,10 @@ pub fn name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_' || c == '-'
 }
 
-/// `raw` as a reference name: spaces become `_`, other characters a name can't hold are dropped,
-/// and it is cut to [`MAX_NAME`].
+/// `raw` as a reference name: a run of spaces becomes one `_`, other characters a name can't
+/// hold are dropped, and it is cut to [`MAX_NAME`].
 pub fn clean_name(raw: &str) -> String {
-    raw.trim().chars().map(|c| if c.is_whitespace() { '_' } else { c }).filter(|c| name_char(*c)).take(MAX_NAME).collect()
+    raw.split_whitespace().collect::<Vec<_>>().join("_").chars().filter(|c| name_char(*c)).take(MAX_NAME).collect()
 }
 
 /// A name for a reference to a picture called `label` (a layer's or a document's name): its

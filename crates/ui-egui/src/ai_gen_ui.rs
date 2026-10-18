@@ -19,7 +19,7 @@
 use egui::{RichText, vec2};
 use photocraft_aigen::{Family, Model, Provider, Settings};
 use photocraft_doc::{GenerationMode, GenerationQuality};
-use photocraft_engine::ai_cmds::{NamedRef, SourceRef};
+use photocraft_engine::ai_cmds::SourceRef;
 use photocraft_engine::jobs::JobInfo;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
@@ -147,10 +147,8 @@ pub struct AiGenUi {
     /// Change, by instruction: the picture to change (`None`: the active layer when it has
     /// pixels, else the first that is offered).
     pub edit_source: Option<SourceRef>,
-    /// Change, by instruction: the pictures the prompt may refer to, by name (`@Luna`) or as
-    /// image 2, image 3, … (the chips, see [`refs`]).
-    pub edit_references: Vec<NamedRef>,
-    /// The reference chip whose name and picture are open under the chips.
+    /// The reference chip whose name and picture are open under the chips (the references are
+    /// the document's, see [`refs`]).
     #[serde(skip)]
     editing_ref: Option<usize>,
     /// Change, by instruction: how much of a local model's schedule to run.
@@ -201,7 +199,6 @@ impl Default for AiGenUi {
             img_strength: photocraft_engine::ai_cmds::DEFAULT_IMG2IMG_STRENGTH,
             edit_model: String::new(),
             edit_source: None,
-            edit_references: Vec::new(),
             editing_ref: None,
             edit_quality: GenerationQuality::default(),
             prompt: String::new(),
@@ -668,7 +665,7 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
             params["quality"] = json!(ui.edit_quality.key());
             params["alpha"] = json!(ui.alpha);
             params["context"] = json!(ui.context());
-            params["references"] = json!(refs::edit_references(app, model.max_references()));
+            // The references are the document's own: `ai.generate` sends them when none are named.
             if let Some(source) = edit_source(app) {
                 params["source"] = json!(source);
             }
@@ -782,12 +779,12 @@ fn advanced_rows(model: Option<&Model>, kind: GenerationMode) -> usize {
 
 /// The rows above the prompt that depend on the task: Edit's tasks, the picture to change or
 /// redraw, and the pictures an instruction may refer to (with a row to add one).
-fn rows_above(ui: &AiGenUi, kind: GenerationMode) -> usize {
+fn rows_above(ui: &AiGenUi, kind: GenerationMode, references: usize) -> usize {
     usize::from(ui.mode == Mode::Edit)
         + match kind {
             GenerationMode::Txt2img | GenerationMode::Inpaint => 0,
             GenerationMode::Img2img => 1,
-            GenerationMode::ImgEdit => 1 + refs::rows(ui),
+            GenerationMode::ImgEdit => 1 + refs::rows(ui.editing_ref, references),
         }
 }
 
@@ -807,7 +804,7 @@ pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
     // The line that leads to the Local AI wizard, while there is one (it may wrap).
     let setup = if setup_line(app).is_some() { 2.0 * (NOTE_SIZE + 4.0) } else { 0.0 };
-    rows + setup + (rows_above(ui, kind) + rows_below(ui, model, kind)) as f32 * ROW
+    rows + setup + (rows_above(ui, kind, refs::kept(&app.session).len()) + rows_below(ui, model, kind)) as f32 * ROW
 }
 
 /// Is the inpaint mask being painted with the panel's brush?
@@ -848,7 +845,7 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
     let painting = mask_brushing(app);
     // A narrow panel keeps the brush size field but not its − and + (the field still takes the
     // wheel and typing), so nothing runs into the bin.
-    let roomy = ui.available_width() >= 280.0;
+    let roomy = ui.available_width() >= 250.0;
     ui.add_enabled_ui(!busy && has_doc, |ui| {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
@@ -1234,11 +1231,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         // A prompt longer than the box scrolls inside it instead of pushing Generate away.
         // An instruction's references: `@Name` shows in the accent colour, and typing `@` offers
         // the names.
-        let names: Vec<String> = if edit {
-            refs::edit_references(app, current.max_references()).into_iter().map(|r| r.name).filter(|n| !n.is_empty()).collect()
-        } else {
-            Vec::new()
-        };
+        let names: Vec<String> = if edit { refs::kept(&app.session).into_iter().map(|r| r.name).filter(|n| !n.is_empty()).collect() } else { Vec::new() };
         let names: Vec<&str> = names.iter().map(String::as_str).collect();
         if edit {
             refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
@@ -1473,9 +1466,16 @@ fn generate_blocked(app: &PhotocraftApp, model: &Model) -> Option<String> {
             if let Err(why) = photocraft_engine::ai_cmds::edit_plan(&app.session, edit_source(app), ui.context(), None) {
                 return Some(why);
             }
-            let named = refs::edit_references(app, model.max_references());
-            if let Some(name) = photocraft_engine::ai_refs::duplicate(&named.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()) {
-                return Some(format!("{} \u{201c}{name}\u{201d}: {}", tr("Two references are named"), tr("give each its own name.")));
+            // More references than the model takes: the prompt has to say which, by name.
+            let kept = refs::kept(&app.session);
+            let sent = photocraft_engine::ai_refs::resolve(&app.ui.ai_gen.prompt, &kept.iter().map(|r| r.name.as_str()).collect::<Vec<_>>()).sent.len();
+            if sent > model.max_references() {
+                return Some(format!(
+                    "{} {} {}",
+                    model.name,
+                    tr("takes fewer references than the document has:"),
+                    tr("mention the ones to send by name (@Name), or take some out.")
+                ));
             }
             if local && let Err(why) = photocraft_aigen::comfy::check_edit(model) {
                 return Some(why.to_string());

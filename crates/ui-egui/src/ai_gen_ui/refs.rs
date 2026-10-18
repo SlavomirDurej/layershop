@@ -1,30 +1,34 @@
-//! A change by instruction's references: pictures the instruction may refer to, shown as chips
-//! under the source and named as the prompt calls them. A chip named Luna is `@Luna` in the
-//! prompt, which shows the mention in the accent colour while it names a chip; typing `@` offers
-//! the names (Tab takes the first). When the prompt mentions any chip only the mentioned ones are
-//! sent (the others show faint); a prompt that mentions none sends them all, as image 2, image 3, …
-//! (the engine's [`photocraft_engine::ai_refs`]).
+//! A change by instruction's references: the pictures the active document keeps for its edits
+//! to refer to (`ai.references`, saved with it in PSD and `.pcraft` files), shown as chips under
+//! the source and named as the prompt calls them. A chip named Luna is `@Luna` in the prompt,
+//! which shows the mention in the accent colour while it names a chip; typing `@` offers the
+//! names (Tab takes the first). When the prompt mentions any chip only the mentioned ones are
+//! sent (the others show faint); a prompt that mentions none sends them all, as image 2, image 3,
+//! … (the engine's [`photocraft_engine::ai_refs`]).
 //!
 //! A click on a chip opens its name and its picture under the chips; its × takes it out; + adds
-//! one, named after the picture it starts with. A picture is a layer of this document, the
-//! document itself, another open document or a layer of one. The panel keeps a layer by its
-//! document too, so a chip still means the same picture after another document comes to the front.
+//! one, named after the picture it starts with. A picture is a layer of this document or the
+//! document itself (read when an edit runs), or another open document or a layer of one, which
+//! the document keeps a copy of. Every change is `ai.setReferences`: one History step, and the
+//! document has changes to save.
 
 use std::collections::HashMap;
 use std::ops::Range;
 
 use egui::{Color32, Rect, RichText, Sense, Stroke, StrokeKind, TextureHandle, pos2, vec2};
+use photocraft_doc::{AiPicture, AiReference};
 use photocraft_engine::Session;
-use photocraft_engine::ai_cmds::{NamedRef, SourceRef};
+use photocraft_engine::ai_cmds::SourceRef;
 use photocraft_engine::ai_refs::{self, MAX_NAME};
+use serde_json::{Value, json};
 
-use super::{AiGenUi, edit_label, edit_source, tr};
+use super::{edit_label, edit_source, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::widgets;
 
 /// `source` with a layer of the active document named by its document too
-/// ([`SourceRef::DocumentLayer`]), which stays the same picture whichever document is in front.
+/// ([`SourceRef::DocumentLayer`]), as the panel's lists name it.
 pub(super) fn absolute(s: &Session, source: SourceRef) -> SourceRef {
     match (source, s.active()) {
         (SourceRef::Layer(layer), Some(d)) => SourceRef::DocumentLayer { document: d.doc.id.0, layer },
@@ -37,23 +41,25 @@ pub(super) fn offered(s: &Session) -> Vec<(SourceRef, String)> {
     photocraft_engine::ai_cmds::reference_sources(s).into_iter().map(|(r, label)| (absolute(s, r), label)).collect()
 }
 
-/// The references an instruction may refer to: those chosen that are still on offer, `max` at
-/// most (what the model takes), each named by [`absolute`].
-pub(super) fn edit_references(app: &PhotocraftApp, max: usize) -> Vec<NamedRef> {
-    let offered = offered(&app.session);
-    app.ui
-        .ai_gen
-        .edit_references
-        .iter()
-        .map(|r| NamedRef { source: absolute(&app.session, r.source), name: r.name.clone() })
-        .filter(|r| offered.iter().any(|(o, _)| *o == r.source))
-        .take(max)
-        .collect()
+/// The references the active document keeps.
+pub(super) fn kept(s: &Session) -> Vec<AiReference> {
+    s.active().map(|d| d.doc.ai_references.clone()).unwrap_or_default()
+}
+
+/// The pictures a kept reference is, as [`offered`] names it (`None`: a copy, which is no
+/// picture that is open).
+fn source_of(s: &Session, picture: &AiPicture) -> Option<SourceRef> {
+    let here = s.active()?.doc.id.0;
+    match picture {
+        AiPicture::Layer(layer) => Some(SourceRef::DocumentLayer { document: here, layer: *layer }),
+        AiPicture::Document => Some(SourceRef::Document(here)),
+        AiPicture::Image { .. } => None,
+    }
 }
 
 /// The rows the references take: the chips, and the name and picture of the one open.
-pub(super) fn rows(ui: &AiGenUi) -> usize {
-    1 + if ui.editing_ref.is_some_and(|i| i < ui.edit_references.len()) { 2 } else { 0 }
+pub(super) fn rows(editing: Option<usize>, count: usize) -> usize {
+    1 + if editing.is_some_and(|i| i < count) { 2 } else { 0 }
 }
 
 /// `name`, or with a number after it when one of `taken` has it already (Luna, Luna2, …), within
@@ -84,12 +90,12 @@ pub(super) enum Sent {
     No,
 }
 
-/// What each of `refs` does with `prompt`, and the image number each sent one is to the model.
-pub(super) fn sent(prompt: &str, refs: &[NamedRef]) -> Vec<(Sent, Option<usize>)> {
-    let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-    let resolved = ai_refs::resolve(prompt, &names);
-    let any = !ai_refs::mentions(prompt, &names).is_empty();
-    (0..refs.len())
+/// What each reference named `names` does with `prompt`, and the image number each sent one is
+/// to the model.
+pub(super) fn sent(prompt: &str, names: &[&str]) -> Vec<(Sent, Option<usize>)> {
+    let resolved = ai_refs::resolve(prompt, names);
+    let any = !ai_refs::mentions(prompt, names).is_empty();
+    (0..names.len())
         .map(|i| {
             let number = resolved.sent.iter().position(|s| *s == i).map(|p| p + 2);
             let state = match (any, number) {
@@ -102,37 +108,96 @@ pub(super) fn sent(prompt: &str, refs: &[NamedRef]) -> Vec<(Sent, Option<usize>)
         .collect()
 }
 
+/// A reference as `ai.setReferences` is asked for it: one the document keeps (by index), or a
+/// picture to take.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Entry {
+    Keep(usize, String),
+    New(SourceRef, String),
+}
+
+impl Entry {
+    fn name(&self) -> &str {
+        match self {
+            Entry::Keep(_, name) | Entry::New(_, name) => name,
+        }
+    }
+
+    fn json(&self) -> Value {
+        match self {
+            Entry::Keep(i, name) => json!({"keep": i, "name": name}),
+            Entry::New(source, name) => {
+                let mut v = json!(source);
+                v["name"] = json!(name);
+                v
+            }
+        }
+    }
+}
+
+/// Set the active document's references to `entries` (`ai.setReferences`); `coalesce` merges a
+/// run of changes (a name being typed) into one History step. A refusal is a notice.
+pub(super) fn set(app: &mut PhotocraftApp, entries: &[Entry], coalesce: Option<String>) -> bool {
+    let mut params = json!({"references": entries.iter().map(Entry::json).collect::<Vec<_>>()});
+    if let Some(key) = coalesce {
+        params["coalesce"] = json!(key);
+    }
+    match app.run("ai.setReferences", params) {
+        Ok(_) => true,
+        Err(e) => {
+            crate::notices::error(app, format!("{}: {e}", tr("References")));
+            false
+        }
+    }
+}
+
+/// The document's references kept as they are, with `change` (an index and what goes there:
+/// past the end, added).
+fn keeping(refs: &[AiReference], change: Option<(usize, Entry)>) -> Vec<Entry> {
+    let mut out: Vec<Entry> = refs.iter().enumerate().map(|(i, r)| Entry::Keep(i, r.name.clone())).collect();
+    if let Some((i, entry)) = change {
+        match out.get_mut(i) {
+            Some(slot) => *slot = entry,
+            None => out.push(entry),
+        }
+    }
+    out
+}
+
 /// The chips, with + to add one, and under them the name and picture of the one open.
 pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max: usize) {
     let t = Tokens::get(ui.ctx());
     let offered = offered(&app.session);
-    let mut refs = edit_references(app, max);
-    let states = sent(&app.ui.ai_gen.prompt, &refs);
+    let refs = kept(&app.session);
+    let names: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
+    let states = sent(&app.ui.ai_gen.prompt, &names);
     let mut open = app.ui.ai_gen.editing_ref.filter(|i| *i < refs.len());
     let mut remove = None;
     let mut add = false;
     let thumbs = thumbs(&app.session, ui.ctx(), &refs);
-    ui.add_enabled_ui(!busy && !offered.is_empty(), |ui| {
+    let has_doc = app.session.active().is_some();
+    ui.add_enabled_ui(!busy && has_doc, |ui| {
         ui.horizontal(|ui| {
             edit_label(ui, tr("Refs"));
             ui.spacing_mut().item_spacing.x = 4.0;
             // The chips share the row (with room for + while there is one to add): a long name is
             // shortened rather than pushing the panel wider.
-            let plus = if refs.len() < max { 22.0 + 4.0 } else { 0.0 };
+            let addable = refs.len() < max && !offered.is_empty();
+            let plus = if addable { 22.0 + 4.0 } else { 0.0 };
             let each = ((ui.available_width() - plus) / refs.len().max(1) as f32 - 4.0).max(40.0);
             for (i, r) in refs.iter().enumerate() {
                 let (state, number) = states.get(i).copied().unwrap_or((Sent::All, None));
                 let label = if r.name.is_empty() { format!("{} {}", tr("Image"), number.unwrap_or(i + 2)) } else { format!("@{}", r.name) };
-                let picture = offered.iter().find(|(o, _)| *o == r.source).map_or("", |(_, l)| l.as_str());
+                let picture = photocraft_engine::ai_refs_cmds::describe(&app.session, &r.picture);
                 let (body, close) = chip(ui, &label, thumbs.get(i).copied().flatten(), state, open == Some(i), each);
                 if close {
                     remove = Some(i);
                 } else if body.clicked() {
                     open = if open == Some(i) { None } else { Some(i) };
                 }
-                body.on_hover_text(chip_tip(r, picture, state, number));
+                body.on_hover_text(chip_tip(&r.name, &picture, state, number));
             }
-            if refs.len() < max
+            if addable
                 && crate::icons::button(ui, "plus", 22.0, false, tr("Add a picture to refer to: a layer, a document, or a layer of another open document"))
                     .clicked()
             {
@@ -144,50 +209,52 @@ pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max:
         });
     });
     if let Some(i) = remove {
-        refs.remove(i);
-        open = match open {
-            Some(o) if o == i => None,
-            Some(o) if o > i => Some(o - 1),
-            o => o,
-        };
+        let entries: Vec<Entry> = keeping(&refs, None).into_iter().enumerate().filter(|(j, _)| *j != i).map(|(_, e)| e).collect();
+        if set(app, &entries, None) {
+            open = match open {
+                Some(o) if o == i => None,
+                Some(o) if o > i => Some(o - 1),
+                o => o,
+            };
+        }
     }
     if add {
         // A picture not in use yet, and not the one being changed (nor this whole document, which
         // holds it), first.
         let changing = edit_source(app).map(|s| absolute(&app.session, s));
         let here = app.session.active().map(|d| SourceRef::Document(d.doc.id.0));
-        let unused = |o: &SourceRef| Some(*o) != changing && !refs.iter().any(|r| r.source == *o);
+        let used: Vec<SourceRef> = refs.iter().filter_map(|r| source_of(&app.session, &r.picture)).collect();
+        let unused = |o: &SourceRef| Some(*o) != changing && !used.contains(o);
         let candidates = offered.iter().map(|(o, _)| *o);
         let fresh = candidates.clone().find(|o| unused(o) && Some(*o) != here).or_else(|| candidates.clone().find(|o| unused(o)));
         if let Some(source) = fresh.or_else(|| offered.first().map(|(o, _)| *o)) {
-            let taken: Vec<&str> = refs.iter().map(|r| r.name.as_str()).collect();
-            let name = unique(&photocraft_engine::ai_cmds::reference_name(&app.session, source), &taken);
-            refs.push(NamedRef { source, name });
-            open = Some(refs.len() - 1);
+            let name = unique(&photocraft_engine::ai_cmds::reference_name(&app.session, source), &names);
+            if set(app, &keeping(&refs, Some((refs.len(), Entry::New(source, name)))), None) {
+                open = Some(refs.len());
+            }
         }
     }
     if let Some(i) = open {
         ui.add_space(6.0);
-        if !editor(app, ui, &mut refs, i, &offered, busy) {
+        if !editor(app, ui, i, &offered, busy) {
             open = None;
         }
     }
     ui.add_space(6.0);
-    app.ui.ai_gen.edit_references = refs;
     app.ui.ai_gen.editing_ref = open;
 }
 
 /// What a chip's tooltip says: the picture, and what the prompt does with it.
-fn chip_tip(r: &NamedRef, picture: &str, state: Sent, number: Option<usize>) -> String {
+fn chip_tip(name: &str, picture: &str, state: Sent, number: Option<usize>) -> String {
     let n = number.map_or_else(String::new, |n| n.to_string());
-    let what = match (state, r.name.is_empty()) {
-        (Sent::Mentioned, _) => format!("{} {n}: {} @{}.", tr("Sent as image"), tr("the prompt mentions"), r.name),
-        (Sent::All, false) => format!("{} {n}. {} @{} {}", tr("Sent as image"), tr("Type"), r.name, tr("in the prompt to call it by name.")),
+    let what = match (state, name.is_empty()) {
+        (Sent::Mentioned, _) => format!("{} {n}: {} @{name}.", tr("Sent as image"), tr("the prompt mentions")),
+        (Sent::All, false) => format!("{} {n}. {} @{name} {}", tr("Sent as image"), tr("Type"), tr("in the prompt to call it by name.")),
         (Sent::All, true) => format!("{} {n}. {}", tr("Sent as image"), tr("Name it to call it by name in the prompt.")),
-        (Sent::No, false) => format!("{} @{} {}", tr("Not sent: the prompt mentions other references. Type"), r.name, tr("to send it too.")),
+        (Sent::No, false) => format!("{} @{name} {}", tr("Not sent: the prompt mentions other references. Type"), tr("to send it too.")),
         (Sent::No, true) => tr("Not sent: the prompt mentions references by name. Name this one to use it.").to_string(),
     };
-    format!("{picture}\n{what}\n{}", tr("Click to rename it or choose another picture; × takes it out."))
+    format!("{picture}\n{what}\n{}", tr("Kept with the document. Click to rename it or choose another picture; × takes it out."))
 }
 
 /// One chip, `max` wide at most: the picture's thumbnail, the name (shortened with … to fit) and
@@ -258,11 +325,13 @@ fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: S
 
 /// The open chip's name and picture, as two of the panel's labelled rows. `false` when it was
 /// closed (✓).
-fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, refs: &mut [NamedRef], i: usize, offered: &[(SourceRef, String)], busy: bool) -> bool {
+fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, i: usize, offered: &[(SourceRef, String)], busy: bool) -> bool {
     let t = Tokens::get(ui.ctx());
+    let refs = kept(&app.session);
+    let Some(r) = refs.get(i).cloned() else { return false };
+    let others: Vec<&str> = refs.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.name.as_str()).collect();
     let mut keep = true;
-    let others: Vec<String> = refs.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, r)| r.name.clone()).collect();
-    let Some(r) = refs.get_mut(i) else { return false };
+    let mut change: Option<(Entry, Option<String>)> = None;
     ui.add_enabled_ui(!busy, |ui| {
         ui.horizontal(|ui| {
             edit_label(ui, tr("Name"));
@@ -274,77 +343,92 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, refs: &mut [NamedRef], i: 
             if field.changed() {
                 // A space typed is a `_` (names are one word); what a name can't hold is left out.
                 let name = ai_refs::clean_name(&text.replace(char::is_whitespace, "_"));
-                // The prompt's mentions follow the name.
-                app.ui.ai_gen.prompt = ai_refs::rename(&app.ui.ai_gen.prompt, &r.name, &name);
-                r.name = name;
+                // A name another reference has is shown, not set: the document can't keep two.
+                if name != r.name && !others.iter().any(|o| !name.is_empty() && o.to_lowercase() == name.to_lowercase()) {
+                    change = Some((Entry::Keep(i, name), Some(format!("ai-ref-name-{i}"))));
+                }
             }
             if crate::icons::button(ui, "check", 22.0, false, tr("Done")).clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                 keep = false;
             }
         });
-        if others.iter().any(|o| !r.name.is_empty() && o.to_lowercase() == r.name.to_lowercase()) {
-            ui.horizontal(|ui| {
-                edit_label(ui, "");
-                ui.label(RichText::new(tr("Another reference has this name")).color(t.danger).size(super::NOTE_SIZE));
-            });
-        }
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             // A long picture name is cut short, not let to push the panel wider.
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
             edit_label(ui, tr("Picture"));
-            let mut source = r.source;
-            let options: Vec<(SourceRef, &str)> = offered.iter().map(|(s, label)| (*s, label.as_str())).collect();
-            if widgets::dropdown_literal(ui, &format!("ai-gen-ref-picture-{i}"), &mut source, &options, (ui.available_width() - 2.0).max(80.0))
-                && source != r.source
+            // A copy is no picture that is open: it is listed first, as what the chip has.
+            let copy = matches!(r.picture, AiPicture::Image { .. }).then(|| photocraft_engine::ai_refs_cmds::describe(&app.session, &r.picture));
+            let current = source_of(&app.session, &r.picture);
+            let mut options: Vec<(Option<SourceRef>, &str)> = copy.iter().map(|label| (None, label.as_str())).collect();
+            options.extend(offered.iter().map(|(s, label)| (Some(*s), label.as_str())));
+            let mut chosen = current;
+            if widgets::dropdown_literal(ui, &format!("ai-gen-ref-picture-{i}"), &mut chosen, &options, (ui.available_width() - 2.0).max(80.0))
+                && chosen != current
+                && let Some(source) = chosen
             {
                 // A name that was the picture's own follows the new picture.
-                let was = photocraft_engine::ai_cmds::reference_name(&app.session, r.source);
-                if r.name.is_empty() || r.name == was {
-                    let taken: Vec<&str> = others.iter().map(String::as_str).collect();
-                    let name = unique(&photocraft_engine::ai_cmds::reference_name(&app.session, source), &taken);
-                    app.ui.ai_gen.prompt = ai_refs::rename(&app.ui.ai_gen.prompt, &r.name, &name);
-                    r.name = name;
-                }
-                r.source = source;
+                let was = current.map(|c| photocraft_engine::ai_cmds::reference_name(&app.session, c)).unwrap_or_default();
+                let name = if r.name.is_empty() || r.name == was {
+                    unique(&photocraft_engine::ai_cmds::reference_name(&app.session, source), &others)
+                } else {
+                    r.name.clone()
+                };
+                change = Some((Entry::New(source, name), None));
             }
         })
         .response
-        .on_hover_text(tr("The picture: a layer, this document, another open document or a layer of one. Open a file to refer to it"));
+        .on_hover_text(tr(
+            "The picture: a layer, this document, another open document or a layer of one. Another document's picture is copied into this one, so it is kept with it",
+        ));
     });
+    if let Some((entry, coalesce)) = change {
+        let old = r.name.clone();
+        let new = entry.name().to_string();
+        if set(app, &keeping(&refs, Some((i, entry))), coalesce) {
+            // The prompt's mentions follow the name.
+            app.ui.ai_gen.prompt = ai_refs::rename(&app.ui.ai_gen.prompt, &old, &new);
+        }
+    }
+    if refs.iter().enumerate().any(|(j, o)| j != i && !r.name.is_empty() && o.name.to_lowercase() == r.name.to_lowercase()) {
+        ui.label(RichText::new(tr("Another reference has this name")).color(t.danger).size(super::NOTE_SIZE));
+    }
     keep
 }
 
-/// The cached thumbnails of the pictures `refs` show, one per reference (`None`: none to show).
-type ThumbCache = HashMap<SourceRef, (u64, f64, TextureHandle)>;
+/// The cached thumbnails of the pictures the references show, by what they show.
+type ThumbCache = HashMap<String, (u64, f64, TextureHandle)>;
 
-fn thumbs(s: &Session, ctx: &egui::Context, refs: &[NamedRef]) -> Vec<Option<egui::TextureId>> {
+/// A thumbnail for each of `refs` (`None`: none to show).
+fn thumbs(s: &Session, ctx: &egui::Context, refs: &[AiReference]) -> Vec<Option<egui::TextureId>> {
     const SIDE: usize = 32;
     let id = egui::Id::new("ai-gen-ref-thumbs");
     let now = ctx.input(|i| i.time);
     let mut cache: ThumbCache = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
-    cache.retain(|k, _| refs.iter().any(|r| r.source == *k));
+    let keys: Vec<String> = refs.iter().map(|r| thumb_key(&r.picture)).collect();
+    cache.retain(|k, _| keys.contains(k));
     let out = refs
         .iter()
-        .map(|r| {
-            let (key, image) = thumb_source(s, r.source)?;
-            if let Some((k, made, tex)) = cache.get(&r.source) {
+        .zip(&keys)
+        .map(|(r, cache_key)| {
+            let (key, image) = thumb_source(s, &r.picture)?;
+            if let Some((k, made, tex)) = cache.get(cache_key) {
                 // A document is composited anew at most once a second while it changes.
                 if *k == key || (matches!(image, Thumb::Document(_)) && now - made < 1.0) {
                     return Some(tex.id());
                 }
             }
-            let img = image.render(SIDE);
-            match cache.get_mut(&r.source) {
+            let img = image.render(SIDE)?;
+            match cache.get_mut(cache_key) {
                 Some((k, made, tex)) => {
                     tex.set(img, egui::TextureOptions::LINEAR);
                     (*k, *made) = (key, now);
                     Some(tex.id())
                 }
                 None => {
-                    let tex = ctx.load_texture(format!("ai-gen-ref-{:?}", r.source), img, egui::TextureOptions::LINEAR);
+                    let tex = ctx.load_texture(format!("ai-gen-ref-{cache_key}"), img, egui::TextureOptions::LINEAR);
                     let tid = tex.id();
-                    cache.insert(r.source, (key, now, tex));
+                    cache.insert(cache_key.clone(), (key, now, tex));
                     Some(tid)
                 }
             }
@@ -354,68 +438,88 @@ fn thumbs(s: &Session, ctx: &egui::Context, refs: &[NamedRef]) -> Vec<Option<egu
     out
 }
 
+/// What a thumbnail of `picture` is cached under.
+fn thumb_key(picture: &AiPicture) -> String {
+    match picture {
+        AiPicture::Layer(id) => format!("layer-{id}"),
+        AiPicture::Document => "document".into(),
+        // The same copy, the same bytes: kept in an `Arc` until it is replaced.
+        AiPicture::Image { png, .. } => format!("copy-{:p}", std::sync::Arc::as_ptr(png)),
+    }
+}
+
 /// The pixels a thumbnail shows.
 enum Thumb<'a> {
     Layer(&'a photocraft_raster::Surface, photocraft_geom::Rect),
     Document(&'a photocraft_doc::Document),
+    Png(&'a [u8]),
 }
 
 impl Thumb<'_> {
-    fn render(&self, side: usize) -> egui::ColorImage {
+    fn render(&self, side: usize) -> Option<egui::ColorImage> {
+        let square = |w: usize, h: usize, rgba: &[u8]| {
+            let mut px = vec![Color32::TRANSPARENT; side * side];
+            let (ox, oy) = (side.saturating_sub(w) / 2, side.saturating_sub(h) / 2);
+            for (i, &[r, g, b, a]) in rgba.as_chunks::<4>().0.iter().enumerate() {
+                let (x, y) = (i % w.max(1) + ox, i / w.max(1) + oy);
+                if x < side
+                    && let Some(out) = px.get_mut(y * side + x)
+                {
+                    *out = Color32::from_rgba_unmultiplied(r, g, b, a);
+                }
+            }
+            egui::ColorImage::new([side, side], px)
+        };
         match self {
             Thumb::Layer(px, frame) => {
                 let mut v = [0.0f32; 8];
                 let n = px.channels().min(v.len());
-                crate::thumb_image(*frame, side, |x, y| {
+                Some(crate::thumb_image(*frame, side, |x, y| {
                     let Some(buf) = v.get_mut(..n) else { return [0.0; 4] };
                     px.read_pixel(x, y, buf);
                     photocraft_raster::to_rgba(&px.format(), buf)
-                })
+                }))
             }
             Thumb::Document(doc) => {
                 let comp = photocraft_compose::thumbnail(doc, side as u32);
-                let (w, h) = (comp.width as usize, comp.height as usize);
-                let mut px = vec![Color32::TRANSPARENT; side * side];
-                let (ox, oy) = (side.saturating_sub(w) / 2, side.saturating_sub(h) / 2);
-                for (i, &[r, g, b, a]) in comp.pixels.as_chunks::<4>().0.iter().enumerate() {
-                    let (x, y) = (i % w.max(1) + ox, i / w.max(1) + oy);
-                    if x < side
-                        && let Some(out) = px.get_mut(y * side + x)
-                    {
-                        *out = Color32::from_rgba_unmultiplied(r, g, b, a);
+                Some(square(comp.width as usize, comp.height as usize, &comp.pixels))
+            }
+            Thumb::Png(bytes) => {
+                // Scaled to fit the square by sampling; a picture that does not decode has none.
+                let img = photocraft_codecs::decode(bytes).ok()?;
+                let (w, h) = (img.width() as usize, img.height() as usize);
+                if w == 0 || h == 0 {
+                    return None;
+                }
+                let rgba = img.to_rgba8();
+                let scale = (w.max(h) as f32 / side as f32).max(1.0);
+                let (tw, th) = (((w as f32 / scale) as usize).clamp(1, side), ((h as f32 / scale) as usize).clamp(1, side));
+                let mut small = Vec::with_capacity(tw * th * 4);
+                for y in 0..th {
+                    for x in 0..tw {
+                        let (sx, sy) = (((x as f32 + 0.5) * scale) as usize, ((y as f32 + 0.5) * scale) as usize);
+                        let at = (sy.min(h - 1) * w + sx.min(w - 1)) * 4;
+                        small.extend(rgba.get(at..at + 4).unwrap_or(&[0, 0, 0, 0]));
                     }
                 }
-                egui::ColorImage::new([side, side], px)
+                Some(square(tw, th, &small))
             }
         }
     }
 }
 
-/// What the thumbnail of `source` shows, and a key that changes when that does: the layer's
-/// pixels, or the document's revision.
-fn thumb_source(s: &Session, source: SourceRef) -> Option<(u64, Thumb<'_>)> {
-    let doc = |id: u64| s.documents().iter().find(|d| d.doc.id.0 == id);
-    let layer = |d: &'_ photocraft_engine::DocState, id: u64| {
-        let l = d.doc.layer(photocraft_doc::LayerId(id))?;
-        let px = l.surface()?;
-        let frame = px.content_bounds().intersect(&d.doc.bounds());
-        Some((crate::surface_fingerprint(px), frame))
-    };
-    match source {
-        SourceRef::Layer(id) => {
-            let d = s.active()?;
-            let (key, frame) = layer(d, id)?;
-            Some((key, Thumb::Layer(d.doc.layer(photocraft_doc::LayerId(id))?.surface()?, frame)))
+/// What the thumbnail of `picture` shows, and a key that changes when that does: the layer's
+/// pixels, the document's revision, or the copy (which does not change).
+fn thumb_source<'a>(s: &'a Session, picture: &'a AiPicture) -> Option<(u64, Thumb<'a>)> {
+    let d = s.active()?;
+    match picture {
+        AiPicture::Layer(id) => {
+            let px = d.doc.layer(photocraft_doc::LayerId(*id))?.surface()?;
+            let frame = px.content_bounds().intersect(&d.doc.bounds());
+            Some((crate::surface_fingerprint(px), Thumb::Layer(px, frame)))
         }
-        SourceRef::DocumentLayer { document, layer: id } => {
-            let d = doc(document)?;
-            let (key, frame) = layer(d, id)?;
-            Some((key, Thumb::Layer(d.doc.layer(photocraft_doc::LayerId(id))?.surface()?, frame)))
-        }
-        SourceRef::Document(id) => {
-            let d = doc(id)?;
-            Some((d.revision, Thumb::Document(&d.doc)))
-        }
+        AiPicture::Document => Some((d.revision, Thumb::Document(&d.doc))),
+        AiPicture::Image { png, .. } => Some((0, Thumb::Png(png))),
     }
 }
 

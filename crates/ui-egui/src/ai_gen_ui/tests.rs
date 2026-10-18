@@ -1,5 +1,6 @@
 use super::*;
 use photocraft_aigen::{Request, Response, Settings, Transport};
+use photocraft_doc::AiPicture;
 use photocraft_engine::Session;
 use std::sync::{Arc, Mutex};
 
@@ -1112,20 +1113,16 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     // A selection scopes the edit: the model is sent it with a quarter of its edge around it.
     app.run("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
     assert_eq!(target_size(&app), Some((24, 24, true)));
-    // References: the ones still on offer, as many as the model takes, in order, a layer named
-    // by its document too.
-    let mine = SourceRef::DocumentLayer { document: doc, layer: background };
-    app.ui.ai_gen.edit_references =
-        [SourceRef::Document(doc), SourceRef::Layer(999_999), SourceRef::Layer(background), SourceRef::Document(doc)].map(NamedRef::from).to_vec();
-    let sources = |refs: Vec<NamedRef>| refs.into_iter().map(|r| r.source).collect::<Vec<_>>();
-    assert_eq!(sources(refs::edit_references(&app, 3)), [SourceRef::Document(doc), mine, SourceRef::Document(doc)]);
-    assert_eq!(refs::edit_references(&app, 2).len(), 2);
-    // Drawing keeps what is valid, and Qwen Image Edit (two references) drops the third.
+    // References: the document's own (ai.setReferences), sent when the prompt names none.
+    app.run("ai.setReferences", json!({"references": [{"document": doc}, {"layer": background}, {"document": doc}]})).unwrap();
     draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.edit_references.len(), 3);
+    assert_eq!(refs::kept(&app.session).len(), 3);
+    // Qwen Image Edit takes two: Generate says to name the ones to send.
     app.ui.ai_gen.edit_model = "edit".into();
+    let edit = current_model(&app).cloned().unwrap();
+    assert!(generate_blocked(&app, &edit).unwrap().contains("takes fewer references"), "{:?}", generate_blocked(&app, &edit));
     draw_panel(&mut app);
-    assert_eq!(sources(app.ui.ai_gen.edit_references.clone()), [SourceRef::Document(doc), mine]);
+    app.run("ai.setReferences", json!({"references": [{"keep": 0}, {"keep": 1}]})).unwrap();
     app.ui.ai_gen.edit_model = "q21".into();
     app.ui.ai_gen.edit_quality = GenerationQuality::Draft;
     let before = app.session.active().unwrap().doc.layers.len();
@@ -1153,17 +1150,14 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     // A cloud model edits too (its quality is its own setting); so does every tab's draw.
     app.ui.ai_gen.edit_model = "gpt-image-2".into();
     draw_panel(&mut app);
-    // The state reads and writes like the engine names things; an old state has none of it.
+    // The state reads and writes like the engine names things; an old state has none of it, and
+    // references an old state kept are no longer the panel's.
     let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
-    assert_eq!(
-        (&state["editSource"], &state["editQuality"], &state["editReferences"][0]),
-        (&json!({"layer": background}), &json!("draft"), &json!({"document": doc}))
-    );
-    let old: AiGenUi = serde_json::from_value(json!({"prompt": "x", "mode": "imgEdit"})).unwrap();
-    assert_eq!((old.mode, old.edit_source, old.edit_references.len(), old.edit_quality), (Mode::Edit, None, 0, GenerationQuality::Standard));
+    assert_eq!((&state["editSource"], &state["editQuality"]), (&json!({"layer": background}), &json!("draft")));
+    let old: AiGenUi = serde_json::from_value(json!({"prompt": "x", "mode": "imgEdit", "editReferences": [{"layer": 3}]})).unwrap();
+    assert_eq!((old.mode, old.edit_source, old.edit_quality), (Mode::Edit, None, GenerationQuality::Standard));
     // The dock gives the task its rows: Edit's tasks, the source, the chips and the mask tools;
     // a chip open shows its name and picture too.
-    app.ui.ai_gen.edit_references.truncate(1);
     let tall = wanted_height(&app);
     app.ui.ai_gen.editing_ref = Some(0);
     assert_eq!(wanted_height(&app), tall + 2.0 * ROW);
@@ -1174,7 +1168,7 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
 }
 
 #[test]
-fn references_are_named_chips_the_prompt_calls_by_name() {
+fn references_are_named_chips_the_document_keeps() {
     let mut app = app();
     add_model(&mut app, Model { id: "q21".into(), ..Family::QwenImage21.preset() });
     // A picture to change, a layer to refer to, and another document with a layer of its own.
@@ -1196,7 +1190,7 @@ fn references_are_named_chips_the_prompt_calls_by_name() {
     assert!(app.session.set_active(0));
     app.run("layer.select", json!({"layer": background})).unwrap();
     (app.ui.ai_gen.mode, app.ui.ai_gen.task, app.ui.ai_gen.edit_model) = (Mode::Edit, EditTask::Change, "q21".into());
-    // The other document's layer is on offer to refer to, after its document.
+    // The other document's layer is on offer, after its document.
     let offered = refs::offered(&app.session);
     let theirs = SourceRef::DocumentLayer { document: there, layer: luna };
     let at = offered.iter().position(|(r, _)| *r == SourceRef::Document(there)).unwrap();
@@ -1208,20 +1202,24 @@ fn references_are_named_chips_the_prompt_calls_by_name() {
         ("Luna3".into(), "Luna".into(), String::new())
     );
     assert_eq!(refs::unique(&"x".repeat(24), &[&"x".repeat(24)]).chars().count(), 24);
-    app.ui.ai_gen.edit_references = vec![
-        NamedRef { source: theirs, name: "Luna".into() },
-        NamedRef { source: SourceRef::DocumentLayer { document: here, layer: max }, name: "Max".into() },
-        NamedRef::from(SourceRef::Document(there)),
+    // Setting them from the panel: another document's layer is copied in, this one's is kept as
+    // a layer.
+    let entries = [
+        refs::Entry::New(theirs, "Luna".into()),
+        refs::Entry::New(SourceRef::DocumentLayer { document: here, layer: max }, "Max".into()),
+        refs::Entry::New(SourceRef::Document(there), String::new()),
     ];
+    assert!(refs::set(&mut app, &entries, None));
+    let kept = refs::kept(&app.session);
+    assert!(matches!(kept[0].picture, AiPicture::Image { .. }) && kept[1].picture == AiPicture::Layer(max), "{kept:?}");
     draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.edit_references.len(), 3);
+    assert_eq!(refs::kept(&app.session).len(), 3);
     // What the prompt sends: all of them while it mentions none, then those it mentions.
-    let chips = refs::edit_references(&app, 3);
-    let states = |prompt: &str| refs::sent(prompt, &chips).into_iter().collect::<Vec<_>>();
+    let names = ["Luna", "Max", ""];
     use refs::Sent::{All, Mentioned, No};
-    assert_eq!(states("put image 4 behind them"), [(All, Some(2)), (All, Some(3)), (All, Some(4))]);
-    assert_eq!(states("@max hugs @Luna"), [(Mentioned, Some(2)), (Mentioned, Some(3)), (No, None)]);
-    assert_eq!(states("@Max waves"), [(No, None), (Mentioned, Some(2)), (No, None)]);
+    assert_eq!(refs::sent("put image 4 behind them", &names), [(All, Some(2)), (All, Some(3)), (All, Some(4))]);
+    assert_eq!(refs::sent("@max hugs @Luna", &names), [(Mentioned, Some(2)), (Mentioned, Some(3)), (No, None)]);
+    assert_eq!(refs::sent("@Max waves", &names), [(No, None), (Mentioned, Some(2)), (No, None)]);
     // The prompt shows a mention in the accent colour, on a tint; other @words stay plain.
     let job = refs::prompt_job("@Luna meets @Bob", &["Luna", "Max"], egui::FontId::proportional(12.0), egui::Color32::WHITE, egui::Color32::BLUE, 100.0);
     let colored: Vec<(&str, egui::Color32)> =
@@ -1240,35 +1238,39 @@ fn references_are_named_chips_the_prompt_calls_by_name() {
     assert_eq!(refs::completion_at("x", 99, &names), None);
     assert_eq!(refs::complete("hug @lu now", 4..7, "Luna"), ("hug @Luna now".into(), 9));
     assert_eq!(refs::complete("hug @lu", 4..7, "Luna"), ("hug @Luna ".into(), 10));
-    // Generating sends the chips with their names; the engine sends the mentioned ones.
+    // Generating sends the document's references; the engine sends the mentioned ones, the copy
+    // as it was kept.
     app.ui.ai_gen.prompt = "@Luna sits beside @Max".into();
-    assert_eq!(generate_blocked(&app, &Model { id: "q21".into(), ..Family::QwenImage21.preset() }), None);
+    let q21 = current_model(&app).cloned().unwrap();
+    assert_eq!(generate_blocked(&app, &q21), None);
     let r = generate(&mut app).unwrap();
     assert_eq!(r["modelPrompt"], "Luna (image 2) sits beside Max (image 3)");
-    let layer = r["layer"].as_u64().unwrap();
-    // Two alike can't be sent: Generate says so.
-    app.ui.ai_gen.edit_references[2].name = "LUNA".into();
-    let q21 = current_model(&app).cloned().unwrap();
-    assert!(generate_blocked(&app, &q21).unwrap().contains("Two references are named"));
-    // Load Prompt puts the text back, names and all, and leaves the chips and the tab alone.
-    (app.ui.ai_gen.prompt, app.ui.ai_gen.mode) = (String::new(), Mode::Create);
-    let kept = app.ui.ai_gen.clone();
-    assert!(load_prompt(&mut app, layer));
-    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "@Luna sits beside @Max".into(), ..kept });
-    app.ui.ai_gen.mode = Mode::Edit;
-    // An open chip draws its name and picture; the state is kept as the engine reads it, and an
-    // old state's references (no names) still load.
+    // Two alike can't be set: the document keeps its references as they were.
+    let twice = [refs::Entry::Keep(0, "Luna".into()), refs::Entry::Keep(1, "LUNA".into())];
+    assert!(!refs::set(&mut app, &twice, None));
+    assert_eq!(refs::kept(&app.session).len(), 3);
+    // The other document closed: the copy stays (it is this document's), as do the others.
+    assert!(app.session.close(1).is_some());
+    draw_panel(&mut app);
+    assert_eq!(refs::kept(&app.session).iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Luna", "Max", ""]);
+    // An open chip draws its name and picture; taking one out and undoing it are History steps.
     app.ui.ai_gen.editing_ref = Some(1);
     draw_panel(&mut app);
     assert_eq!(app.ui.ai_gen.editing_ref, Some(1));
-    let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
-    assert_eq!(state["editReferences"][0], json!({"document": there, "layer": luna, "name": "Luna"}));
-    let old: AiGenUi = serde_json::from_value(json!({"editReferences": [{"layer": 3}, {"document": 1}]})).unwrap();
-    assert_eq!(old.edit_references, [NamedRef::from(SourceRef::Layer(3)), NamedRef::from(SourceRef::Document(1))]);
-    // The other document closed: its chips go, the rest stay.
-    assert!(app.session.close(1).is_some());
-    draw_panel(&mut app);
-    assert_eq!(app.ui.ai_gen.edit_references.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["Max"]);
+    assert!(refs::set(&mut app, &[refs::Entry::Keep(1, "Max".into())], None));
+    assert_eq!(refs::kept(&app.session).len(), 1);
+    app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(refs::kept(&app.session).len(), 3);
+    // A rename typed letter by letter is one step.
+    for name in ["M", "Ma", "Mal"] {
+        assert!(refs::set(
+            &mut app,
+            &[refs::Entry::Keep(0, "Luna".into()), refs::Entry::Keep(1, name.into()), refs::Entry::Keep(2, String::new())],
+            Some("ai-ref-name-1".into())
+        ));
+    }
+    app.run("edit.undo", json!({})).unwrap();
+    assert_eq!(refs::kept(&app.session)[1].name, "Max");
 }
 
 #[test]
@@ -1545,7 +1547,10 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     // With the server's files read, the list marks the models whose file it doesn't have.
     let listing: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_value(f[FILES].clone()).unwrap();
     let lost: Vec<&str> = models.iter().filter(|m| !photocraft_aigen::detect::on_server(&listing, m)).map(|m| m.id.as_str()).collect();
-    assert_eq!(lost, ["qwen-image-2-1", "krea-2-turbo", "flux-3-klein", "moss-image", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]);
+    assert_eq!(
+        lost,
+        ["qwen-image-2-1", "krea-2-turbo", "flux-3-klein", "moss-image", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]
+    );
     for x in Filter::ALL {
         f.insert(FILTER.into(), json!(x.key()));
         draw_section(&mut f);
@@ -1819,8 +1824,10 @@ fn a_narrow_panel_keeps_everything_inside_it() {
     let layer = app.session.active().unwrap().active_layer.unwrap().0;
     (app.ui.ai_gen.mode, app.ui.ai_gen.task, app.ui.ai_gen.edit_model) = (Mode::Edit, EditTask::Change, "q21".into());
     app.ui.ai_gen.prompt = "add @dracco rising from the lake".into();
-    let reference = |name: &str| NamedRef { source: SourceRef::DocumentLayer { document: doc, layer }, name: name.into() };
-    app.ui.ai_gen.edit_references = vec![reference("dracco_the_dragon_king"), reference("another_long_name"), reference("and_a_third_one")];
+    let _ = doc;
+    let reference = |name: &str| json!({"layer": layer, "name": name});
+    app.run("ai.setReferences", json!({"references": [reference("dracco_the_dragon_king"), reference("another_long_name"), reference("and_a_third_one")]}))
+        .unwrap();
     app.ui.ai_gen.editing_ref = Some(0);
     // The dock is 250 wide at its narrowest (`panels::DOCK_WIDTH`), its content a little less.
     for width in [234.0, 260.0, 300.0, 360.0] {

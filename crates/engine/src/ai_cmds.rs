@@ -38,7 +38,8 @@ use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
 use photocraft_doc::{
-    ColorIndicates, Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, LayerContent, LayerId, LayerMask,
+    AiPicture, ColorIndicates, Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, LayerContent, LayerId,
+    LayerMask,
 };
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
@@ -520,7 +521,7 @@ impl<'de> serde::Deserialize<'de> for SourceRef {
 
 impl SourceRef {
     /// A layer of the active document as [`SourceRef::Layer`], whichever way it was named.
-    fn settled(self, s: &Session) -> SourceRef {
+    pub(crate) fn settled(self, s: &Session) -> SourceRef {
         match self {
             SourceRef::DocumentLayer { document, layer } if s.active().is_some_and(|d| d.doc.id.0 == document) => SourceRef::Layer(layer),
             other => other,
@@ -837,6 +838,44 @@ impl Img2ImgPlan {
     }
 }
 
+/// A reference an edit is given: a picture read when it runs, or a copy the document keeps.
+enum Given {
+    Live(SourceRef),
+    Copy(Arc<Vec<u8>>),
+}
+
+/// A reference's picture as it is sent.
+enum Sent {
+    Read(Reference),
+    Copy(Arc<Vec<u8>>),
+}
+
+/// The references the active document keeps ([`Document::ai_references`]), with their names.
+fn kept_references(s: &Session) -> Vec<(Given, String)> {
+    let Some(d) = s.active() else { return Vec::new() };
+    d.doc
+        .ai_references
+        .iter()
+        .map(|r| {
+            let given = match &r.picture {
+                AiPicture::Layer(id) => Given::Live(SourceRef::Layer(*id)),
+                AiPicture::Document => Given::Live(SourceRef::Document(d.doc.id.0)),
+                AiPicture::Image { png, .. } => Given::Copy(png.clone()),
+            };
+            (given, r.name.clone())
+        })
+        .collect()
+}
+
+/// A copy of the picture behind `source`, as an edit's reference is sent (a quarter of a
+/// megapixel to one, a PNG), and what it is (`Layer: Max (Other)`), for a document to keep.
+pub fn reference_copy(s: &Session, source: SourceRef) -> std::result::Result<(Arc<Vec<u8>>, String), String> {
+    let picture = reference(s, source)?;
+    let png = picture.png().map_err(|e| e.to_string())?;
+    let label = reference_sources(s).into_iter().find(|(r, _)| *r == source).map(|(_, label)| label).unwrap_or_else(|| "Picture".to_string());
+    Ok((Arc::new(png), label))
+}
+
 /// The `references` param of `ai.generate`: up to [`photocraft_aigen::MAX_REFERENCES`] sources,
 /// each with a name or none ([`crate::ai_refs::clean_name`]); no two named alike.
 fn references_param(p: &Value) -> Result<Vec<NamedRef>> {
@@ -1063,16 +1102,18 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             )
         }));
     }
-    // A layer of the active document is kept as one, whichever way it was named: a saved file
+    // The references: those asked for, else the ones the document keeps (`ai.setReferences`). A
+    // layer of the active document is kept as one, whichever way it was named: a saved file
     // keeps layers of its own document only.
-    let mut references = if edit { references_param(p)? } else { Vec::new() };
-    for r in &mut references {
-        r.source = r.source.settled(s);
-    }
+    let references: Vec<(Given, String)> = match (edit, p.get("references")) {
+        (false, _) => Vec::new(),
+        (true, Some(_)) => references_param(p)?.into_iter().map(|r| (Given::Live(r.source.settled(s)), r.name)).collect(),
+        (true, None) => kept_references(s),
+    };
     // The prompt says which references go (those it mentions by name, else all), and the model
     // is told them by number.
-    let resolved = crate::ai_refs::resolve(&prompt, &references.iter().map(|r| r.name.as_str()).collect::<Vec<_>>());
-    let sent: Vec<SourceRef> = resolved.sent.iter().filter_map(|i| references.get(*i)).map(|r| r.source).collect();
+    let resolved = crate::ai_refs::resolve(&prompt, &references.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>());
+    let sent: Vec<&Given> = resolved.sent.iter().filter_map(|i| references.get(*i)).map(|(given, _)| given).collect();
     if sent.len() > model.max_references() {
         return Err(EngineError::Other(format!("{} takes {} reference pictures at most, not {}", model.name, model.max_references(), sent.len())));
     }
@@ -1117,7 +1158,14 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         None
     };
     // The pictures an edit refers to, as they are now.
-    let reference_pictures = sent.iter().map(|r| reference(s, *r)).collect::<std::result::Result<Vec<_>, _>>().map_err(EngineError::Other)?;
+    let reference_pictures = sent
+        .iter()
+        .map(|given| match given {
+            Given::Live(r) => reference(s, *r).map(Sent::Read),
+            Given::Copy(png) => Ok(Sent::Copy(png.clone())),
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(EngineError::Other)?;
     let area = match (selected, &plan) {
         (_, Some(plan)) => plan.area,
         // The model is shown the layer around the selection, and its answer covers that area.
@@ -1163,7 +1211,14 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         alpha,
         seed,
         source: source.map(Into::into),
-        references: references.into_iter().map(Into::into).collect(),
+        // A copy the document keeps is not a picture the layer can name.
+        references: references
+            .into_iter()
+            .filter_map(|(given, name)| match given {
+                Given::Live(source) => Some(GenerationReference { source: source.into(), name }),
+                Given::Copy(_) => None,
+            })
+            .collect(),
         quality,
     };
     // A draft runs part of a local model's schedule, detail a little more of it.
@@ -1195,7 +1250,10 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 if edit {
                     source.edit = true;
                     for picture in &reference_pictures {
-                        source.references.push(picture.png()?);
+                        source.references.push(match picture {
+                            Sent::Read(r) => r.png()?,
+                            Sent::Copy(png) => png.to_vec(),
+                        });
                         ctx.check()?;
                     }
                 }

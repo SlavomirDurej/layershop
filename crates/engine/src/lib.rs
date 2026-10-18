@@ -13,6 +13,7 @@ pub mod adjust_cmds;
 pub mod adjust_params;
 pub mod ai_cmds;
 pub mod ai_refs;
+pub mod ai_refs_cmds;
 pub mod ai_setup_cmds;
 pub mod align_cmds;
 mod allocation;

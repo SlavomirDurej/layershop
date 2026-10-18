@@ -1,7 +1,7 @@
 use super::*;
 use photocraft_aigen::{Family, Request, Response};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
-use photocraft_doc::{Generation, GenerationMode, GenerationQuality, GenerationSource};
+use photocraft_doc::{Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource};
 use std::sync::Mutex;
 
 /// A ComfyUI that answers every workflow with one `w`×`h` image of `rgba`, and records what it
@@ -1230,6 +1230,35 @@ fn references_named_in_the_prompt_are_the_ones_sent() {
     assert_eq!(serde_json::to_value(theirs).unwrap(), json!({"document": other, "layer": luna}));
     assert_eq!(serde_json::from_value::<SourceRef>(json!({"layer": 4})).unwrap(), SourceRef::Layer(4));
     assert!(serde_json::from_value::<SourceRef>(json!({"name": "x"})).is_err());
+}
+
+#[test]
+fn an_edit_without_references_sends_the_ones_the_document_keeps() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    let background = s.active().unwrap().active_layer.unwrap().0;
+    let here = s.active().unwrap().doc.id.0;
+    // A picture from another document, copied in; that document then closes.
+    s.execute("file.new", json!({"width": 30, "height": 60})).unwrap();
+    let there = s.active().unwrap().doc.id.0;
+    assert!(s.set_active(0));
+    s.execute("ai.setReferences", json!({"references": [{"document": there, "name": "Max"}, {"layer": background, "name": "Sky"}]})).unwrap();
+    let last = s.documents().len() - 1;
+    assert!(s.close(last).is_some());
+    assert_eq!(s.active().unwrap().doc.id.0, here);
+    let r = s.execute("ai.generate", json!({"prompt": "@Max under @Sky", "mode": "imgEdit", "seed": 1})).unwrap();
+    assert_eq!(r["modelPrompt"], "Max (image 2) under Sky (image 3)");
+    // The copy goes as it was kept (tall, like its document), the layer is read now.
+    let one = fake.uploaded("photocraft_edit_reference_1.png");
+    assert!(one.height() > one.width(), "{}x{}", one.width(), one.height());
+    fake.uploaded("photocraft_edit_reference_2.png");
+    // The layer names the layer it could refer to by name; the copy it can't name.
+    let d = s.active().unwrap();
+    let g = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.clone().unwrap();
+    assert_eq!(g.references, [GenerationReference { source: GenerationSource::Layer(background), name: "Sky".into() }]);
+    // References asked for replace the kept ones for that edit.
+    let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "references": [], "seed": 1})).unwrap();
+    assert_eq!(r["modelPrompt"], "x");
 }
 
 #[test]
