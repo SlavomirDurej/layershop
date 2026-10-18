@@ -20,15 +20,26 @@
   -Draft makes a draft, seen only by the repo's owner until it is published on GitHub; without
   it the release is public at once, as a pre-release.
 
+  A public release then goes on the website (the layer-shop-website checkout beside this repo, or
+  -Website): its download page is pointed at the new release (version, date, direct links to the
+  MSI, the zip and the checksums; scripts/sync-release.mjs writes release.json), and the site is
+  built and deployed to production (npm run deploy). That checkout is checked before anything is
+  published: it must be there, with Node and its FTP settings (.env.deploy.local). -NoWebsite
+  leaves the site alone. A draft never touches it: after publishing the draft on GitHub, run
+  `npm run release:sync` and `npm run deploy` in the website checkout.
+
 .EXAMPLE
   pwsh -NoProfile -File packaging/windows/layershop-publish.ps1 -Draft
   pwsh -NoProfile -File packaging/windows/layershop-publish.ps1 -Preview 3
+  pwsh -NoProfile -File packaging/windows/layershop-publish.ps1 -NoWebsite
 #>
 param(
   [int] $Preview = 0,
   [switch] $Draft,
   [string] $Repo = 'SlavomirDurej/layershop',
-  [string] $NotesFile
+  [string] $NotesFile,
+  [string] $Website = (Join-Path $PSScriptRoot '..\..\..\layer-shop-website'),
+  [switch] $NoWebsite
 )
 $ErrorActionPreference = 'Stop'
 $Root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
@@ -43,6 +54,19 @@ function Stop-With([string] $Why) {
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) { Stop-With 'the GitHub CLI (gh) is not installed: https://cli.github.com' }
 gh auth status --hostname github.com *> $null
 if ($LASTEXITCODE -ne 0) { Stop-With 'gh is not signed in to GitHub. Run: gh auth login' }
+
+# ---- the website can be updated afterwards ------------------------------------------------------
+$UpdateSite = -not ($Draft -or $NoWebsite)
+if ($UpdateSite) {
+  $Site = if (Test-Path $Website) { (Resolve-Path $Website).Path } else { $null }
+  if (-not $Site -or -not (Test-Path (Join-Path $Site 'scripts\sync-release.mjs'))) {
+    Stop-With "the website checkout is not at $Website (with scripts\sync-release.mjs). Pass -Website <folder>, or -NoWebsite to publish without updating the site."
+  }
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Stop-With 'Node is not installed, so the website cannot be built. Install it, or pass -NoWebsite.' }
+  if (-not ($env:FTP_HOST -or (Test-Path (Join-Path $Site '.env.deploy.local')))) {
+    Stop-With "the website has no FTP settings ($Site\.env.deploy.local), so it cannot be deployed. Add them, or pass -NoWebsite."
+  }
+}
 
 # ---- the files ---------------------------------------------------------------------------------
 $InfoFile = Join-Path $Dist 'build-info.json'
@@ -68,7 +92,7 @@ foreach ($Line in Get-Content (Join-Path $Dist 'SHA256SUMS.txt')) {
 git -C $Root fetch --quiet origin
 if ($LASTEXITCODE -ne 0) { Stop-With 'could not reach the fork (git fetch origin failed).' }
 $OnFork = git -C $Root branch -r --contains $Head | Where-Object { $_.Trim() -like 'origin/*' }
-if (-not $OnFork) { Stop-With "commit $($Head.Substring(0, 8)) is not on the fork yet. Push it first (Deploy: Push ai-gen to fork)." }
+if (-not $OnFork) { Stop-With "commit $($Head.Substring(0, 8)) is not on the fork yet. Push it first (Deploy: Push main to fork)." }
 
 # ---- the tag ----------------------------------------------------------------------------------
 $Version = $Info.version
@@ -101,7 +125,7 @@ if (-not $NotesFile) {
     'It runs on **Windows 10 and 11 (x64)** only.'
     ''
     $(if ($Previous) { "### What's new since $Previous" } else { "### What's in it" })
-    $(if ($Changes) { $Changes } else { '- See the commits on the `ai-gen` branch.' })
+    $(if ($Changes) { $Changes } else { '- See the commits on the `main` branch.' })
     ''
     '### Downloads'
     '| File | What it is |'
@@ -129,4 +153,31 @@ gh @GhArgs
 if ($LASTEXITCODE -ne 0) { Stop-With 'gh release create failed (see above).' }
 git -C $Root fetch --quiet --tags origin
 Write-Output ''
-Write-Output "Done: https://github.com/$Repo/releases/tag/$Tag$(if ($Draft) { ' (a draft: publish it on GitHub when it reads right)' })"
+Write-Output "Released: https://github.com/$Repo/releases/tag/$Tag$(if ($Draft) { ' (a draft: publish it on GitHub when it reads right)' })"
+
+# ---- the website ------------------------------------------------------------------------------
+if (-not $UpdateSite) { exit 0 }
+function Stop-Site([string] $Why) {
+  Write-Output ''
+  Write-Output "The release is published, but the website was not updated: $Why"
+  Write-Output "To retry: cd `"$Site`"; npm run release:sync -- $Tag; npm run deploy"
+  exit 1
+}
+Write-Output ''
+Write-Output "Website ($Site): download page -> $Tag"
+Push-Location $Site
+try {
+  # The release API can lag a moment behind gh, so try a few times.
+  for ($Try = 1; $Try -le 5; $Try++) {
+    node scripts/sync-release.mjs $Tag
+    if ($LASTEXITCODE -eq 0) { break }
+    if ($Try -lt 5) { Start-Sleep -Seconds (3 * $Try) }
+  }
+  if ($LASTEXITCODE -ne 0) { Stop-Site 'release.json could not be written (see above).' }
+  node scripts/deploy.mjs
+  if ($LASTEXITCODE -ne 0) { Stop-Site 'the deploy failed (see above).' }
+} finally {
+  Pop-Location
+}
+Write-Output ''
+Write-Output "Done: the download page offers $Title. release.json in the website checkout changed; commit it there."

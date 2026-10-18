@@ -27,6 +27,12 @@ also ProjectManager's Deploy buttons:
    from the checked-out commit with nothing uncommitted, still match their checksums, and that
    commit is on the fork. Notes come from `dist/release/RELEASE-NOTES.md` when there is one,
    else a standard text listing the fork's commits since its last release.
+   A public release then updates the website (the `layer-shop-website` checkout beside this
+   repo, or `-Website <folder>`): `npm run release:sync -- <tag>` points its download page at the
+   new release (version, date, direct links to the MSI, the zip and the checksums) and
+   `npm run deploy` publishes the site. The script checks that checkout, Node and its FTP
+   settings before it publishes anything; `-NoWebsite` skips the site. A draft leaves the site
+   alone: after publishing it on GitHub, run those two commands in the website checkout.
 
 The files are unsigned (`sign.ps1` skips without a certificate). The MSI keeps Preview 1's
 UpgradeCode and allows same-version upgrades, so each preview replaces the last.
