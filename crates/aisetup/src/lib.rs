@@ -43,6 +43,8 @@ pub mod runtime;
 pub mod state;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod unpack;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod vcrt;
 
 pub use manifest::Manifest;
 pub use plan::{Choices, Plan, Route, Step};

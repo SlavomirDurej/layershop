@@ -1847,3 +1847,118 @@ fn a_narrow_panel_keeps_everything_inside_it() {
         assert!(used <= width + 0.5, "the panel's content is {used} wide in a panel {width} wide");
     }
 }
+
+/// Draw the Generative AI section once on `page`, leaving the dialog wherever the frame took it.
+fn draw_page(f: &mut Map<String, Value>, page: &str) {
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    f.insert(PAGE.into(), json!(page));
+    for _ in 0..2 {
+        ctx.run_ui(Default::default(), |ui| {
+            let mut values = f.get("values").cloned().unwrap();
+            let obj = values.get_mut("integrations").and_then(Value::as_object_mut).unwrap();
+            prefs_section(ui, obj, f, 480.0);
+            f.insert("values".into(), values);
+        })
+        .textures_delta
+        .clear();
+    }
+}
+
+#[test]
+fn models_that_cant_run_say_why_and_lead_to_what_makes_them_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
+    crate::ai_setup_ui::demo::install(&mut app, dir.path(), crate::ai_setup_ui::demo::Scale::Small);
+    crate::ai_setup_ui::demo::pretend_installed(&app, dir.path()).unwrap();
+    // Z-Image Turbo's model file is gone since: it is the wizard's, so it can be installed again.
+    let models_dir = dir.path().join("models").join("diffusion_models");
+    let zimage = std::fs::read_dir(&models_dir).unwrap().flatten().map(|e| e.path()).find(|p| p.to_string_lossy().contains("z_image")).unwrap();
+    std::fs::remove_file(zimage).unwrap();
+    let defaults = Model::defaults();
+    let by = |id: &str| defaults.iter().find(|m| m.id == id).cloned().unwrap();
+    let gpt = Model::cloud_presets().into_iter().find(|m| m.provider == Provider::Openai).unwrap();
+    let krea = by("krea-2-turbo");
+    let listed = vec![gpt.clone(), by("qwen-image-2-1"), by("z-image-turbo"), krea.clone()];
+    app.run("prefs.set", json!({"path": "integrations.ai.models", "value": listed})).unwrap();
+    let (_, mut f) = dialog_fields(&mut app);
+    // The dialog reads what the setup installed, with ComfyUI not running.
+    after_body(&mut app, &mut f);
+    assert!(f.get(FILES).is_none());
+    let ai = f["values"]["integrations"]["ai"].as_object().unwrap().clone();
+    let standing = Standing::of(&ai, &f);
+    let model = |i: usize| model_of(&ai["models"][i]).unwrap();
+    assert_eq!(standing.missing(&model(0)), Some(Missing::Key(Provider::Openai)));
+    assert_eq!(standing.missing(&model(1)), None, "Qwen Image 2.1 is installed");
+    let Some(Missing::Files(Some(wizard))) = standing.missing(&model(2)) else { panic!("{:?}", standing.missing(&model(2))) };
+    assert_eq!(wizard["id"], "z-image-turbo");
+    // Not one of the wizard's models (in this cut-down manifest): it says so, with nothing to press.
+    assert_eq!(standing.missing(&model(3)), Some(Missing::Files(None)));
+    draw_page(&mut f, "models");
+    // A model that can't run keeps its tick for when it can, and the panel doesn't offer it.
+    assert_eq!(f["values"]["integrations"]["ai"]["models"][2]["enabled"], json!(by("z-image-turbo").enabled));
+    // A typed key is enough for the page.
+    f[KEYS]["openai"] = json!("sk-typed");
+    assert_eq!(Standing::of(&ai, &f).missing(&model(0)), None);
+    f[KEYS]["openai"] = json!("");
+
+    // "Add an API key" goes to the API Keys page with the provider in front.
+    act_on_missing(&mut f, &Missing::Key(Provider::Openai));
+    draw_page(&mut f, "models");
+    assert_eq!((&f[PAGE], &f[KEY_FOCUS]), (&json!("keys"), &json!("openai")));
+    draw_page(&mut f, "keys");
+    assert_eq!(f[KEY_FOCUS_ONCE], false, "the field took the keyboard once");
+    assert_eq!(key_source(Provider::Openai).0, "https://platform.openai.com/api-keys");
+    for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
+        assert!(key_source(p).0.starts_with("https://") && !key_source(p).2.is_empty(), "{p:?}");
+    }
+
+    // Install hands over to the wizard, on its Models screen with the model ticked.
+    act_on_missing(&mut f, &Missing::Files(Some(wizard)));
+    assert_eq!(f[ACTION], "install:z-image-turbo");
+    let id = app.ui.dialogs.iter().find(|d| crate::prefs_ui::is_preferences(&d.fields)).unwrap().id;
+    app.ui.dialog_mut(id).unwrap().fields = f.clone();
+    let mut fields = app.ui.dialog_mut(id).unwrap().fields.clone();
+    after_body(&mut app, &mut fields);
+    app.ui.dialog_mut(id).unwrap().fields = fields;
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    ctx.run_ui(Default::default(), |ui| crate::ai_setup_ui::window(&mut app, ui.ctx())).textures_delta.clear();
+    assert!(app.ui.dialogs.is_empty(), "the preferences were confirmed first");
+    assert!(app.ui.ai_setup.open && app.ui.ai_setup.page == crate::ai_setup_ui::Page::Models);
+    assert!(app.ui.ai_setup.models.iter().any(|m| m == "z-image-turbo"), "{:?}", app.ui.ai_setup.models);
+}
+
+#[test]
+fn local_models_before_local_ai_is_set_up_offer_the_setup() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    let (_, mut f) = dialog_fields(&mut app);
+    // Nothing installed, nothing to start, no server answered.
+    f.insert(SETUP.into(), json!({"installed": false, "catalog": [{"id": "z-image-turbo", "main": z_image("z").main_file(), "size": "12.3 GB"}]}));
+    let ai = f["values"]["integrations"]["ai"].as_object().unwrap().clone();
+    let lack = Standing::of(&ai, &f).missing(&model_of(&ai["models"][0]).unwrap());
+    assert!(matches!(&lack, Some(Missing::NoLocalAi(Some(w))) if w["id"] == "z-image-turbo"), "{lack:?}");
+    act_on_missing(&mut f, &lack.unwrap());
+    assert_eq!(f[ACTION], "install:z-image-turbo");
+    // A server that answered is enough to know.
+    f.insert(FILES.into(), json!({"diffusion_models": [z_image("z").main_file()]}));
+    assert_eq!(Standing::of(&ai, &f).missing(&model_of(&ai["models"][0]).unwrap()), None);
+}
+
+#[test]
+fn the_dialogs_own_look_at_the_server_is_not_reported_twice() {
+    use photocraft_engine::jobs::{JobEvent, JobId, JobOutcome};
+    let mut app = app();
+    let id = open_settings(&mut app, "");
+    app.ui.dialog_mut(id).unwrap().fields.insert(JOB.into(), json!({"id": 21, "action": "peek"}));
+    let event = |id: u64| JobEvent {
+        id: JobId(id),
+        command: "ai.comfyModels".into(),
+        label: "Connect to ComfyUI".into(),
+        document: None,
+        outcome: JobOutcome::Failed("Could not reach ComfyUI".into()),
+    };
+    assert!(on_job_event(&mut app, &event(21)), "the dialog says how its connect ended");
+    assert!(!on_job_event(&mut app, &event(22)));
+}

@@ -95,6 +95,23 @@ pub struct Probe {
     pub drives: Vec<Drive>,
     pub comfy: Existing,
     pub hosts: Vec<Host>,
+    /// Windows: whether the engine will find the Microsoft C++ runtime PyTorch needs.
+    pub vc_runtime: VcRuntime,
+}
+
+/// Where the Microsoft C++ runtime (`msvcp140.dll` and its kin) comes from for the engine.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum VcRuntime {
+    /// Not looked at (not Windows).
+    #[default]
+    Unknown,
+    /// The app carries it, and puts it beside the engine's Python.
+    Bundled,
+    /// The Visual C++ Redistributable is installed.
+    Installed,
+    /// Neither: the engine would stop while starting.
+    Missing,
 }
 
 /// How a row of the first screen reads.
@@ -330,6 +347,16 @@ impl Probe {
                 row("comfy", Level::Info, "ComfyUI not found".into(), "A private copy will be installed, with its own Python", "will install".into())
             }
         });
+        // The Microsoft C++ runtime PyTorch needs: said only when the engine would go without it.
+        if self.vc_runtime == VcRuntime::Missing && self.can_install() {
+            out.push(row(
+                "vcRuntime",
+                Level::Warn,
+                "Microsoft C++ runtime not found".into(),
+                "The engine needs the Microsoft Visual C++ Redistributable (x64), and this build of PhotoCraft doesn't include it. Install it from https://aka.ms/vs/17/release/vc_redist.x64.exe, then check again.",
+                "missing".into(),
+            ));
+        }
         // The download hosts.
         let down: Vec<&Host> = self.hosts.iter().filter(|h| !h.ok).collect();
         out.push(match (self.hosts.is_empty(), down.first()) {
@@ -389,7 +416,8 @@ mod native {
         let smi = output("nvidia-smi", &["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
             .map(|t| parse_nvidia_smi(&t))
             .unwrap_or_default();
-        let mut probe = Probe { os, gpus: merge_gpus(system_gpus, smi), drives, ..Probe::default() };
+        let vc_runtime = if os.windows { crate::vcrt::Sources::this_pc().found() } else { VcRuntime::Unknown };
+        let mut probe = Probe { os, gpus: merge_gpus(system_gpus, smi), drives, vc_runtime, ..Probe::default() };
         if cancelled() {
             return probe;
         }
@@ -574,5 +602,16 @@ mod tests {
         let json = serde_json::to_string(&probe()).unwrap();
         assert_eq!(serde_json::from_str::<Probe>(&json).unwrap(), probe());
         assert_eq!(serde_json::from_str::<Probe>("{}").unwrap(), Probe::default());
+    }
+    #[test]
+    fn a_pc_the_engine_would_not_start_on_says_so_and_how_to_fix_it() {
+        let row = |p: &Probe| p.checks().into_iter().find(|c| c.id == "vcRuntime");
+        // Carried by the app, installed, or not looked at: nothing to say.
+        for found in [VcRuntime::Bundled, VcRuntime::Installed, VcRuntime::Unknown] {
+            assert!(row(&Probe { vc_runtime: found, ..probe() }).is_none(), "{found:?}");
+        }
+        let missing = row(&Probe { vc_runtime: VcRuntime::Missing, ..probe() }).unwrap();
+        assert!(missing.level == Level::Warn && missing.detail.contains("vc_redist.x64.exe"), "{missing:?}");
+        assert!(Probe { vc_runtime: VcRuntime::Missing, ..probe() }.can_install(), "a warning, not a stop");
     }
 }

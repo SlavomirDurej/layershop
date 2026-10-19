@@ -10,7 +10,8 @@
   The release assets carry the LayerShop name ($AssetName); the binaries keep their machine names.
 
   The binaries link the C runtime statically (+crt-static), so neither the MSI nor the portable
-  zip needs the Visual C++ redistributable. Signing is delegated to sign.ps1 (skipped with a
+  zip needs the Visual C++ redistributable. The x64 packages still carry Microsoft's C++ runtime
+  DLLs in vc-runtime\, for the local AI engine the app installs (ComfyUI's PyTorch needs them). Signing is delegated to sign.ps1 (skipped with a
   warning when no signing secrets are set).
 
   Needs: Rust (MSVC toolchain + the target), the Windows SDK (rc.exe, signtool.exe),
@@ -95,6 +96,50 @@ Copy-Item (Join-Path $Bin 'photocraft.exe'), (Join-Path $Bin 'photocraft-cli.exe
 
 & (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'photocraft.exe') (Join-Path $Stage 'photocraft-cli.exe')
 
+# ---- the Microsoft C++ runtime, for the local AI engine -------------------------------------------
+# ComfyUI's portable build has no msvcp140.dll nor vcruntime140_threads.dll, which its PyTorch
+# needs (c10.dll and torch_cpu.dll import them): on a PC without the
+# Visual C++ Redistributable (a new one, Windows Sandbox) the engine stops while starting with
+# WinError 126. The app carries Microsoft's runtime DLLs in vc-runtime\ and the Local AI setup puts
+# them beside the engine's Python (crates/aisetup/src/vcrt.rs), which Microsoft allows and which
+# needs no administrator rights. The set is the newest complete, Microsoft-signed one on this PC:
+# a Visual Studio redistributable folder (Microsoft.VC14x.CRT), else System32 (where the
+# Redistributable installs it). PyTorch is built with MSVC 14.42; an older msvcp140 can crash it.
+$VcDlls = 'msvcp140.dll', 'msvcp140_1.dll', 'msvcp140_2.dll', 'msvcp140_atomic_wait.dll', 'msvcp140_codecvt_ids.dll', 'vcruntime140.dll', 'vcruntime140_1.dll', 'vcruntime140_threads.dll', 'concrt140.dll'
+$VcMinimum = [version]'14.42.0.0'
+function Copy-VcRuntime([string] $Dest) {
+  $candidates = @(Get-ChildItem -Directory -ErrorAction SilentlyContinue -Path @(
+      "$env:ProgramFiles\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT",
+      "${env:ProgramFiles(x86)}\Microsoft Visual Studio\*\*\VC\Redist\MSVC\*\x64\Microsoft.VC14*.CRT"
+    ) | ForEach-Object FullName) + @(Join-Path $env:SystemRoot 'System32')
+  $best = $null
+  foreach ($dir in $candidates) {
+    $files = $VcDlls | ForEach-Object { Join-Path $dir $_ }
+    if (@($files | Where-Object { -not (Test-Path $_) }).Count) { continue }
+    $signed = @($files | Where-Object { $s = Get-AuthenticodeSignature $_; $s.Status -eq 'Valid' -and $s.SignerCertificate.Subject -like 'CN=Microsoft*' })
+    if ($signed.Count -ne $files.Count) { continue }
+    # The numbers, not FileVersion's text (which can read "14.29.30157.0 built by: …").
+    $info = (Get-Item (Join-Path $dir 'msvcp140.dll')).VersionInfo
+    $version = [version]::new($info.FileMajorPart, $info.FileMinorPart, $info.FileBuildPart, $info.FilePrivatePart)
+    # The redistributable folders before System32 at the same version: their files are the ones to redistribute.
+    if ($version -ge $VcMinimum -and (-not $best -or $version -gt $best.Version)) { $best = @{ Dir = $dir; Version = $version } }
+  }
+  if (-not $best) {
+    throw "no Microsoft C++ runtime $VcMinimum or newer was found (Visual Studio's Microsoft.VC14x.CRT, or System32): install the latest Visual C++ Redistributable x64 (https://aka.ms/vs/17/release/vc_redist.x64.exe) or the Visual Studio Build Tools"
+  }
+  New-Item -ItemType Directory -Force -Path $Dest | Out-Null
+  foreach ($n in $VcDlls) { Copy-Item (Join-Path $best.Dir $n) $Dest }
+  Set-Content -Path (Join-Path $Dest 'README.txt') -Encoding ascii -Value @(
+    "Microsoft Visual C++ runtime $($best.Version), x64, redistributed with LayerShop as Microsoft allows.",
+    "LayerShop's Local AI setup copies these files beside the AI engine's Python (ComfyUI), whose",
+    "PyTorch needs them, so the engine runs on a PC without the Visual C++ Redistributable.",
+    "LayerShop itself does not use them."
+  )
+  Write-Output "ok vc-runtime: Microsoft C++ runtime $($best.Version) from $($best.Dir)"
+}
+# ComfyUI's portable build is x64 only: so is the runtime it gets.
+if ($Arch -eq 'x64') { Copy-VcRuntime (Join-Path $Stage 'vc-runtime') }
+
 # ---- MSI ---------------------------------------------------------------------------------------
 # The setup wizard's art, drawn here from the app icon so the MSI shows LayerShop rather than
 # WiX's stock bitmaps: a 493x58 banner across the top of the inner pages (the page title is drawn
@@ -165,6 +210,8 @@ $Portable = Join-Path $TargetDir "windows-package\$AssetName-$Version-windows-$A
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
+$VcStage = Join-Path $Stage 'vc-runtime'
+if (Test-Path $VcStage) { Copy-Item -Recurse $VcStage $Portable }
 foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE') {
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Portable }

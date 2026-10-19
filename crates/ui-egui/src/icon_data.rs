@@ -38,6 +38,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("crop", include_bytes!("../../../assets/icons/crop.svg")),
     ("diamond", include_bytes!("../../../assets/icons/diamond.svg")),
     ("direct-select", include_bytes!("../../../assets/icons/direct-select.svg")),
+    ("download", include_bytes!("../../../assets/icons/download.svg")),
     ("droplet", include_bytes!("../../../assets/icons/droplet.svg")),
     // Original: a dashed horizontal ellipse (Elliptical Marquee), on Lucide's grid and stroke.
     ("ellipse-dashed", include_bytes!("../../../assets/icons/ellipse-dashed.svg")),
@@ -46,6 +47,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     // Derived from Lucide's eraser (ISC): with a sparkle (Magic Eraser) / a transparency grid (Background Eraser).
     ("eraser-background", include_bytes!("../../../assets/icons/eraser-background.svg")),
     ("eraser-magic", include_bytes!("../../../assets/icons/eraser-magic.svg")),
+    ("external-link", include_bytes!("../../../assets/icons/external-link.svg")),
     ("eye", include_bytes!("../../../assets/icons/eye.svg")),
     ("eye-off", include_bytes!("../../../assets/icons/eye-off.svg")),
     ("file", include_bytes!("../../../assets/icons/file.svg")),
@@ -65,6 +67,7 @@ pub static ICONS: &[(&str, &[u8])] = &[
     ("image", include_bytes!("../../../assets/icons/image.svg")),
     ("import", include_bytes!("../../../assets/icons/import.svg")),
     ("info", include_bytes!("../../../assets/icons/info.svg")),
+    ("key-round", include_bytes!("../../../assets/icons/key-round.svg")),
     ("lasso", include_bytes!("../../../assets/icons/lasso.svg")),
     ("lasso-magnetic", include_bytes!("../../../assets/icons/lasso-magnetic.svg")),
     ("lasso-select", include_bytes!("../../../assets/icons/lasso-select.svg")),

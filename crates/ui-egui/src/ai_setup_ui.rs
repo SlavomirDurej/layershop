@@ -454,9 +454,18 @@ pub fn request_from_prefs(app: &mut PhotocraftApp, what: &str) {
     app.ui.ai_setup.from_prefs = Some(what.to_string());
 }
 
-/// A line for the Preferences page: what is installed.
+/// [`request_from_prefs`] for one model: the wizard on its Models screen with the model of this
+/// manifest id ticked, ready to install.
+pub fn install_from_prefs(app: &mut PhotocraftApp, id: &str) {
+    request_from_prefs(app, &format!("{INSTALL}{id}"));
+}
+
+const INSTALL: &str = "install:";
+
+/// For the Preferences page: a line saying what is installed, and what Manage Models needs to
+/// tell installed models from the others (the installed engine's files, the wizard's models).
 pub fn summary(app: &PhotocraftApp) -> Value {
-    let Some(status) = &app.ui.ai_setup.status else { return json!({"available": available(app), "text": ""}) };
+    let Some(status) = &app.ui.ai_setup.status else { return json!({"available": available(app), "text": "", "catalog": catalog(app)}) };
     let installed = list(status, "/installedNow").len();
     let engine = list(status, "/engines").first().map(|e| text(e, "/version").to_string());
     let line = match (text(status, "/state"), engine) {
@@ -466,7 +475,44 @@ pub fn summary(app: &PhotocraftApp) -> Value {
         ("done", None) => format!("{} · {installed} {}", tr("Using your own ComfyUI"), tr("of the recommended models")),
         _ => tr("Not set up yet. The wizard installs ComfyUI and the recommended models for you.").to_string(),
     };
-    json!({"available": available(app), "text": line, "installed": text(status, "/state") == "done", "managed": !list(status, "/engines").is_empty()})
+    json!({
+        "available": available(app), "text": line, "installed": text(status, "/state") == "done", "managed": !list(status, "/engines").is_empty(),
+        "modelFiles": status.get("modelFiles").cloned().unwrap_or(Value::Null), "catalog": catalog(app),
+    })
+}
+
+/// The model files of the engine this app installed, by folder: what that ComfyUI has when it is
+/// started, known while it isn't running. `None` for the user's own ComfyUI, or before a setup.
+pub fn installed_files(app: &PhotocraftApp) -> Option<std::collections::BTreeMap<String, Vec<String>>> {
+    let files = app.ui.ai_setup.status.as_ref()?.get("modelFiles")?;
+    serde_json::from_value(files.clone()).ok()
+}
+
+/// The wizard's models, each with its main file (the first it lists) and its download size:
+/// `[{id, name, main, size}]`, for Manage Models to offer to install a model it lists.
+fn catalog(app: &PhotocraftApp) -> Vec<Value> {
+    let Some(manifest) = &app.ui.ai_setup.manifest else { return Vec::new() };
+    list(manifest, "/models")
+        .iter()
+        .map(|m| {
+            let main = list(m, "/files").first().map_or("", |f| text(f, "/key").rsplit('/').next().unwrap_or(""));
+            json!({"id": text(m, "/id"), "name": text(m, "/name"), "main": main, "size": download_size(number(m, "/bytes"))})
+        })
+        .collect()
+}
+
+/// Read what [`summary`] tells Manage Models, once, without opening the wizard: the setup's
+/// status and the wizard's models.
+pub fn read_for_prefs(app: &mut PhotocraftApp) {
+    if !available(app) {
+        return;
+    }
+    if app.ui.ai_setup.status.is_none() {
+        refresh_status(app);
+    }
+    if app.ui.ai_setup.manifest.is_none() {
+        refresh_manifest(app);
+    }
 }
 
 // ---------- every frame ----------
@@ -484,7 +530,17 @@ pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 match what.as_str() {
                     "repair" => repair(app),
                     "remove" => app.ui.ai_setup.confirm_remove = true,
-                    _ => {}
+                    _ => {
+                        // A model's Install in Manage Models: on the Models screen with it ticked.
+                        if let Some(id) = what.strip_prefix(INSTALL) {
+                            if !app.ui.ai_setup.models.iter().any(|m| m == id) {
+                                toggle_model(app, id, true);
+                            }
+                            if !running(app) {
+                                app.ui.ai_setup.page = Page::Models;
+                            }
+                        }
+                    }
                 }
             }
         }

@@ -1074,6 +1074,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, f: &mut Map<String, Valu
             let system = system_theme(app, ui.ctx());
             prefs_body(ui, f, system);
             crate::ai_gen_ui::after_body(app, f);
+            crate::ai_gen_ui::open_requested(app, ui.ctx(), f);
         }
         "shortcuts" => shortcuts_body(app, ui, f),
         "presets" => presets_body(app, ui, f),

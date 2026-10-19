@@ -227,6 +227,18 @@ fn ai_error(e: photocraft_aigen::Error) -> EngineError {
     }
 }
 
+/// A render's error `e`, saying why when the ComfyUI this app started stopped under it: without
+/// that, losing the server reads as a network problem. A server that ends without a word was
+/// usually stopped by the system for want of memory.
+fn lost_server(server: Option<&Arc<dyn LocalServer>>, e: photocraft_aigen::Error) -> EngineError {
+    match (&e, server.and_then(|server| server.stopped())) {
+        (photocraft_aigen::Error::Network(_), Some(why)) => EngineError::Other(format!(
+            "ComfyUI stopped while it was generating ({why}). When it stops without an error of its own, this computer most likely ran out of memory for the model: close other programs, or choose a smaller model"
+        )),
+        _ => ai_error(e),
+    }
+}
+
 fn settings(s: &Session) -> Settings {
     s.prefs().integrations.ai.clone()
 }
@@ -1265,7 +1277,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             }
             let mut refused = 0;
             let image = loop {
-                let image = photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(ai_error)?;
+                let image =
+                    photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(|e| lost_server(server.as_ref(), e))?;
                 ctx.check()?;
                 if !model.family.draws_refusal() || !is_refusal_picture(&image.bytes) {
                     break image;

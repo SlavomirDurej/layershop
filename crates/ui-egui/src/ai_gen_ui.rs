@@ -396,14 +396,23 @@ fn local_state(app: &PhotocraftApp) -> Local {
 }
 
 /// Can `model` run now? A cloud model when its API key is there. A local one when local AI is
-/// ready (not being installed; set up, or a ComfyUI answered) and, once the server has said
-/// which files it has, its file is among them.
+/// ready (not being installed; set up, or a ComfyUI answered) and its file is among the files
+/// known to be there: the server's, once it has said, else those of the engine this app
+/// installed (on disk, so known while it isn't running).
 fn usable(app: &PhotocraftApp, model: &Model) -> bool {
     if app.session.ai.ready(model).is_err() {
         return false;
     }
-    !model.provider.is_local()
-        || (local_state(app) == Local::Ready && app.ui.ai_gen.server_files.as_ref().is_none_or(|files| photocraft_aigen::detect::on_server(files, model)))
+    if !model.provider.is_local() {
+        return true;
+    }
+    if local_state(app) != Local::Ready {
+        return false;
+    }
+    match &app.ui.ai_gen.server_files {
+        Some(files) => photocraft_aigen::detect::on_server(files, model),
+        None => crate::ai_setup_ui::installed_files(app).is_none_or(|files| photocraft_aigen::detect::on_server(&files, model)),
+    }
 }
 
 /// The server is asked again at most this often when the app gets the focus back (seconds).
@@ -448,6 +457,12 @@ fn server_answered(app: &mut PhotocraftApp, found: &Value) {
 /// The end of a job: the panel's own look at the server is taken here, without a notice when it
 /// failed. Returns whether it was that.
 pub fn on_job_event(app: &mut PhotocraftApp, e: &photocraft_engine::jobs::JobEvent) -> bool {
+    // A Connect or Scan the Preferences dialog follows: the dialog says how it ended, on the page
+    // (where a server that isn't running is not an error when nobody asked to connect).
+    let followed = |d: &crate::state::Dialog| d.fields.get(JOB).and_then(|j| j.get("id")).and_then(Value::as_u64) == Some(e.id.0);
+    if app.ui.dialogs.iter().any(|d| crate::prefs_ui::is_preferences(&d.fields) && followed(d)) {
+        return true;
+    }
     if app.ui.ai_gen.server_job != Some(e.id.0) {
         return false;
     }
@@ -576,9 +591,20 @@ fn setup_line(app: &PhotocraftApp) -> Option<String> {
     (crate::ai_setup_ui::available(app) && !crate::ai_setup_ui::set_up(app)).then(|| tr("Local models need a one-time setup: Set Up Local AI…").to_string())
 }
 
+/// Where the panel's empty state leads.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Lead {
+    Progress,
+    SetUp,
+    Keys,
+    Manage,
+}
+
 /// The panel when no model can run for the task in front: why, and the way to one. While the
-/// Local AI setup installs, that is what it says, with its progress.
-fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool) {
+/// Local AI setup installs, that is what it says, with its progress. Centred in the `room` left
+/// below the tabs (when the panel fills a height), with margins either side, and its buttons of
+/// one width: side by side where they fit, else one above the other.
+fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool, room: Option<f32>) {
     let t = Tokens::get(ui.ctx());
     let keys = Provider::ALL.into_iter().any(|p| !p.is_local() && !app.session.ai.key(p).is_empty());
     let local = local_state(app);
@@ -605,39 +631,79 @@ fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool) {
             tr("Local models need their files on your ComfyUI; cloud models need an API key. Tick the ones to offer here in Manage Models.").to_string(),
         ),
     };
-    ui.add_space(4.0);
-    ui.label(RichText::new(title).color(t.text_dim));
-    ui.add_space(2.0);
-    ui.add(egui::Label::new(RichText::new(hint).color(t.text_faint).size(11.5)).wrap());
-    ui.add_space(8.0);
+    // The ways on, the first the one to take (drawn as the primary button where it is).
     let setup = crate::ai_setup_ui::available(app);
-    match local {
-        Local::Installing => {
-            if widgets::primary_button(ui, tr("Show Progress"), 140.0).clicked() {
-                crate::ai_setup_ui::show_progress(app);
+    let leads: Vec<(Lead, bool)> = match local {
+        Local::Installing => [(Lead::Progress, true)].into_iter().chain((!keys).then_some((Lead::Keys, false))).collect(),
+        Local::NotSetUp if !keys => setup.then_some((Lead::SetUp, true)).into_iter().chain([(Lead::Keys, !setup)]).collect(),
+        _ => [(Lead::Manage, false)].into_iter().chain((setup && local == Local::NotSetUp).then_some((Lead::SetUp, false))).collect(),
+    };
+    let label = |lead: Lead| match lead {
+        Lead::Progress => tr("Show Progress"),
+        Lead::SetUp => tr("Set Up Local AI…"),
+        Lead::Keys => tr("Add an API Key…"),
+        Lead::Manage => tr("Manage Models…"),
+    };
+    // Centred: as tall as it was last frame, so the space above it is known before it is drawn.
+    let height_id = ui.id().with("ai-gen-nothing-ready-height");
+    let height = ui.ctx().data(|d| d.get_temp::<f32>(height_id)).unwrap_or(0.0);
+    let above = room.map_or(16.0, |room| ((room - height) * 0.45).max(16.0));
+    ui.add_space(above);
+    let full = ui.available_rect_before_wrap();
+    let width = (full.width() - 2.0 * NOTHING_READY_MARGIN).clamp(120.0, NOTHING_READY_WIDTH);
+    let column = egui::Rect::from_min_size(egui::pos2(full.center().x - width / 2.0, full.top()), vec2(width, f32::INFINITY));
+    let gap = 10.0;
+    let mut clicked = None;
+    let block = ui.scope_builder(egui::UiBuilder::new().max_rect(column).layout(egui::Layout::top_down(egui::Align::Center)), |ui| {
+        ui.label(RichText::new(title).font(crate::theme::medium(14.0)).color(t.text));
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(RichText::new(hint).color(t.text_dim).size(12.0)).wrap());
+        ui.add_space(18.0);
+        let labels: Vec<&str> = leads.iter().map(|(lead, _)| label(*lead)).collect();
+        let button = widgets::button_width(ui, &labels).max(150.0).min(width);
+        let row = leads.len() > 1 && button * leads.len() as f32 + gap * (leads.len() - 1) as f32 <= width;
+        let mut draw = |ui: &mut egui::Ui, lead: Lead, primary: bool| {
+            let r = if primary { widgets::primary_button(ui, label(lead), button) } else { widgets::secondary_button(ui, label(lead), button) };
+            if r.clicked() {
+                clicked = Some(lead);
             }
-            if !keys && widgets::secondary_button(ui, tr("Add an API Key…"), 140.0).clicked() {
-                open_api_keys(app);
+        };
+        if row {
+            let size = vec2(button * leads.len() as f32 + gap * (leads.len() - 1) as f32, 0.0);
+            ui.allocate_ui_with_layout(size, egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = gap;
+                for (lead, primary) in &leads {
+                    draw(ui, *lead, *primary);
+                }
+            });
+        } else {
+            ui.spacing_mut().item_spacing.y = gap;
+            for (lead, primary) in &leads {
+                draw(ui, *lead, *primary);
             }
         }
-        Local::NotSetUp if !keys => {
-            if setup && widgets::primary_button(ui, tr("Set Up Local AI…"), 140.0).clicked() {
-                crate::ai_setup_ui::open(app);
-            }
-            if widgets::secondary_button(ui, tr("Add an API Key…"), 140.0).clicked() {
-                open_api_keys(app);
-            }
+    });
+    let drawn = block.response.rect.height();
+    if (drawn - height).abs() > 0.5 {
+        ui.ctx().data_mut(|d| d.insert_temp(height_id, drawn));
+        ui.ctx().request_repaint();
+    }
+    match clicked {
+        Some(Lead::Progress) => crate::ai_setup_ui::show_progress(app),
+        Some(Lead::SetUp) => crate::ai_setup_ui::open(app),
+        Some(Lead::Keys) => {
+            open_api_keys(app);
         }
-        _ => {
-            if widgets::secondary_button(ui, tr("Manage Models…"), 140.0).clicked() {
-                open_settings(app, "");
-            }
-            if setup && local == Local::NotSetUp && widgets::secondary_button(ui, tr("Set Up Local AI…"), 140.0).clicked() {
-                crate::ai_setup_ui::open(app);
-            }
+        Some(Lead::Manage) => {
+            open_settings(app, "");
         }
+        None => {}
     }
 }
+
+/// The empty state's widest text and buttons, and the least room either side of it.
+const NOTHING_READY_WIDTH: f32 = 340.0;
+const NOTHING_READY_MARGIN: f32 = 20.0;
 
 /// Start a generation with the panel's model, prompt and options.
 pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
@@ -1110,7 +1176,8 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     }
     let models = enabled_models(app);
     if models.is_empty() {
-        nothing_ready(app, ui, changing);
+        let left = room.map(|r| r - (ui.cursor().top() - top));
+        nothing_ready(app, ui, changing, left);
         return;
     }
     // A model removed or disabled since it was chosen (or none chosen yet) falls back to the
@@ -1528,6 +1595,205 @@ const LAUNCH_STATUS: &str = "__aiLaunchStatus";
 /// What the Local AI setup has installed (`{available, text, installed, managed}`), for the Local
 /// Server page's first block.
 const SETUP: &str = "__aiSetup";
+/// A page to go to from the one drawn (`keys`, say), the provider whose key the API Keys page
+/// puts in front (and that its field takes the keyboard once), and an address to open in the
+/// browser. The body has no app: the dialog acts on them after it.
+const GOTO: &str = "__aiGoto";
+const KEY_FOCUS: &str = "__aiKeyFocus";
+const KEY_FOCUS_ONCE: &str = "__aiKeyFocusOnce";
+const OPEN_URL: &str = "__aiOpenUrl";
+/// What the dialog read once when it opened (the setup's status and the wizard's models).
+const READ: &str = "__aiRead";
+
+/// Why a model of the draft can't run yet, as Manage Models says it and what it offers to do.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Missing {
+    /// A cloud model whose provider has no API key.
+    Key(Provider),
+    /// A local model whose file isn't among the ones known to be there; the wizard's model that
+    /// installs it, if it has one (`{id, name, size}` of [`crate::ai_setup_ui::summary`]).
+    Files(Option<Value>),
+    /// A local model before local AI is set up (nothing installed, nothing to start, no server
+    /// answered); the wizard's model, if it has one.
+    NoLocalAi(Option<Value>),
+}
+
+/// What Manage Models knows of where the draft's models stand.
+struct Standing {
+    /// The cloud providers with a key: saved, or typed in this dialog.
+    keyed: Vec<Provider>,
+    /// The model files known to be there: the server's when it answered, else those of the
+    /// engine the setup installed. `None` when neither is known: then nothing is marked.
+    files: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    /// Something will run local models: a server answered, the setup has run, or ComfyUI is set
+    /// up to be started.
+    local: bool,
+    /// The wizard's models (`[{id, name, main, size}]`).
+    catalog: Vec<Value>,
+}
+
+impl Standing {
+    fn of(ai: &Map<String, Value>, f: &Map<String, Value>) -> Self {
+        let keys = f.get(KEYS).and_then(Value::as_object);
+        let keyed = Provider::ALL
+            .into_iter()
+            .filter(|p| !p.is_local())
+            .filter(|p| {
+                let saved = keys.and_then(|k| k.get(&format!("{}Saved", p.key()))).and_then(Value::as_bool).unwrap_or(false);
+                let typed = keys.is_some_and(|k| !text_of(k, p.key()).trim().is_empty());
+                saved || typed
+            })
+            .collect();
+        let setup = f.get(SETUP);
+        let parse = |v: Option<&Value>| v.filter(|v| v.is_object()).and_then(|v| serde_json::from_value(v.clone()).ok());
+        let answered = parse(f.get(FILES));
+        let installed = setup.and_then(|s| s.get("installed")).and_then(Value::as_bool).unwrap_or(false);
+        let launch = ai.get("comfyLaunch").and_then(Value::as_object).is_some_and(|l| !text_of(l, "python").trim().is_empty());
+        let autostart = ai.get("comfyAutostart").and_then(Value::as_bool).unwrap_or(false);
+        Self {
+            keyed,
+            local: answered.is_some() || installed || launch || autostart,
+            files: answered.or_else(|| parse(setup.and_then(|s| s.get("modelFiles")))),
+            catalog: setup.and_then(|s| s.get("catalog")).and_then(Value::as_array).cloned().unwrap_or_default(),
+        }
+    }
+
+    /// The wizard's model `model` is: the one of its id (the recommended models keep the
+    /// wizard's), else the one whose main file is `model`'s.
+    fn wizard_model(&self, model: &Model) -> Option<Value> {
+        let id = |m: &&Value| m.get("id").and_then(Value::as_str).unwrap_or("").to_string();
+        let file = model.main_file();
+        self.catalog
+            .iter()
+            .find(|m| !model.id.is_empty() && id(m) == model.id)
+            .or_else(|| self.catalog.iter().find(|m| !file.is_empty() && m.get("main").and_then(Value::as_str) == Some(file)))
+            .cloned()
+    }
+
+    fn missing(&self, model: &Model) -> Option<Missing> {
+        if !model.provider.is_local() {
+            return (!self.keyed.contains(&model.provider)).then_some(Missing::Key(model.provider));
+        }
+        if !self.local {
+            return Some(Missing::NoLocalAi(self.wizard_model(model)));
+        }
+        let files = self.files.as_ref()?;
+        (!photocraft_aigen::detect::on_server(files, model)).then(|| Missing::Files(self.wizard_model(model)))
+    }
+}
+
+/// Where a provider's API keys are made (the page, and the address to show of it), and what to
+/// know before making one.
+fn key_source(p: Provider) -> (&'static str, &'static str, &'static str) {
+    match p {
+        Provider::Openai => (
+            "https://platform.openai.com/api-keys",
+            "platform.openai.com",
+            "Create a secret key on the API keys page. Images are billed to your OpenAI API account, which needs credit: a ChatGPT subscription doesn't cover it.",
+        ),
+        Provider::Gemini => (
+            "https://aistudio.google.com/apikey",
+            "aistudio.google.com",
+            "Create a key in Google AI Studio. Images are billed to the key's Google Cloud project, so it needs billing set up.",
+        ),
+        Provider::Xai => ("https://console.x.ai", "console.x.ai", "Create an API key in the xAI console. Images are paid for from your team's credits."),
+        Provider::Meta => ("https://dev.meta.ai", "dev.meta.ai", "Sign up for the Meta Model API on Meta's developer site, and create a key there."),
+        Provider::Bfl => (
+            "https://dashboard.bfl.ai",
+            "dashboard.bfl.ai",
+            "Add a key under your project's API keys in the dashboard. Images are paid for with credits bought there.",
+        ),
+        Provider::Comfy => ("", "", ""),
+    }
+}
+
+/// Ask the dialog to show the API Keys page with `provider`'s key in front.
+fn go_to_key(f: &mut Map<String, Value>, provider: Provider) {
+    f.insert(GOTO.into(), json!("keys"));
+    f.insert(KEY_FOCUS.into(), json!(provider.key()));
+    f.insert(KEY_FOCUS_ONCE.into(), json!(true));
+}
+
+/// What a model that can't run offers to do about it: (icon, tooltip, its action on `f`).
+fn missing_action(lack: &Missing, name: &str) -> Option<(&'static str, String)> {
+    match lack {
+        Missing::Key(p) => Some(("key-round", format!("{} {}", tr("Add an API key for"), p.label()))),
+        Missing::Files(Some(_)) | Missing::NoLocalAi(Some(_)) => {
+            Some(("download", format!("{} {name}: {}", tr("Install"), tr("the Local AI setup opens with it ticked"))))
+        }
+        Missing::NoLocalAi(None) => Some(("download", tr("Set up local AI: the setup installs ComfyUI and the models you choose").to_string())),
+        Missing::Files(None) => None,
+    }
+}
+
+/// Do what [`missing_action`] offers.
+fn act_on_missing(f: &mut Map<String, Value>, lack: &Missing) {
+    match lack {
+        Missing::Key(p) => go_to_key(f, *p),
+        Missing::Files(Some(wizard)) | Missing::NoLocalAi(Some(wizard)) => {
+            let id = wizard.get("id").and_then(Value::as_str).unwrap_or("");
+            f.insert(ACTION.into(), json!(format!("install:{id}")));
+        }
+        Missing::NoLocalAi(None) => {
+            f.insert(ACTION.into(), json!("setup"));
+        }
+        Missing::Files(None) => {}
+    }
+}
+
+/// Above the selected model's settings when it can't run: why, and the way to make it run.
+/// Returns whether that way was taken (see [`act_on_missing`]).
+fn missing_banner(ui: &mut egui::Ui, lack: &Missing, model: &Model) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let name = if model.name.trim().is_empty() { model.family.label() } else { model.name.as_str() };
+    let size = |w: &Value| w.get("size").and_then(Value::as_str).filter(|s| !s.is_empty()).map(|s| format!(" ({s})")).unwrap_or_default();
+    let (text, button) = match lack {
+        Missing::Key(p) => (
+            format!("{name} {} {}. {}", tr("runs on the servers of"), p.label(), tr("It needs your API key from them, added on the API Keys page.")),
+            Some(tr("Add API Key…")),
+        ),
+        Missing::Files(Some(wizard)) => {
+            (format!("{name} {}{}. {}", tr("is not installed"), size(wizard), tr("The Local AI setup downloads it and sets it up.")), Some(tr("Install…")))
+        }
+        Missing::Files(None) => (
+            format!(
+                "{} {}. {}",
+                tr("The ComfyUI server doesn't have"),
+                model.main_file(),
+                tr("Download it into ComfyUI's models folder and press Scan Server, or choose another file below.")
+            ),
+            None,
+        ),
+        Missing::NoLocalAi(wizard) => (
+            format!(
+                "{}{}",
+                tr("Local models need local AI set up first: the setup installs ComfyUI and the models you choose."),
+                wizard.as_ref().map(|w| format!(" {name}{}.", size(w))).unwrap_or_default()
+            ),
+            Some(if wizard.is_some() { tr("Install…") } else { tr("Set Up Local AI…") }),
+        ),
+    };
+    let mut clicked = false;
+    // Clear of the scroll area's edge, which would clip its border.
+    ui.add_space(2.0);
+    egui::Frame::new().fill(t.field).stroke(egui::Stroke::new(1.0, t.warning)).corner_radius(t.radius_sm).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
+        ui.set_width(ui.available_width());
+        ui.add(egui::Label::new(RichText::new(text).color(t.text).size(11.5)).wrap());
+        if let Some(label) = button {
+            ui.add_space(6.0);
+            clicked = widgets::primary_button(ui, label, 120.0).clicked();
+        }
+    });
+    ui.add_space(8.0);
+    clicked
+}
+
+/// The address the API Keys page asked to open, opened (the dialog body has no app).
+pub fn open_requested(app: &mut PhotocraftApp, ctx: &egui::Context, f: &mut Map<String, Value>) {
+    if let Some(url) = f.remove(OPEN_URL).and_then(|u| u.as_str().map(str::to_string)) {
+        crate::links::open(app, ctx, &url);
+    }
+}
 
 fn text_of(obj: &Map<String, Value>, key: &str) -> String {
     obj.get(key).and_then(Value::as_str).unwrap_or("").to_string()
@@ -1677,7 +1943,7 @@ impl Filter {
 
     fn hint(self) -> &'static str {
         match self {
-            Filter::All => "Ticked models are offered in the AI Gen panel.",
+            Filter::All => "Ticked models are offered in the AI Gen panel. One that can't run yet (no API key, or not installed) can't be ticked until it can.",
             Filter::Create => "Models that make a picture from a prompt: the AI Gen panel's Create tab.",
             Filter::Edit => "Models that change a picture as an instruction says: the AI Gen panel's Edit tab.",
             Filter::Inpaint => {
@@ -1772,10 +2038,14 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
         other => {
             let room = (bottom - ui.cursor().top()).max(MIN_PANE_HEIGHT);
             egui::ScrollArea::vertical().id_salt(("ai-page", other)).max_height(room).auto_shrink([false, true]).show(ui, |ui| match other {
-                "keys" => keys_page(ui, f),
+                "keys" => keys_page(ui, &ai, f),
                 _ => server_page(ui, &mut ai, f),
             });
         }
+    }
+    // A page asked for another (a model's "Add an API key"): it is in front from the next frame.
+    if let Some(go) = f.remove(GOTO).and_then(|g| g.as_str().map(str::to_string)).filter(|g| PAGES.iter().any(|(k, _)| k == g)) {
+        page = go;
     }
     f.insert(PAGE.into(), json!(page));
     obj.insert("ai".into(), Value::Object(ai));
@@ -1962,37 +2232,101 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     }
 }
 
-/// API Keys: one per cloud provider.
-fn keys_page(ui: &mut egui::Ui, f: &mut Map<String, Value>) {
+/// API Keys: one per cloud provider, each in a card that says which of the listed models it is
+/// for, where to make one (a link to the provider's page) and what to know before doing so.
+fn keys_page(ui: &mut egui::Ui, ai: &Map<String, Value>, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
     let mut keys = f.get(KEYS).and_then(Value::as_object).cloned().unwrap_or_default();
-    // Two columns: a field only gets its full width in a grid's last column.
-    egui::Grid::new("ai-keys").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
-        for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
-            label(ui, p.label());
-            let saved = keys.get(&format!("{}Saved", p.key())).and_then(Value::as_bool).unwrap_or(false);
-            let mut key = text_of(&keys, p.key());
-            let mut remove = keys.get(&format!("{}Remove", p.key())).and_then(Value::as_bool).unwrap_or(false);
+    let focus = f.get(KEY_FOCUS).and_then(Value::as_str).unwrap_or("").to_string();
+    let mut focus_once = f.get(KEY_FOCUS_ONCE).and_then(Value::as_bool).unwrap_or(false);
+    let models: Vec<Model> = ai.get("models").and_then(Value::as_array).into_iter().flatten().filter_map(model_of).collect();
+    let width = ui.available_width().min(560.0);
+    let mut open = None;
+    ui.scope(|ui| {
+        ui.set_max_width(width);
+        ui.add(
+            egui::Label::new(
+                RichText::new(tr(
+                    "Cloud models run on their provider's servers, which bill each image to your account there. Each provider needs its own key: make one on its site and paste it here.",
+                ))
+                .color(t.text_dim),
+            )
+            .wrap(),
+        );
+    });
+    ui.add_space(8.0);
+    for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
+        let saved = keys.get(&format!("{}Saved", p.key())).and_then(Value::as_bool).unwrap_or(false);
+        let mut key = text_of(&keys, p.key());
+        let mut remove = keys.get(&format!("{}Remove", p.key())).and_then(Value::as_bool).unwrap_or(false);
+        let (url, host, note) = key_source(p);
+        let names: Vec<&str> = models.iter().filter(|m| m.provider == p).map(|m| m.name.as_str()).collect();
+        let front = focus == p.key();
+        let stroke = if front { egui::Stroke::new(1.5, t.accent) } else { egui::Stroke::new(1.0, t.card_border) };
+        let card = egui::Frame::new().fill(t.card).stroke(stroke).corner_radius(t.radius).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+            ui.set_width(width - 26.0);
+            // The provider, whether it has a key, and where to get one.
             ui.horizontal(|ui| {
-                let hint = if saved { tr("Saved. Type a new key to replace it") } else { tr("Paste your API key") };
-                ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(300.0).hint_text(hint));
+                ui.label(RichText::new(p.label()).font(crate::theme::medium(13.0)).color(t.text));
+                let (state, color) = if !key.trim().is_empty() {
+                    (tr("Saved when you press OK"), t.text_dim)
+                } else if saved && remove {
+                    (tr("Removed when you press OK"), t.warning)
+                } else if saved {
+                    (tr("Key saved"), t.accent_text)
+                } else {
+                    (tr("No key"), t.warning)
+                };
+                ui.label(RichText::new(state).color(color).size(11.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    let icon = crate::icons::button(ui, "external-link", 18.0, false, url);
+                    let link = ui.add(
+                        egui::Label::new(RichText::new(format!("{} {host}", tr("Get a key at"))).color(t.accent_text).size(11.5).underline())
+                            .sense(egui::Sense::click()),
+                    );
+                    if icon.clicked() || link.on_hover_text(url).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        open = Some(url);
+                    }
+                });
+            });
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let hint = if saved { tr("Saved. Paste a new key to replace it") } else { tr("Paste your API key") };
+                let field_width = if saved { ui.available_width() - 90.0 } else { ui.available_width() };
+                let field = ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(field_width.max(120.0)).hint_text(hint));
+                if front && focus_once {
+                    field.request_focus();
+                    field.scroll_to_me(Some(egui::Align::Center));
+                    focus_once = false;
+                }
                 if saved {
                     widgets::checkbox(ui, &mut remove, tr("Remove"));
                 }
             });
-            keys.insert(p.key().into(), json!(key));
-            keys.insert(format!("{}Remove", p.key()), json!(remove));
-            ui.end_row();
+            ui.add_space(4.0);
+            let used = if names.is_empty() { tr("None of the listed models uses it.").to_string() } else { format!("{} {}", tr("For:"), names.join(", ")) };
+            ui.add(egui::Label::new(RichText::new(used).color(t.text_dim).size(11.0)).wrap());
+            ui.add(egui::Label::new(RichText::new(tr(note)).color(t.text_faint).size(11.0)).wrap());
+        });
+        if front && f.get(KEY_FOCUS_ONCE).and_then(Value::as_bool) == Some(true) {
+            card.response.scroll_to_me(Some(egui::Align::Center));
         }
-    });
+        keys.insert(p.key().into(), json!(key));
+        keys.insert(format!("{}Remove", p.key()), json!(remove));
+        ui.add_space(8.0);
+    }
     f.insert(KEYS.into(), Value::Object(keys));
-    ui.add_space(8.0);
+    f.insert(KEY_FOCUS_ONCE.into(), json!(focus_once));
+    if let Some(url) = open {
+        f.insert(OPEN_URL.into(), json!(url));
+    }
     ui.label(
         RichText::new(tr("Keys are stored on this computer, apart from the preferences, and are sent only to their provider.")).color(t.text_faint).size(11.0),
     );
     let variables: Vec<&str> = Provider::ALL.into_iter().filter_map(Provider::key_env).collect();
     ui.scope(|ui| {
-        ui.set_max_width(520.0);
+        ui.set_max_width(width);
         let text = format!("{} {}", tr("Without a saved key, a provider's environment variable is used:"), variables.join(", "));
         ui.add(egui::Label::new(RichText::new(text).color(t.text_faint).size(11.0)).wrap());
     });
@@ -2121,18 +2455,13 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     let count =
         |local: bool| ai.get("models").and_then(Value::as_array).map_or(0, |ms| ms.iter().filter(|m| m.is_object() && is_local_model(m) == local).count());
     let (clouds, locals) = (count(false), count(true));
+    // Which models can run now, and why the others can't.
+    let standing = Standing::of(ai, f);
     // A cloud model without its key can't run: say so here.
-    let keys = f.get(KEYS).and_then(Value::as_object);
-    let missing: Vec<&str> = Provider::ALL
+    let missing: Vec<Provider> = Provider::ALL
         .into_iter()
-        .filter(|p| !p.is_local())
+        .filter(|p| !p.is_local() && !standing.keyed.contains(p))
         .filter(|p| ai.get("models").and_then(Value::as_array).is_some_and(|ms| ms.iter().any(|m| text_of_value(m, "provider") == p.key())))
-        .filter(|p| {
-            let saved = keys.and_then(|k| k.get(&format!("{}Saved", p.key()))).and_then(Value::as_bool).unwrap_or(false);
-            let typed = keys.is_some_and(|k| !text_of(k, p.key()).trim().is_empty());
-            !saved && !typed
-        })
-        .map(Provider::label)
         .collect();
     // What the last Connect / Scan said about the server.
     let status = f
@@ -2176,8 +2505,21 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             ui.add(egui::Label::new(RichText::new(text).color(color).size(11.5)).wrap().selectable(true));
         });
     };
-    if !missing.is_empty() {
-        problem(ui, &format!("{}: {}", tr("No API key yet (add it on the API Keys page)"), missing.join(", ")), t.warning);
+    if let Some(first) = missing.first().copied() {
+        let names: Vec<&str> = missing.iter().map(|p| p.label()).collect();
+        let mut add = false;
+        ui.scope(|ui| {
+            ui.set_max_width(page);
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing.x = 6.0;
+                ui.add(egui::Label::new(RichText::new(format!("{}: {}.", tr("No API key yet for"), names.join(", "))).color(t.warning).size(11.5)));
+                let link = ui.add(egui::Label::new(RichText::new(tr("Add API keys…")).color(t.accent_text).size(11.5).underline()).sense(egui::Sense::click()));
+                add = link.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+            });
+        });
+        if add {
+            go_to_key(f, first);
+        }
     }
     if let Some((text, true)) = &status {
         problem(ui, text, t.danger);
@@ -2214,12 +2556,13 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     let footer = 34.0;
     let pane = (bottom - ui.cursor().top() - footer - 4.0).max(MIN_PANE_HEIGHT - footer);
     let files = f.get(FILES).and_then(Value::as_object).cloned();
-    // The server's lists, to mark a local model whose file it doesn't have.
-    let listing: Option<std::collections::BTreeMap<String, Vec<String>>> = files.as_ref().and_then(|x| serde_json::from_value(Value::Object(x.clone())).ok());
     let (show_cloud, show_local) = (ai.get("showCloud").and_then(Value::as_bool).unwrap_or(true), ai.get("showLocal").and_then(Value::as_bool).unwrap_or(true));
     let mut remove = None;
     // A model moved up or down: (its position, the position of the neighbour it passes).
     let mut moved: Option<(usize, usize)> = None;
+    // What a model that can't run asked to do about it (its row's button, or the banner's).
+    let mut act: Option<Missing> = None;
+    let selected_lack = selected.and_then(|i| parsed.get(i)).and_then(Option::as_ref).and_then(|m| standing.missing(m).map(|lack| (lack, m.clone())));
     if shown.is_empty() {
         let hint = match filter {
             Filter::All => "No models yet. Restore Defaults lists the recommended ones; Scan Server adds the ones your ComfyUI server has.",
@@ -2257,6 +2600,8 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         };
                         let (above, below) = (neighbour(-1), neighbour(1));
                         let model = parsed.get(i).and_then(Option::as_ref);
+                        // Can it run? A cloud model needs its key, a local one its files.
+                        let lack = model.and_then(|m| standing.missing(m));
                         let Some(m) = models.get_mut(i).and_then(Value::as_object_mut) else { continue };
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
                         let on = selected == Some(i);
@@ -2272,13 +2617,26 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         let mut check =
                             ui.new_child(egui::UiBuilder::new().max_rect(side(rect.left() + 4.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
                         let mut enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(true);
-                        widgets::checkbox(&mut check, &mut enabled, "").on_hover_text(tr("Show in the AI Gen panel"));
-                        m.insert("enabled".into(), json!(enabled));
-                        // The row's buttons show on the row in use, so a long list stays quiet:
-                        // remove on the row under the pointer, and on the selected row the two
-                        // that move it up and down the list (the order of the panel's model list).
+                        // One that can't run can't be offered: its box is off and greyed, and its
+                        // own choice is kept for when it can run.
+                        if lack.is_none() {
+                            widgets::checkbox(&mut check, &mut enabled, "").on_hover_text(tr("Show in the AI Gen panel"));
+                            m.insert("enabled".into(), json!(enabled));
+                        } else {
+                            let mut off = false;
+                            check
+                                .add_enabled_ui(false, |ui| widgets::checkbox(ui, &mut off, ""))
+                                .inner
+                                .on_disabled_hover_text(tr("It can't run yet, so the AI Gen panel doesn't offer it"));
+                        }
+                        let name = text_of(m, "name");
+                        // The way to make it run is always in view: it is what the row waits for.
+                        // The row's own buttons show on the row in use, so a long list stays
+                        // quiet: remove on the row under the pointer, and on the selected row the
+                        // two that move it up and down the list (the order of the panel's list).
+                        let fix = lack.as_ref().and_then(|lack| missing_action(lack, &name).map(|(icon, tip)| (lack, icon, tip)));
                         let mut used = 0.0;
-                        if on || resp.hovered() {
+                        if on || resp.hovered() || fix.is_some() {
                             let mut tools = ui.new_child(
                                 egui::UiBuilder::new()
                                     .max_rect(egui::Rect::from_min_max(
@@ -2288,10 +2646,18 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                                     .layout(egui::Layout::right_to_left(egui::Align::Center)),
                             );
                             tools.spacing_mut().item_spacing.x = 0.0;
-                            if crate::icons::button(&mut tools, "trash", 20.0, false, tr("Remove this model")).clicked() {
-                                remove = Some(i);
+                            if let Some((lack, icon, tip)) = &fix {
+                                if crate::icons::button(&mut tools, icon, 20.0, false, tip).clicked() {
+                                    act = Some((*lack).clone());
+                                }
+                                used += 24.0;
                             }
-                            used = 24.0;
+                            if on || resp.hovered() {
+                                if crate::icons::button(&mut tools, "trash", 20.0, false, tr("Remove this model")).clicked() {
+                                    remove = Some(i);
+                                }
+                                used += 24.0;
+                            }
                             if on {
                                 let down = tools
                                     .add_enabled_ui(below.is_some(), |ui| {
@@ -2309,7 +2675,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                                 if let (true, Some(to)) = (up.clicked(), above) {
                                     moved = Some((i, to));
                                 }
-                                used = 64.0;
+                                used += 40.0;
                             }
                         }
                         let width = (rect.width() - 34.0 - used).max(20.0);
@@ -2318,16 +2684,13 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             job.wrap = egui::text::TextWrapping::truncate_at_width(width);
                             ui.painter().layout_job(job)
                         };
-                        let name = text_of(m, "name");
-                        let color = if enabled { t.text } else { t.text_faint };
+                        let color = if enabled && lack.is_none() { t.text } else { t.text_faint };
                         let title = line(name.clone(), 12.5, color);
-                        // What it is used for; or that the server doesn't have its file.
-                        let lost = model
-                            .zip(listing.as_ref())
-                            .filter(|(model, listing)| !photocraft_aigen::detect::on_server(listing, model))
-                            .map(|(model, _)| model.main_file());
-                        let (caption, caption_color) = match (lost, model) {
-                            (Some(_), _) => (tr("File not on the server").to_string(), t.warning),
+                        // What it is used for; or why it can't run yet.
+                        let (caption, caption_color) = match (&lack, model) {
+                            (Some(Missing::Key(p)), _) => (format!("{} {}", tr("Needs an API key from"), p.label()), t.warning),
+                            (Some(Missing::Files(_)), _) => (tr("Not installed").to_string(), t.warning),
+                            (Some(Missing::NoLocalAi(_)), _) => (tr("Local AI is not set up").to_string(), t.warning),
                             (None, Some(model)) => (uses(model).into_iter().map(tr).collect::<Vec<_>>().join(" · "), t.text_faint),
                             (None, None) => (String::new(), t.text_faint),
                         };
@@ -2335,10 +2698,11 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         let elided = title.elided || under.elided;
                         ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 4.0), title, color);
                         ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 20.0), under, caption_color);
-                        if let Some(file) = lost {
+                        if let (Some(Missing::Files(None)), Some(model)) = (&lack, model) {
                             resp.on_hover_text(format!(
-                                "{name}\n{}: {file}. {}",
+                                "{name}\n{}: {}. {}",
                                 tr("The ComfyUI server doesn't list"),
+                                model.main_file(),
                                 tr("Download it, press Scan Server, or choose another file")
                             ));
                         } else if elided {
@@ -2351,12 +2715,20 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             // ----- the selected model -----
             ui.vertical(|ui| {
                 egui::ScrollArea::vertical().id_salt("ai-model-settings").max_height(pane).auto_shrink([false, false]).show(ui, |ui| {
+                    if let Some((lack, model)) = &selected_lack
+                        && missing_banner(ui, lack, model)
+                    {
+                        act = Some(lack.clone());
+                    }
                     if let Some(m) = selected.and_then(|i| models.get_mut(i)).and_then(Value::as_object_mut) {
                         model_settings(ui, m, files.as_ref(), selected.unwrap_or(0));
                     }
                 });
             });
         });
+    }
+    if let Some(lack) = &act {
+        act_on_missing(f, lack);
     }
     if let Some((from, to)) = moved {
         move_model(&mut models, from, to);
@@ -2694,6 +3066,10 @@ fn picked(f: &mut Map<String, Value>, path: &str) {
 /// follow a Connect / Scan that is running in the background.
 pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     f.insert(STARTED.into(), json!(app.session.ai.server.as_ref().is_some_and(|s| s.state() == photocraft_aigen::ServerState::Started)));
+    if f.get(READ).is_none() {
+        f.insert(READ.into(), json!(true));
+        crate::ai_setup_ui::read_for_prefs(app);
+    }
     f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
     if let Some(job) = f.get(JOB).cloned() {
         let id = job.get("id").and_then(Value::as_u64).unwrap_or(0);
@@ -2754,6 +3130,8 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         "setup" => crate::ai_setup_ui::request_from_prefs(app, "open"),
         "setupRepair" => crate::ai_setup_ui::request_from_prefs(app, "repair"),
         "setupRemove" => crate::ai_setup_ui::request_from_prefs(app, "remove"),
+        // A model's Install in Manage Models: the wizard, with it ticked.
+        _ if action.starts_with("install:") => crate::ai_setup_ui::install_from_prefs(app, action.trim_start_matches("install:")),
         _ => {
             // Opening the page only looks: it never starts a server.
             let params = json!({"settings": settings, "start": action != "peek"});

@@ -437,6 +437,8 @@ mod native {
         });
         let status = rig.run("ai.setup.status", json!({})).unwrap();
         assert_eq!((status["engines"][0]["version"].as_str(), status["installedNow"].as_array().map(Vec::len)), (Some("0.39.0"), Some(2)));
+        // What its models folder has, for telling what is installed while the engine is off.
+        assert!(status["modelFiles"]["vae"].as_array().unwrap().iter().any(|f| f == "my_own.safetensors"), "{}", status["modelFiles"]);
         // One model: its own files go, the engine and the other model stay.
         let removed = rig.run("ai.setup.remove", json!({"models": ["z-image-turbo"]})).unwrap();
         assert_eq!(

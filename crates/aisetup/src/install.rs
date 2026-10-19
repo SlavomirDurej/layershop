@@ -24,6 +24,7 @@ use crate::plan::{self, Choices, Layout, Plan, Planned, PlannedModel, RealDisk, 
 use crate::runtime::{self, Marker};
 use crate::state::{self, Phase};
 use crate::unpack::{self, Limits};
+use crate::vcrt;
 use crate::{Error, Result, configure, human_bytes};
 
 /// What the test image shows. Plain, quick to judge, and nothing a model would decline.
@@ -43,6 +44,9 @@ pub struct Env {
     pub state_file: Option<PathBuf>,
     pub sleep: fn(Duration),
     pub free_space: fn(&Path) -> Option<u64>,
+    /// Windows: where the Microsoft C++ runtime is put beside the engine's Python from (see
+    /// [`crate::vcrt`]). `None`: left as the engine archive has it.
+    pub vc_runtime: Option<vcrt::Sources>,
 }
 
 /// One setup to run.
@@ -554,6 +558,18 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
             shared.set(i, StepState::Active, "");
             runtime::write_model_paths(&layout)?;
             shared.set(i, StepState::Done, "");
+        }
+        // The C++ runtime PyTorch needs, beside the engine's Python: a PC without the Visual C++
+        // Redistributable (a new one, Windows Sandbox) runs the engine too. Every run looks, so
+        // Continue or Repair mends an engine unpacked before this, with nothing downloaded again.
+        if let (Some(sources), Some(python_dir)) = (&env.vc_runtime, layout.python.parent()) {
+            shared.message("Checking the engine's runtime");
+            if let Err(e) = vcrt::ensure(python_dir, sources) {
+                if let Some(row) = index_of(&plan, &Step::Verify).or_else(|| index_of(&plan, &Step::WriteModelPaths)) {
+                    shared.set(row, StepState::Failed, &e.to_string());
+                }
+                return Err(e);
+            }
         }
         let port = if job.port != 0 {
             job.port

@@ -190,6 +190,8 @@ struct Rig {
     net: Arc<FakeNet>,
     comfy: Arc<FakeComfy>,
     server: Arc<FakeServer>,
+    /// Where the C++ runtime is put beside the engine's Python from (`None`: it isn't).
+    vc_runtime: std::cell::RefCell<Option<crate::vcrt::Sources>>,
 }
 
 fn plenty(_: &Path) -> Option<u64> {
@@ -210,7 +212,7 @@ impl Rig {
         let archive = build_archive(dir.path(), python);
         let manifest = manifest(&archive);
         let net = Arc::new(FakeNet::new(&manifest, &archive));
-        Self { dir, manifest, net, comfy: Arc::new(comfy), server: Arc::new(server) }
+        Self { dir, manifest, net, comfy: Arc::new(comfy), server: Arc::new(server), vc_runtime: Default::default() }
     }
 
     fn state_file(&self) -> PathBuf {
@@ -241,6 +243,7 @@ impl Rig {
             state_file: Some(self.state_file()),
             sleep: |_| {},
             free_space,
+            vc_runtime: self.vc_runtime.borrow().clone(),
         };
         let mut handle = Handle::start(Arc::new(env), job).unwrap();
         let began = Instant::now();
@@ -476,6 +479,54 @@ fn an_engine_that_does_not_start_fails_the_setup_with_its_own_words() {
     assert_eq!(rig.phase(), Phase::Failed);
 }
 
+/// A stand-in runtime DLL: a version resource saying 14.51.
+fn runtime_dll(path: &Path) {
+    let mut bytes = b"MZ".to_vec();
+    bytes.extend_from_slice(&[0, 0]);
+    for word in [0xFEEF_04BDu32, 0x0001_0000, (14 << 16) | 51, 36247 << 16] {
+        bytes.extend_from_slice(&word.to_le_bytes());
+    }
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// The engine's PyTorch needs msvcp140.dll, which a PC without the Visual C++ Redistributable
+/// lacks (Windows Sandbox: WinError 126): the app's copy is put beside the engine's Python.
+#[test]
+fn the_cpp_runtime_is_put_beside_the_engines_python_and_continue_mends_an_engine_without_it() {
+    use crate::vcrt::{DLLS, Sources};
+    let rig = Rig::new();
+    let bundle = rig.dir.path().join("vc-runtime");
+    std::fs::create_dir_all(&bundle).unwrap();
+    for name in DLLS {
+        runtime_dll(&bundle.join(name));
+    }
+    let no_system = rig.dir.path().join("System32-without-it");
+    *rig.vc_runtime.borrow_mut() = Some(Sources { bundled: Some(bundle), system: Some(no_system.clone()) });
+    rig.run(&["qwen-image-2-1"]).0.unwrap();
+    let python_dir = rig.layout().python.parent().unwrap().to_path_buf();
+    for name in DLLS {
+        assert_eq!(crate::vcrt::file_version(&python_dir.join(name)), Some([14, 51, 36247, 0]), "{name}");
+    }
+    // An engine unpacked before there was this, without the runtime: Continue (or Repair) puts it
+    // there, and nothing is downloaded again.
+    std::fs::remove_file(python_dir.join("msvcp140.dll")).unwrap();
+    let served = rig.net.total_served();
+    rig.run(&["qwen-image-2-1"]).0.unwrap();
+    assert!(python_dir.join("msvcp140.dll").is_file());
+    assert_eq!(rig.net.total_served(), served);
+    // Nowhere to have it from: the setup stops at its last row, before starting the engine, and
+    // says how to get it.
+    std::fs::remove_file(python_dir.join("msvcp140.dll")).unwrap();
+    let asked = rig.server.asked.lock().unwrap().len();
+    *rig.vc_runtime.borrow_mut() = Some(Sources { bundled: None, system: Some(no_system) });
+    let (result, progress) = rig.run(&["qwen-image-2-1"]);
+    let e = result.unwrap_err();
+    assert!(matches!(&e, Error::Engine(m) if m.contains("msvcp140.dll") && m.contains(crate::vcrt::REDIST_URL)), "{e:?}");
+    let verify = progress.steps.last().unwrap();
+    assert!(verify.key == "verify" && verify.state == StepState::Failed && verify.note.contains("Visual C++"), "{verify:?}");
+    assert_eq!(rig.server.asked.lock().unwrap().len(), asked, "the engine was not started without it");
+}
+
 #[test]
 fn a_test_image_that_does_not_render_is_not_a_failed_install() {
     let rig = Rig::with(true, FakeComfy { running: true, out_of_memory: true, prompts: AtomicU64::new(0) }, FakeServer::default());
@@ -540,7 +591,17 @@ fn the_users_own_comfyui_gets_the_missing_files_and_nothing_else() {
 #[test]
 fn a_setup_that_cannot_be_planned_does_not_start() {
     let rig = Rig::new();
-    let env = || Arc::new(Env { fetch: rig.net.clone(), transport: rig.comfy.clone(), server: None, state_file: None, sleep: |_| {}, free_space: plenty });
+    let env = || {
+        Arc::new(Env {
+            fetch: rig.net.clone(),
+            transport: rig.comfy.clone(),
+            server: None,
+            state_file: None,
+            sleep: |_| {},
+            free_space: plenty,
+            vc_runtime: None,
+        })
+    };
     for choices in [
         rig.choices(&["no-such-model"]),
         Choices { models_dir: "relative".into(), ..rig.choices(&[]) },

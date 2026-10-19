@@ -53,6 +53,12 @@ pub trait LocalServer: Send + Sync {
     fn state(&self) -> ServerState;
     /// The launch settings of the ComfyUI running at `url` now.
     fn find(&self, transport: &dyn Transport, url: &str) -> Result<Launch>;
+    /// How the server this app started ended, when it has stopped without being asked to (its
+    /// exit code and last output): what a render that lost its server reports. `None` while it
+    /// runs, after [`LocalServer::stop`], and for a server started elsewhere.
+    fn stopped(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Does a ComfyUI answer at `base` (no trailing slash)? Anything else on the port does not count.
@@ -503,25 +509,55 @@ mod native {
         child: Mutex<Option<Child>>,
         /// Where the server's output goes, for the error message when it fails to start.
         log: Option<PathBuf>,
+        /// How the child ended when it stopped on its own ([`LocalServer::stopped`]).
+        exited: Mutex<Option<String>>,
     }
 
     impl ComfyProcess {
         pub fn new(log: Option<PathBuf>) -> Self {
-            Self { child: Mutex::new(None), log }
+            Self { child: Mutex::new(None), log, exited: Mutex::new(None) }
+        }
+
+        fn exited(&self) -> std::sync::MutexGuard<'_, Option<String>> {
+            self.exited.lock().unwrap_or_else(PoisonError::into_inner)
         }
 
         fn child(&self) -> std::sync::MutexGuard<'_, Option<Child>> {
             self.child.lock().unwrap_or_else(PoisonError::into_inner)
         }
 
-        /// The child if it is still running (forgets one that has exited).
+        /// The child if it is still running (forgets one that has exited, noting how it ended).
         fn alive(&self) -> bool {
             let mut guard = self.child();
-            let running = guard.as_mut().is_some_and(|c| matches!(c.try_wait(), Ok(None)));
-            if !running {
-                *guard = None;
+            let status = match guard.as_mut().map(Child::try_wait) {
+                None => return false,
+                Some(Ok(None)) => return true,
+                Some(Ok(Some(status))) => Some(status),
+                Some(Err(_)) => None,
+            };
+            *guard = None;
+            drop(guard);
+            let ended = self.ended(status);
+            *self.exited() = Some(ended);
+            false
+        }
+
+        /// How the child ended: its exit code (in hex where Windows reports a crash as one, such
+        /// as `0xC0000005`), then its last output and where the rest of it is.
+        fn ended(&self, status: Option<std::process::ExitStatus>) -> String {
+            let mut out = match status.and_then(|s| s.code()) {
+                Some(code) if !(0..=0xFFFF).contains(&code) => format!("exit code {:#010X}", code as u32),
+                Some(code) => format!("exit code {code}"),
+                None => "stopped by the system".to_string(),
+            };
+            let tail = self.log_tail();
+            if !tail.is_empty() {
+                out = format!("{out}; it last printed: {tail}");
             }
-            running
+            if let Some(log) = &self.log {
+                out = format!("{out} (all of its output: {})", log.display());
+            }
+            out
         }
 
         /// The last lines the server printed, for an error message.
@@ -562,6 +598,7 @@ mod native {
                 // Start each run with a fresh log: only its tail is ever read.
                 let _ = std::fs::write(p, b"");
             }
+            *self.exited() = None;
             cmd.stdout(output(&self.log)).stderr(output(&self.log));
             #[cfg(windows)]
             {
@@ -635,6 +672,7 @@ mod native {
         }
 
         fn stop(&self) -> bool {
+            *self.exited() = None;
             let child = self.child().take();
             match child {
                 Some(mut c) => {
@@ -647,6 +685,11 @@ mod native {
 
         fn state(&self) -> ServerState {
             if self.alive() { ServerState::Started } else { ServerState::NotStarted }
+        }
+
+        fn stopped(&self) -> Option<String> {
+            self.alive();
+            self.exited().clone()
         }
 
         fn find(&self, transport: &dyn Transport, url: &str) -> Result<Launch> {
@@ -1093,6 +1136,13 @@ mod tests {
             let e = server.ensure(&Fake(None), &s, &c).unwrap_err().to_string();
             assert!(e.contains("stopped while starting"), "{e}");
             assert_eq!(server.state(), ServerState::NotStarted);
+            // How it ended stays known, for a render that loses it: the code, what it printed
+            // last, and where the rest is.
+            let why = server.stopped().unwrap();
+            assert!(why.starts_with("exit code ") && why.contains("; it last printed: ") && why.contains(&log.display().to_string()), "{why}");
+            // Stopping on purpose is not a crash.
+            server.stop();
+            assert_eq!(server.stopped(), None);
             let _ = std::fs::remove_file(log);
         }
 

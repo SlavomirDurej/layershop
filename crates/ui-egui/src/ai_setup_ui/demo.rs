@@ -269,7 +269,7 @@ pub fn probe_with_comfy(dir: &Path) -> Value {
 }
 
 fn probe_with(dir: &Path, comfy: Existing) -> Value {
-    use photocraft_aisetup::probe::{Drive, Gpu, Host, Os, Probe, Vendor};
+    use photocraft_aisetup::probe::{Drive, Gpu, Host, Os, Probe, VcRuntime, Vendor};
     let host = |name: &str| Host { name: name.into(), ok: true, note: String::new() };
     let p = Probe {
         os: Os { name: "Windows 11 Pro".into(), version: "10.0.26100".into(), sixty_four_bit: true, windows: true },
@@ -277,6 +277,7 @@ fn probe_with(dir: &Path, comfy: Existing) -> Value {
         drives: vec![Drive { name: "D:".into(), free: 412_000_000_000, total: 2_000_000_000_000 }],
         comfy,
         hosts: vec![host("github.com"), host("huggingface.co")],
+        vc_runtime: VcRuntime::Bundled,
     };
     let (variant, tested) = p.variant();
     json!({
@@ -329,7 +330,8 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// with ComfyUI Desktop; `models-hf`, `models-licence` and `models-ready` the Models screen with
 /// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
-/// asks while a setup runs; `install-error` and `install-failed` a setup that stopped at its last
+/// asks while a setup runs; `aigen-empty` the AI Gen panel with nothing set up and no ComfyUI
+/// answering; `install-error` and `install-failed` a setup that stopped at its last
 /// step, with the window that shows its error open, and closed; `location-full` the Location screen on a drive too small for the
 /// recommended models; `env` only gives the app the stand-in, with the wizard closed (its
 /// ways in: the File menu, the Preferences page, the AI Gen panel). Returns whether `page` names
@@ -385,6 +387,16 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
     if matches!(page, "install-error" | "install-failed") {
         fail(app, dir, Some(TRACEBACK));
         app.ui.ai_setup.ask = (page == "install-error").then_some(super::Ask::Error);
+        return true;
+    }
+    // The AI Gen panel on a PC with nothing set up: no API key, local AI not installed, and no
+    // ComfyUI answering. What it offers is the setup, and a key.
+    if page == "aigen-empty" {
+        install(app, dir, Scale::Real);
+        app.session.ai.transport = Some(Arc::new(Down));
+        app.ui.ai_setup.probe = Some(probe(dir));
+        super::refresh_status(app);
+        let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
         return true;
     }
     if page == "env" {

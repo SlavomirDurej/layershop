@@ -1352,3 +1352,37 @@ fn an_edit_says_what_it_needs() {
     assert!(edit_sources(&bare).is_empty());
     assert!(fails(&mut bare, edit(json!({}))).contains("Editing needs a picture"));
 }
+
+/// A ComfyUI this app started, which has stopped on its own.
+struct Crashed;
+
+impl LocalServer for Crashed {
+    fn ensure(&self, _: &dyn Transport, _: &Settings, _: &Control<'_>) -> photocraft_aigen::Result<()> {
+        Ok(())
+    }
+    fn stop(&self) -> bool {
+        false
+    }
+    fn state(&self) -> ServerState {
+        ServerState::NotStarted
+    }
+    fn find(&self, _: &dyn Transport, _: &str) -> photocraft_aigen::Result<photocraft_aigen::Launch> {
+        Err(photocraft_aigen::Error::Config("no".into()))
+    }
+    fn stopped(&self) -> Option<String> {
+        Some("exit code 0xC0000005".into())
+    }
+}
+
+#[test]
+fn a_render_that_loses_the_server_it_started_says_how_that_ended() {
+    let lost = || photocraft_aigen::Error::Network("Lost the connection to ComfyUI at http://127.0.0.1:8190 while it was generating".into());
+    let crashed: Arc<dyn LocalServer> = Arc::new(Crashed);
+    let e = lost_server(Some(&crashed), lost()).to_string();
+    assert!(e.contains("ComfyUI stopped while it was generating (exit code 0xC0000005)") && e.contains("ran out of memory"), "{e}");
+    // A server started elsewhere, or a failure that isn't a lost connection, is reported as it is.
+    assert!(lost_server(None, lost()).to_string().contains("Lost the connection"));
+    let refused = lost_server(Some(&crashed), photocraft_aigen::Error::Server("bad workflow".into())).to_string();
+    assert!(refused.contains("bad workflow") && !refused.contains("stopped"), "{refused}");
+    assert!(matches!(lost_server(Some(&crashed), photocraft_aigen::Error::Cancelled), EngineError::Cancelled));
+}

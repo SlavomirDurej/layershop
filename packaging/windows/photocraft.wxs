@@ -48,7 +48,9 @@
     <Property Id="ARPHELPLINK" Value="https://github.com/SlavomirDurej/layershop/issues" />
 
     <StandardDirectory Id="ProgramFiles6432Folder">
-      <Directory Id="INSTALLFOLDER" Name="$(var.ProductName)" />
+      <Directory Id="INSTALLFOLDER" Name="$(var.ProductName)">
+        <Directory Id="VCRUNTIMEFOLDER" Name="vc-runtime" />
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="ProgramMenuFolder" />
 
@@ -60,6 +62,9 @@
 
     <Feature Id="Main" Title="$(var.ProductName)" Level="1">
       <ComponentGroupRef Id="PhotocraftFiles" />
+<?if $(sys.BUILDARCH) = x64 ?>
+      <ComponentGroupRef Id="VcRuntimeFiles" />
+<?endif?>
       <ComponentRef Id="DesktopShortcut" />
     </Feature>
 
@@ -147,6 +152,16 @@
           Condition="REMOVE~=&quot;ALL&quot; AND NOT UPGRADINGPRODUCTCODE AND UILevel &lt;= 2 AND REMOVEDATA" />
     </InstallExecuteSequence>
   </Package>
+
+<?if $(sys.BUILDARCH) = x64 ?>
+  <!-- Microsoft's C++ runtime, which the Local AI setup puts beside the engine's Python (its
+       PyTorch needs msvcp140.dll; package.ps1 says more). x64 only, as the engine is. -->
+  <Fragment>
+    <ComponentGroup Id="VcRuntimeFiles" Directory="VCRUNTIMEFOLDER">
+      <Files Include="$(var.BinDir)\vc-runtime\*" />
+    </ComponentGroup>
+  </Fragment>
+<?endif?>
 
   <Fragment>
     <ComponentGroup Id="PhotocraftFiles" Directory="INSTALLFOLDER">

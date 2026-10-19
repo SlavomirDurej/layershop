@@ -556,8 +556,14 @@ mod native {
                 .collect(),
             _ => Vec::new(),
         };
+        // The model files of the engine this app installed, by folder: what it will have when it
+        // is started, for the model lists to tell what is installed while it isn't running.
+        let model_files = match record.choices.route {
+            Route::Managed if !record.choices.models_dir.trim().is_empty() => Some(runtime::list_models(Path::new(&record.choices.models_dir))),
+            _ => None,
+        };
         Ok(json!({
-            "available": s.ai_setup.env.is_some(), "state": state, "running": running, "seq": s.ai_setup.seq,
+            "available": s.ai_setup.env.is_some(), "state": state, "running": running, "seq": s.ai_setup.seq, "modelFiles": model_files,
             "record": {
                 "phase": record.phase, "route": record.choices.route, "models": record.choices.models, "engineDir": record.choices.engine_dir,
                 "modelsDir": record.choices.models_dir, "variant": record.choices.variant, "port": record.port,
@@ -604,6 +610,8 @@ mod native {
             state_file: Some(env.state_file.clone()),
             sleep: std::thread::sleep,
             free_space: download::free_space,
+            // Windows: the C++ runtime PyTorch needs, from the app's own copy or System32.
+            vc_runtime: cfg!(windows).then(photocraft_aisetup::vcrt::Sources::this_pc),
         });
         s.ai_setup.handle = Some(Handle::start(setup, job).map_err(|e| bad(cmd, e.to_string()))?);
         status(s, &Value::Null)
@@ -1005,7 +1013,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Local AI Setup Status",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {available,state:none|running|paused|failed|interrupted|done,running,record:{phase,route,models,engineDir,modelsDir,variant,port,comfyVersion,installed,error},engines:[{version,variant,folder}],installedNow:[id],progress:{steps:[{key,label,state:pending|active|done|failed|skipped,done,total,note,download}],bytesDone,bytesTotal,speed (bytes/s),etaSeconds,message}?,result:{ok,cancelled,error,installed,skipped,ready,testImage:{model,modelName,seconds,width,height}?,testError}?,token (a Hugging Face token is stored)}"##,
+            params: r##"{} → {available,state:none|running|paused|failed|interrupted|done,running,record:{phase,route,models,engineDir,modelsDir,variant,port,comfyVersion,installed,error},engines:[{version,variant,folder}],installedNow:[id],modelFiles:{folder:[file]}? (the installed engine's model files; null for the user's own ComfyUI),progress:{steps:[{key,label,state:pending|active|done|failed|skipped,done,total,note,download}],bytesDone,bytesTotal,speed (bytes/s),etaSeconds,message}?,result:{ok,cancelled,error,installed,skipped,ready,testImage:{model,modelName,seconds,width,height}?,testError}?,token (a Hugging Face token is stored)}"##,
             enabled: always,
             run: imp::status,
             journal: false,

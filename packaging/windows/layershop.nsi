@@ -108,6 +108,11 @@ Section "${PRODUCT}" SecMain
   !pragma warning disable 7010
   File /nonfatal "${PAYLOAD}\OFL-*.txt"
   !pragma warning default 7010
+  ; Microsoft's C++ runtime, which the Local AI setup puts beside the engine's Python (its PyTorch
+  ; needs msvcp140.dll; package.ps1 says more).
+  SetOutPath "$INSTDIR\vc-runtime"
+  File /nonfatal "${PAYLOAD}\vc-runtime\*.*"
+  SetOutPath "$INSTDIR"
   WriteUninstaller "$INSTDIR\uninstall.exe"
 
   CreateShortcut "$SMPROGRAMS\${PRODUCT}.lnk" "$INSTDIR\photocraft.exe" "" "$INSTDIR\photocraft.exe" 0 SW_SHOWNORMAL "" "${PRODUCT} image editor"
@@ -207,6 +212,7 @@ Section "Uninstall"
   Delete "$INSTDIR\LICENSE-APACHE"
   Delete "$INSTDIR\README.md"
   Delete "$INSTDIR\OFL-*.txt"
+  RMDir /r "$INSTDIR\vc-runtime"
   Delete "$INSTDIR\uninstall.exe"
   RMDir "$INSTDIR"
 
