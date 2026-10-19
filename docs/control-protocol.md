@@ -248,7 +248,9 @@ The desktop app stores them in `preferences.json` in the platform config directo
 `~/Library/Application Support/LayerShop`, Windows `%APPDATA%\LayerShop`, Linux
 `$XDG_CONFIG_HOME/layershop`; override with `PHOTOCRAFT_CONFIG_DIR`); autosaves go to its
 `Recovery` folder (on Windows to `%LOCALAPPDATA%\LayerShop\Recovery`, out of the roaming
-profile; autosaves left by earlier versions move there at startup), and the window size and
+profile, and on Linux to `$XDG_STATE_HOME/layershop/Recovery`, by default
+`~/.local/state/layershop/Recovery`, out of the config folder; autosaves left by earlier
+versions move there at startup), and the window size and
 position, the dock width and floating-panel geometry
 to `ui.ron` beside it (a file holding values that would crash startup is discarded). In portable mode (a `portable.txt` or `PhotoCraft.portable` file beside the
 executable, as in the Windows portable zip) that directory is `LayerShopData` next to the
