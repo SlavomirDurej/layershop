@@ -397,6 +397,35 @@ fn model_files_are_listed_from_the_server() {
     assert_eq!(listed["available"], true);
 }
 
+/// Connect finds a ComfyUI Desktop on port 8000 when the address says 8188, and says which
+/// address answered; with nothing on either port it fails, naming both.
+#[test]
+fn connect_finds_the_other_local_port() {
+    struct OnlyOn(&'static str);
+    impl Transport for OnlyOn {
+        fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+            if !r.url.starts_with(self.0) {
+                return Err(photocraft_aigen::Error::Network("connection refused".into()));
+            }
+            let body: &[u8] = if r.url.ends_with("/system_stats") { br#"{"system":{"argv":["main.py","--port","8000"]}}"# } else { br#"["a.safetensors"]"# };
+            Ok(Response { status: 200, body: body.to_vec() })
+        }
+    }
+    let mut s = Session::new();
+    s.ai.transport = Some(Arc::new(OnlyOn("http://127.0.0.1:8000/")));
+    let r = s.execute("ai.comfyModels", json!({"url": "http://127.0.0.1:8188", "start": false, "findPort": true})).unwrap();
+    assert_eq!(r["url"], "http://127.0.0.1:8000");
+    assert_eq!(r["folders"]["vae"], json!(["a.safetensors"]));
+    // Already right: kept.
+    let r = s.execute("ai.comfyModels", json!({"url": "http://127.0.0.1:8000/", "start": false, "findPort": true})).unwrap();
+    assert_eq!(r["url"], "http://127.0.0.1:8000");
+    // Another computer is never swapped for this one's other port.
+    assert!(s.execute("ai.comfyModels", json!({"url": "http://10.0.0.5:8188", "start": false, "findPort": true})).is_err());
+    s.ai.transport = Some(Arc::new(OnlyOn("http://nowhere/")));
+    let e = s.execute("ai.comfyModels", json!({"url": "http://127.0.0.1:8188", "start": false, "findPort": true})).unwrap_err().to_string();
+    assert!(e.contains("127.0.0.1:8188") && e.contains("127.0.0.1:8000"), "{e}");
+}
+
 #[test]
 fn settings_survive_a_preferences_round_trip() {
     let fake = FakeComfy::new(8, 8, [1, 2, 3, 255]);

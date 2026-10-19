@@ -82,6 +82,26 @@ pub fn port_of(base: &str) -> (u16, bool) {
     (port.filter(|p| *p != 0).unwrap_or(8188), local)
 }
 
+/// Where a ComfyUI may be answering, `base` first: on this computer also the other port a
+/// ComfyUI listens on (ComfyUI Desktop 8000, the portable build and a manual install 8188).
+/// Another computer's address is only itself.
+pub fn addresses(base: &str) -> Vec<String> {
+    let base = base.trim().trim_end_matches('/');
+    let mut out = vec![base.to_string()];
+    let (port, local) = port_of(base);
+    if !local {
+        return out;
+    }
+    let (scheme, rest) = base.split_once("://").unwrap_or(("http", base));
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    let host = match authority.rsplit_once(':') {
+        Some((h, p)) if !p.contains(']') => h,
+        _ => authority,
+    };
+    out.extend([8000u16, 8188].into_iter().filter(|p| *p != port).map(|p| format!("{scheme}://{host}:{p}")));
+    out
+}
+
 /// Split a command line into arguments: spaces separate, double quotes group.
 pub fn split_args(line: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -816,6 +836,18 @@ mod tests {
         assert_eq!(port_of("http://192.168.1.20:8188"), (8188, false));
         for odd in ["", "http://", "http://:0", "http://127.0.0.1:99999", "http://127.0.0.1:abc", "::::"] {
             assert_eq!(port_of(odd).0, 8188, "{odd}");
+        }
+    }
+
+    #[test]
+    fn addresses_try_the_other_local_port() {
+        assert_eq!(addresses("http://127.0.0.1:8188/"), ["http://127.0.0.1:8188", "http://127.0.0.1:8000"]);
+        assert_eq!(addresses(" http://localhost:8000"), ["http://localhost:8000", "http://localhost:8188"]);
+        assert_eq!(addresses("http://localhost"), ["http://localhost", "http://localhost:8000"]);
+        assert_eq!(addresses("http://[::1]:9000"), ["http://[::1]:9000", "http://[::1]:8000", "http://[::1]:8188"]);
+        assert_eq!(addresses("http://192.168.1.20:8188"), ["http://192.168.1.20:8188"]);
+        for odd in ["", "http://", "::::", "127.0.0.1"] {
+            assert!(!addresses(odd).is_empty(), "{odd}");
         }
     }
 

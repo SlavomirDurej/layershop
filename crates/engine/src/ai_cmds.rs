@@ -1371,6 +1371,9 @@ fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
     let transport = transport(s)?;
     // `"start": false` only looks: the Preferences page checks the server when it opens.
     let server = s.ai.server.clone().filter(|_| p.get("start").and_then(Value::as_bool).unwrap_or(true));
+    // `"findPort": true`: a ComfyUI on this computer that is not at the address may be on the
+    // other port (the Desktop app's or the portable build's).
+    let find_port = p.get("findPort").and_then(Value::as_bool).unwrap_or(false);
     crate::jobs::run(
         s,
         "Connect to ComfyUI",
@@ -1381,12 +1384,19 @@ fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
                 server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
             }
             let started = server.as_ref().is_some_and(|s| s.state() == ServerState::Started);
+            let url = if find_port {
+                let tried = photocraft_aigen::launch::addresses(&settings.comfy_url);
+                let answered = tried.iter().find(|u| photocraft_aigen::launch::is_running(transport.as_ref(), u)).cloned();
+                answered.ok_or_else(|| EngineError::Other(format!("ComfyUI is not answering at {}", tried.join(" or "))))?
+            } else {
+                settings.comfy_url.clone()
+            };
             ctx.progress(0.5, "Reading the model files…");
-            let folders = photocraft_aigen::comfy_models(transport.as_ref(), &settings.comfy_url).map_err(ai_error)?;
-            let roots = photocraft_aigen::launch::served_models_folders(transport.as_ref(), &settings.comfy_url);
-            Ok((folders, roots, started))
+            let folders = photocraft_aigen::comfy_models(transport.as_ref(), &url).map_err(ai_error)?;
+            let roots = photocraft_aigen::launch::served_models_folders(transport.as_ref(), &url);
+            Ok((folders, roots, started, url))
         },
-        |_, (folders, roots, started)| Ok(json!({"folders": folders, "modelsFolders": roots, "startedHere": started})),
+        |_, (folders, roots, started, url)| Ok(json!({"folders": folders, "modelsFolders": roots, "startedHere": started, "url": url})),
     )
 }
 
@@ -1506,7 +1516,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere} (starts ComfyUI first when the settings say so and none is running)"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true,"findPort":bool=false (an address on this computer that doesn't answer: try ComfyUI's other port too, 8000 for ComfyUI Desktop, 8188 for the portable build)} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere,url (the address that answered)} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
             journal: false,

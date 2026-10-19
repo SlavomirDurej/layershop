@@ -82,6 +82,12 @@ pub enum Ask {
     SignIn,
     /// Close was pressed while a setup runs: keep it going in the background, or stop it.
     Close,
+    /// Connect found no ComfyUI at the address, nor on ComfyUI's other port: start it, and try
+    /// again.
+    NotRunning,
+    /// The setup stopped with an error: the whole of it, to read and to copy. It opens when a
+    /// setup fails with the wizard open; Show error, or the failed row, opens it again.
+    Error,
 }
 
 /// The wizard's state (in `UiState`, so `ui.inspect` reports it).
@@ -583,6 +589,9 @@ fn finished(app: &mut PhotocraftApp, ctx: &egui::Context) {
         app.ui.ai_setup.page = Page::Install;
         if !app.ui.ai_setup.open {
             crate::notices::error(app, format!("{}: {}", tr("Local AI setup stopped"), text(result, "/error")));
+        } else if app.ui.ai_setup.ask.is_none() {
+            // The whole of what went wrong, where it can be read and copied.
+            app.ui.ai_setup.ask = Some(Ask::Error);
         }
     }
 }
@@ -668,7 +677,11 @@ fn resume(app: &mut PhotocraftApp) {
             (s.status, s.page) = (Some(status), Page::Install);
             s.note.clear();
         }
-        Err(e) => app.ui.ai_setup.note = e.to_string(),
+        Err(e) => {
+            // Continue is on the Install screen, which says what went wrong in the error window.
+            app.ui.ai_setup.note = e.to_string();
+            app.ui.ai_setup.ask = Some(Ask::Error);
+        }
     }
 }
 
@@ -868,13 +881,14 @@ fn install_without(app: &mut PhotocraftApp) {
     install(app);
 }
 
-/// Use my ComfyUI › Connect: read the model files of the ComfyUI at the address, and how it
+/// Use my ComfyUI › Connect: read the model files of the ComfyUI at the address (on this
+/// computer, at the Desktop app's port or the portable build's, whichever answers), and how it
 /// was started when it runs on this computer.
 fn connect(app: &mut PhotocraftApp) {
     let url = app.ui.ai_setup.url.trim().to_string();
     app.ui.ai_setup.server = None;
     app.ui.ai_setup.note.clear();
-    let p = json!({"url": url, "start": false});
+    let p = json!({"url": url, "start": false, "findPort": true});
     let started = if app.background_jobs {
         app.session.start("ai.comfyModels", p)
     } else {
@@ -883,6 +897,8 @@ fn connect(app: &mut PhotocraftApp) {
     match started {
         Ok(photocraft_engine::jobs::Started::Done(found)) => connected(app, Some(found)),
         Ok(photocraft_engine::jobs::Started::Job(id)) => app.ui.ai_setup.server_job = Some(id.0),
+        // Without background jobs a ComfyUI that doesn't answer is an error here, as in a job.
+        Err(_) if app.session.ai.transport.is_some() => connected(app, None),
         Err(e) => app.ui.ai_setup.note = e.to_string(),
     }
 }
@@ -953,11 +969,16 @@ fn use_managed(app: &mut PhotocraftApp) {
 }
 
 fn connected(app: &mut PhotocraftApp, found: Option<Value>) {
-    let url = app.ui.ai_setup.url.trim().to_string();
     let Some(found) = found else {
-        app.ui.ai_setup.note = format!("{} {url}. {}", tr("ComfyUI is not answering at"), tr("Start it, or check the address, then press Connect."));
+        // Neither the address nor ComfyUI's other port answered: say so where it can't be missed.
+        app.ui.ai_setup.ask = Some(Ask::NotRunning);
         return;
     };
+    // It answered on the other port (ComfyUI Desktop's 8000, say): that is its address.
+    if let Some(answered) = found.get("url").and_then(Value::as_str).filter(|u| !u.trim().is_empty()) {
+        app.ui.ai_setup.url = answered.to_string();
+    }
+    let url = app.ui.ai_setup.url.trim().to_string();
     let (_, local) = photocraft_aigen::launch::port_of(&url);
     // How it was started, so the app can start it from now on. Not knowing is fine.
     let launch = if local { app.session.execute("ai.server.find", json!({"url": url})).ok() } else { None };
@@ -1450,29 +1471,33 @@ fn folder_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, engine: bool) {
     ui.add_space(12.0);
 }
 
-/// What the plan says about room: needed against free, as a bar.
+/// What the plan says about room: needed against free, as a bar. Red when only another folder
+/// helps; amber when fewer models would, which the Models page is for.
 fn room(ui: &mut egui::Ui, plan: &Value) {
     let t = Tokens::get(ui.ctx());
     let same = plan.get("sameDrive").and_then(Value::as_bool).unwrap_or(false);
     let (engine, models) = (number(plan, "/engineBytes"), number(plan, "/modelsBytes"));
-    let bar = |ui: &mut egui::Ui, what: &str, need: u64, free: Option<u64>| {
+    let (folder_short, models_short) = (!list(plan, "/folderProblems").is_empty(), !list(plan, "/modelProblems").is_empty());
+    let bar = |ui: &mut egui::Ui, what: &str, need: u64, free: Option<u64>, fill: Color32| {
         let Some(free) = free else { return };
         let fraction = if free > 0 { (need as f64 / free as f64).clamp(0.0, 1.0) as f32 } else { 1.0 };
         let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 6.0), Sense::hover());
         ui.painter().rect_filled(rect, 3.0, t.field);
-        let fill = if need > free { t.danger } else { t.accent };
         ui.painter().rect_filled(Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height())), 3.0, fill);
         ui.add_space(3.0);
         ui.label(RichText::new(format!("{what}: {} {} · {} {}", size(need), tr("needed"), size(free), tr("free"))).color(t.text_dim).size(11.5));
         ui.add_space(8.0);
     };
+    let models_fill = if models_short { t.warning } else { t.accent };
     if same {
-        bar(ui, tr("Engine and models"), engine.saturating_add(models), plan.get("modelsFree").and_then(Value::as_u64));
+        let fill = if folder_short { t.danger } else { models_fill };
+        bar(ui, tr("Engine and models"), engine.saturating_add(models), plan.get("modelsFree").and_then(Value::as_u64), fill);
     } else {
         if plan.get("route").and_then(Value::as_str) == Some("managed") {
-            bar(ui, tr("Engine"), engine, plan.get("engineFree").and_then(Value::as_u64));
+            let fill = if folder_short { t.danger } else { t.accent };
+            bar(ui, tr("Engine"), engine, plan.get("engineFree").and_then(Value::as_u64), fill);
         }
-        bar(ui, tr("Models"), models, plan.get("modelsFree").and_then(Value::as_u64));
+        bar(ui, tr("Models"), models, plan.get("modelsFree").and_then(Value::as_u64), models_fill);
     }
 }
 
@@ -1506,10 +1531,9 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
             // Found installed but not running: open it, and that is all.
             (None, false) if detected(app) && app.ui.ai_setup.probe.as_ref().is_some_and(|p| list(p, "/probe/comfy/running").is_empty()) => {
-                tr("Your ComfyUI Desktop is not running. Open it, then press Connect. (ComfyUI Desktop listens on port 8000, the portable build on 8188.)")
-                    .to_string()
+                tr("Your ComfyUI Desktop is not running. Open it, then press Connect.").to_string()
             }
-            (None, false) => tr("The portable build of ComfyUI listens on port 8188, ComfyUI Desktop on port 8000. Start it, then press Connect.").to_string(),
+            (None, false) => tr("Start ComfyUI, then press Connect. It is found on either port: 8000 for ComfyUI Desktop, 8188 for the portable build.").to_string(),
         };
         ui.add(egui::Label::new(RichText::new(line).color(t.text_faint).size(11.5)).wrap());
         ui.add_space(12.0);
@@ -1536,8 +1560,14 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     replan(app);
     if let Some(plan) = app.ui.ai_setup.plan.clone() {
         room(ui, &plan);
-        for p in list(&plan, "/problems") {
+        for p in list(&plan, "/folderProblems") {
             problem(ui, p.as_str().unwrap_or(""));
+        }
+        // The models are chosen on the next page: too little room for them is not a reason to stop here.
+        if let Some(first) = list(&plan, "/modelProblems").first().and_then(Value::as_str) {
+            let line = format!("{first} {}", tr("You choose the models on the next page."));
+            ui.add(egui::Label::new(RichText::new(line).color(t.warning).size(12.0)).wrap().selectable(true));
+            ui.add_space(4.0);
         }
     }
     problem(ui, &app.ui.ai_setup.plan_note.clone());
@@ -1554,7 +1584,7 @@ fn licence_note(model: &Value) -> String {
     }
 }
 
-fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
+fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     heading(ui, "Choose your models", "Each model is a few large files. Files that models share are downloaded once. You can add more later.");
     let manifest = app.ui.ai_setup.manifest.clone().unwrap_or(Value::Null);
@@ -1583,7 +1613,12 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
     let managed = !list(&status, "/engines").is_empty() && !running(app);
     let needing = needs_sign_in(app);
     let mut any_gated = false;
-    egui::ScrollArea::vertical().id_salt("ai-setup-models").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+    // The list takes the page down to the footer, less what follows it (the Hugging Face panel,
+    // a problem), as tall as that was last frame.
+    let tail_id = egui::Id::new("ai-setup-models-tail");
+    let tail = ui.ctx().data(|d| d.get_temp::<f32>(tail_id)).unwrap_or(0.0);
+    let height = (ui.available_height() - tail).max(110.0);
+    egui::ScrollArea::vertical().id_salt("ai-setup-models").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
         for model in list(&manifest, "/models").to_vec() {
             let id = text(&model, "/id").to_string();
             let mut on = app.ui.ai_setup.models.contains(&id);
@@ -1644,6 +1679,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
             ui.add_space(6.0);
         }
     });
+    let tail_top = ui.cursor().top();
     // A gated model among the ticked ones: the Hugging Face account, and the token fallback.
     if any_gated && (!needing.is_empty() || hf_flag(app, "signedIn")) {
         ui.add_space(2.0);
@@ -1651,6 +1687,11 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
     }
     problem(ui, &app.ui.ai_setup.plan_note.clone());
     problem(ui, &app.ui.ai_setup.note.clone());
+    let measured = ui.cursor().top() - tail_top;
+    if (measured - tail).abs() > 0.5 {
+        ui.ctx().data_mut(|d| d.insert_temp(tail_id, measured));
+        ui.ctx().request_repaint();
+    }
     replan(app);
     // Where the ticked gated models stand, asked whenever they or the sign-in change.
     if !needs_sign_in(app).is_empty() && app.ui.ai_setup.access_key != access_key(app) {
@@ -1820,11 +1861,33 @@ fn step_words(step: &Value) -> String {
     if state == "active" { format!("{words}\u{2026}") } else { words }
 }
 
-fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
+/// What went wrong, in full, for the error window: the setup's own error (or the record's, from
+/// a run before), what a failed row says beyond it, and what the last thing asked for said.
+/// Empty when nothing did.
+fn failure(app: &PhotocraftApp) -> String {
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let mut said: Vec<String> = Vec::new();
+    let mut add = |line: &str| {
+        let line = line.trim();
+        if !line.is_empty() && !said.iter().any(|s| s.contains(line)) {
+            said.push(line.to_string());
+        }
+    };
+    if !running(app) && matches!(text(&status, "/state"), "failed" | "interrupted") {
+        add(text(&status, "/result/error"));
+        add(text(&status, "/record/error"));
+    }
+    for step in list(&status, "/progress/steps").iter().filter(|s| text(s, "/state") == "failed") {
+        add(text(step, "/note"));
+    }
+    add(&app.ui.ai_setup.note);
+    said.join("\n\n")
+}
+
+fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
     let busy = running(app);
-    let state = text(&status, "/state").to_string();
     let sub = if busy {
         "The editor stays usable. You can close this window: the setup carries on, and the status bar shows how far it is."
     } else {
@@ -1862,11 +1925,23 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
     }
     let active_key = active.map(|s| text(s, "/key").to_string()).unwrap_or_default();
-    egui::ScrollArea::vertical().id_salt("ai-setup-steps").max_height(body_height).auto_shrink([false, true]).show(ui, |ui| {
+    // The rows take the page down to the footer, which says how it ended (paused, or stopped
+    // with an error, in a window of its own).
+    let mut show_error = false;
+    egui::ScrollArea::vertical().id_salt("ai-setup-steps").max_height(ui.available_height()).auto_shrink([false, false]).show(ui, |ui| {
         for step in &steps {
             let state = text(step, "/state");
             let on = state == "active";
             let rect = row_frame(ui, 34.0);
+            // A failed row opens the whole error, as its Show error link does.
+            let failed = state == "failed" && !busy;
+            if failed {
+                let row = ui.interact(rect, ui.id().with(("ai-setup-failed-row", text(step, "/key"))), Sense::click());
+                if row.hovered() {
+                    ui.painter().rect_stroke(rect, t.radius, Stroke::new(1.0, t.danger), StrokeKind::Inside);
+                }
+                show_error |= row.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+            }
             if on {
                 // The row being worked on stands out, and comes into view once when it starts.
                 ui.painter().rect_stroke(rect, t.radius, Stroke::new(1.5, t.accent), StrokeKind::Inside);
@@ -1893,7 +1968,17 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
                 ("done", total) => size(total),
                 (_, total) => format!("{} / {}", size(step_done), size(total)),
             };
-            let right_width = if right.is_empty() { 0.0 } else { 150.0 };
+            let right_width = if failed {
+                let link = Rect::from_min_max(pos2(rect.right() - 150.0, rect.top()), rect.max - vec2(12.0, 0.0));
+                let mut child = ui.new_child(UiBuilder::new().max_rect(link).layout(Layout::right_to_left(Align::Center)));
+                let r = child.add(egui::Label::new(RichText::new(tr("Show error")).color(t.accent).size(12.0)).sense(Sense::click()));
+                show_error |= r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+                150.0
+            } else if right.is_empty() {
+                0.0
+            } else {
+                150.0
+            };
             let label = step_words(step);
             let label_rect = Rect::from_min_max(rect.min + vec2(36.0, 0.0), rect.max - vec2(right_width + 12.0, 0.0));
             let mut child = ui.new_child(UiBuilder::new().max_rect(label_rect).layout(Layout::left_to_right(Align::Center)));
@@ -1916,18 +2001,9 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui, body_height: f32) {
             ui.add_space(4.0);
         }
     });
-    if !busy {
-        let error = text(&status, "/result/error").to_string();
-        let recorded = text(&status, "/record/error").to_string();
-        match state.as_str() {
-            "paused" => {
-                ui.label(RichText::new(tr("Paused. What arrived is kept.")).color(t.text_dim));
-            }
-            "failed" | "interrupted" => problem(ui, if error.is_empty() { &recorded } else { &error }),
-            _ => {}
-        }
+    if show_error {
+        app.ui.ai_setup.ask = Some(Ask::Error);
     }
-    problem(ui, &app.ui.ai_setup.note.clone());
 }
 
 fn page_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
@@ -1986,12 +2062,21 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     widgets::hairline(ui);
     ui.add_space(10.0);
-    let (page, existing, busy) = (app.ui.ai_setup.page, app.ui.ai_setup.existing, running(app));
+    let (page, existing) = (app.ui.ai_setup.page, app.ui.ai_setup.existing);
     let probe = app.ui.ai_setup.probe.clone().unwrap_or(Value::Null);
     let can_install = probe.get("canInstall").and_then(Value::as_bool).unwrap_or(false);
     let plan = app.ui.ai_setup.plan.clone().unwrap_or(Value::Null);
     let choosing = page == Page::Pc && offer_choice(app);
-    ui.horizontal(|ui| {
+    // Right: where to next, laid out first; the left takes the room left of it, wrapping rather
+    // than running under the buttons.
+    let row = ui.available_rect_before_wrap();
+    let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)));
+    footer_buttons(app, &mut right, &plan, can_install, choosing);
+    let left_edge = (right.min_rect().left() - 16.0).max(row.left());
+    let mut left = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(row.min, pos2(left_edge, row.bottom()))).layout(Layout::left_to_right(Align::Center)));
+    ui.advance_cursor_after_rect(row);
+    {
+        let ui = &mut left;
         // Left: the other ways in, or what the screen adds up to.
         match page {
             Page::Pc => {
@@ -2042,92 +2127,131 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 if skipped > 0 {
                     line = format!("{line} · {skipped} {}", tr("skipped (needs sign-in)"));
                 }
-                ui.label(RichText::new(line).color(t.text_dim).size(12.0));
+                // Why Install can't be pressed, where it can be seen (untick models to make room).
+                let color = match list(&plan, "/problems").first().and_then(Value::as_str) {
+                    Some(why) => {
+                        line = why.to_string();
+                        t.danger
+                    }
+                    None => t.text_dim,
+                };
+                ui.add(egui::Label::new(RichText::new(line).color(color).size(12.0)).wrap());
+            }
+            // How it ended, when it isn't running: paused, or stopped with an error (the whole
+            // of which is in a window of its own).
+            Page::Install if !running(app) => {
+                if !failure(app).is_empty() {
+                    let (mark, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
+                    crate::icons::paint(ui, mark, "x", 13.0, t.danger);
+                    ui.label(RichText::new(tr("The setup stopped with an error.")).color(t.danger).size(12.0));
+                    let r = ui.add(egui::Label::new(RichText::new(tr("Show error")).color(t.accent).size(12.0)).sense(Sense::click()));
+                    if r.on_hover_text(tr("The whole message, to read or copy")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                        app.ui.ai_setup.ask = Some(Ask::Error);
+                    }
+                } else if app.ui.ai_setup.status.as_ref().is_some_and(|s| text(s, "/state") == "paused") {
+                    ui.label(RichText::new(tr("Paused. What arrived is kept.")).color(t.text_dim).size(12.0));
+                }
             }
             _ => {}
         }
-        // Right: where to next.
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| match page {
-            Page::Pc => {
-                // The big buttons above stand for Next.
-                if !choosing {
-                    let ready = app.ui.ai_setup.probe.is_some() && can_install;
-                    let next = ui.add_enabled_ui(ready, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
-                    if next
-                        .on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system. Use my ComfyUI, or cloud models, still work"))
-                        .clicked()
-                    {
-                        use_managed(app);
-                    }
-                }
-                if ui.add_enabled_ui(app.ui.ai_setup.probe_job.is_none(), |ui| widgets::secondary_button(ui, tr("Check Again"), 110.0)).inner.clicked() {
-                    app.ui.ai_setup.probe = None;
-                    app.ui.ai_setup.note.clear();
-                    start_probe(app);
+    }
+}
+
+/// Why the Location page can't go on to the Models page, if it can't. Only what another folder
+/// fixes stops it: too little room for the models is the Models page's to fix, by ticking fewer.
+fn location_blocked(app: &PhotocraftApp) -> Option<&'static str> {
+    let s = &app.ui.ai_setup;
+    if s.existing && s.server.is_none() {
+        return Some("Connect to your ComfyUI first");
+    }
+    match &s.plan {
+        Some(plan) if list(plan, "/folderProblems").is_empty() => None,
+        _ => Some("Choose folders that have the room"),
+    }
+}
+
+/// The footer's buttons, laid out right to left: where to next from the screen in front.
+fn footer_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, plan: &Value, can_install: bool, choosing: bool) {
+    let (page, busy) = (app.ui.ai_setup.page, running(app));
+    match page {
+        Page::Pc => {
+            // The big buttons above stand for Next.
+            if !choosing {
+                let ready = app.ui.ai_setup.probe.is_some() && can_install;
+                let next = ui.add_enabled_ui(ready, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
+                if next
+                    .on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system. Use my ComfyUI, or cloud models, still work"))
+                    .clicked()
+                {
+                    use_managed(app);
                 }
             }
-            Page::Location => {
-                let problems = !list(&plan, "/problems").is_empty() || app.ui.ai_setup.plan.is_none();
-                let connected = !existing || app.ui.ai_setup.server.is_some();
-                let next = ui.add_enabled_ui(!problems && connected, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
-                if next.on_disabled_hover_text(tr(if connected { "Choose folders that have the room" } else { "Connect to your ComfyUI first" })).clicked() {
-                    app.ui.ai_setup.page = Page::Models;
+            if ui.add_enabled_ui(app.ui.ai_setup.probe_job.is_none(), |ui| widgets::secondary_button(ui, tr("Check Again"), 110.0)).inner.clicked() {
+                app.ui.ai_setup.probe = None;
+                app.ui.ai_setup.note.clear();
+                start_probe(app);
+            }
+        }
+        Page::Location => {
+            let blocked = location_blocked(app);
+            let next = ui.add_enabled_ui(blocked.is_none(), |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
+            if next.on_disabled_hover_text(tr(blocked.unwrap_or_default())).clicked() {
+                app.ui.ai_setup.page = Page::Models;
+            }
+            if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
+                // What went wrong here (Connect, say) is not the first screen's to show.
+                app.ui.ai_setup.note.clear();
+                app.ui.ai_setup.page = Page::Pc;
+            }
+        }
+        Page::Models => {
+            let problems = !list(plan, "/problems").is_empty() || app.ui.ai_setup.plan.is_none();
+            let label = if number(plan, "/downloadBytes") == 0 { tr("Finish") } else { tr("Install") };
+            let go = ui.add_enabled_ui(!problems && !busy, |ui| widgets::primary_button(ui, label, 96.0)).inner;
+            let why = list(plan, "/problems").first().and_then(Value::as_str).unwrap_or("Choose folders first").to_string();
+            if go.on_disabled_hover_text(why).clicked() {
+                // A gated model that can't be downloaded yet is asked about first.
+                install_clicked(app);
+            }
+            if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
+                app.ui.ai_setup.page = Page::Location;
+            }
+        }
+        Page::Install => {
+            if busy {
+                if widgets::secondary_button(ui, tr("Pause"), 80.0)
+                    .on_hover_text(tr("Stop for now. What arrived is kept, and Continue picks up from there"))
+                    .clicked()
+                {
+                    let _ = app.session.execute("ai.setup.cancel", json!({}));
+                }
+                if widgets::secondary_button(ui, tr("Close"), 80.0).clicked() {
+                    // Keep downloading in the background, or stop: asked.
+                    app.ui.ai_setup.ask = Some(Ask::Close);
+                }
+            } else {
+                let state = app.ui.ai_setup.status.as_ref().map_or("", |s| text(s, "/state")).to_string();
+                if matches!(state.as_str(), "paused" | "failed" | "interrupted") && widgets::primary_button(ui, tr("Continue"), 110.0).clicked() {
+                    resume(app);
+                }
+                if state == "done" && widgets::primary_button(ui, tr("Next"), 96.0).clicked() {
+                    app.ui.ai_setup.page = Page::Ready;
                 }
                 if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
-                    // What went wrong here (Connect, say) is not the first screen's to show.
-                    app.ui.ai_setup.note.clear();
-                    app.ui.ai_setup.page = Page::Pc;
-                }
-            }
-            Page::Models => {
-                let problems = !list(&plan, "/problems").is_empty() || app.ui.ai_setup.plan.is_none();
-                let label = if number(&plan, "/downloadBytes") == 0 { tr("Finish") } else { tr("Install") };
-                let go = ui.add_enabled_ui(!problems && !busy, |ui| widgets::primary_button(ui, label, 96.0)).inner;
-                let why = list(&plan, "/problems").first().and_then(Value::as_str).unwrap_or("Choose folders first").to_string();
-                if go.on_disabled_hover_text(why).clicked() {
-                    // A gated model that can't be downloaded yet is asked about first.
-                    install_clicked(app);
-                }
-                if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
-                    app.ui.ai_setup.page = Page::Location;
-                }
-            }
-            Page::Install => {
-                if busy {
-                    if widgets::secondary_button(ui, tr("Pause"), 80.0)
-                        .on_hover_text(tr("Stop for now. What arrived is kept, and Continue picks up from there"))
-                        .clicked()
-                    {
-                        let _ = app.session.execute("ai.setup.cancel", json!({}));
-                    }
-                    if widgets::secondary_button(ui, tr("Close"), 80.0).clicked() {
-                        // Keep downloading in the background, or stop: asked.
-                        app.ui.ai_setup.ask = Some(Ask::Close);
-                    }
-                } else {
-                    let state = app.ui.ai_setup.status.as_ref().map_or("", |s| text(s, "/state")).to_string();
-                    if matches!(state.as_str(), "paused" | "failed" | "interrupted") && widgets::primary_button(ui, tr("Continue"), 110.0).clicked() {
-                        resume(app);
-                    }
-                    if state == "done" && widgets::primary_button(ui, tr("Next"), 96.0).clicked() {
-                        app.ui.ai_setup.page = Page::Ready;
-                    }
-                    if widgets::secondary_button(ui, tr("Back"), 80.0).clicked() {
-                        app.ui.ai_setup.page = Page::Models;
-                    }
-                }
-            }
-            Page::Ready => {
-                if widgets::primary_button(ui, tr("Open AI Gen"), 120.0).clicked() {
-                    app.ui.ai_setup.open = false;
-                    let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
-                }
-                if widgets::secondary_button(ui, tr("Add Models…"), 110.0).clicked() {
                     app.ui.ai_setup.page = Page::Models;
                 }
             }
-        });
-    });
+        }
+        Page::Ready => {
+            if widgets::primary_button(ui, tr("Open AI Gen"), 120.0).clicked() {
+                app.ui.ai_setup.open = false;
+                let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+            }
+            if widgets::secondary_button(ui, tr("Add Models…"), 110.0).clicked() {
+                app.ui.ai_setup.page = Page::Models;
+            }
+        }
+    }
 }
 
 /// The wizard window.
@@ -2193,9 +2317,8 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 Page::Location => {
                     egui::ScrollArea::vertical().id_salt("ai-setup-location").auto_shrink([false, false]).show(&mut page, |ui| page_location(app, ui));
                 }
-                // The access token's field, when open, takes two lines from the list.
-                Page::Models => page_models(app, &mut page, (body.height() - if app.ui.ai_setup.token_open { 236.0 } else { 190.0 }).max(110.0)),
-                Page::Install => page_install(app, &mut page, (body.height() - 150.0).max(100.0)),
+                Page::Models => page_models(app, &mut page),
+                Page::Install => page_install(app, &mut page),
                 Page::Ready => page_ready(app, &mut page),
             }
             let mut bottom = ui.new_child(UiBuilder::new().max_rect(foot).layout(Layout::top_down(Align::Min)));
@@ -2216,7 +2339,110 @@ fn questions(app: &mut PhotocraftApp, ctx: &egui::Context) {
     match app.ui.ai_setup.ask {
         Some(Ask::Close) => close_question(app, ctx),
         Some(Ask::SignIn) => sign_in_question(app, ctx),
+        Some(Ask::NotRunning) => not_running_question(app, ctx),
+        Some(Ask::Error) => error_window(app, ctx),
         None => {}
+    }
+}
+
+/// The error window's Copy was pressed since it opened: its button says Copied.
+const ERROR_COPIED: &str = "ai-setup-error-copied";
+
+/// The setup stopped with an error: all of it (a Python traceback, say), selectable and scrolled
+/// when long, with Copy for the whole of it.
+fn error_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use widgets::{ButtonRole, DialogButton};
+    let message = failure(app);
+    if message.is_empty() {
+        // Continued, or cleared, meanwhile: nothing to show.
+        error_answered(app, ctx, ButtonRole::Cancel);
+        return;
+    }
+    let t = Tokens::get(ctx);
+    let copied = ctx.data(|d| d.get_temp::<bool>(egui::Id::new(ERROR_COPIED))).unwrap_or(false);
+    let mut answer = None;
+    let buttons =
+        [DialogButton::new(ButtonRole::Default, tr("Close"), 84.0), DialogButton::new(ButtonRole::Apply, if copied { tr("Copied") } else { tr("Copy") }, 84.0)];
+    let screen = ctx.content_rect();
+    let width = 600.0f32.min(screen.width() - 64.0).max(320.0);
+    let modal = egui::Modal::new(egui::Id::new("ai-setup-error")).show(ctx, |ui| {
+        ui.set_width(width);
+        ui.label(RichText::new(tr("The setup stopped with an error")).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        let why = tr("This is what the engine said. Copy it to look it up, or to send with a bug report. Continue tries again from where the setup stopped.");
+        ui.add(egui::Label::new(RichText::new(why).color(t.text_dim).size(12.5)).wrap());
+        ui.add_space(10.0);
+        egui::Frame::NONE.fill(t.field).stroke(Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(10.0).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("ai-setup-error-text")
+                .max_height((screen.height() - 300.0).clamp(120.0, 360.0))
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(&message).font(crate::theme::mono(11.5)).color(t.danger)).wrap().selectable(true));
+                });
+        });
+        ui.add_space(12.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    if let Some(answer) = answer {
+        error_answered(app, ctx, answer);
+    }
+}
+
+/// The error window answered: Copy puts the whole message on the clipboard and keeps the window
+/// open (its button says Copied); Close closes it, and Show error opens it again.
+fn error_answered(app: &mut PhotocraftApp, ctx: &egui::Context, answer: widgets::ButtonRole) {
+    let copied_id = egui::Id::new(ERROR_COPIED);
+    if answer == widgets::ButtonRole::Apply {
+        ctx.copy_text(failure(app));
+        ctx.data_mut(|d| d.insert_temp(copied_id, true));
+    } else {
+        app.ui.ai_setup.ask = None;
+        ctx.data_mut(|d| d.remove::<bool>(copied_id));
+    }
+}
+
+/// Connect found no ComfyUI, at the address or on the other port: start it, then Try Again.
+fn not_running_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use widgets::{ButtonRole, DialogButton};
+    let tried = photocraft_aigen::launch::addresses(&app.ui.ai_setup.url);
+    let mut answer = None;
+    let buttons = [DialogButton::new(ButtonRole::Default, tr("Try Again"), 104.0), DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0)];
+    let modal = egui::Modal::new(egui::Id::new("ai-setup-not-running")).show(ctx, |ui| {
+        ui.set_max_width(440.0);
+        ui.label(RichText::new(tr("Couldn't connect to ComfyUI")).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        let message = format!(
+            "{} {}. {}",
+            tr("Nothing answered at"),
+            tried.join(&format!(" {} ", tr("or"))),
+            tr("Launch ComfyUI, make sure it is running (wait until its window has finished loading), then press Try Again.")
+        );
+        ui.add(egui::Label::new(message).wrap());
+        ui.add_space(12.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    if let Some(answer) = answer {
+        app.ui.ai_setup.ask = None;
+        if answer == ButtonRole::Default {
+            connect(app);
+        }
     }
 }
 

@@ -275,7 +275,28 @@ fn a_comfyui_that_does_not_answer_is_said_on_the_screen() {
     app.ui.ai_setup.url = "http://127.0.0.1:8188".into();
     connect(&mut app);
     assert!(app.ui.ai_setup.server.is_none());
-    assert!(!app.ui.ai_setup.note.is_empty());
+    // Neither port answered: a popup asks to start ComfyUI, and it draws.
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::NotRunning));
+    draw(&mut app, &ctx());
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::NotRunning));
+    // ComfyUI Desktop started meanwhile, on its own port: Try Again finds it and fixes the address.
+    struct DesktopUp;
+    impl photocraft_aigen::Transport for DesktopUp {
+        fn send(&self, r: &photocraft_aigen::Request) -> photocraft_aigen::Result<photocraft_aigen::Response> {
+            if !r.url.starts_with("http://127.0.0.1:8000/") {
+                return Err(photocraft_aigen::Error::Network("refused".into()));
+            }
+            let body: &[u8] = if r.url.ends_with("/system_stats") { br#"{"system":{"argv":["main.py"]}}"# } else { b"[]" };
+            Ok(photocraft_aigen::Response { status: 200, body: body.to_vec() })
+        }
+    }
+    app.session.ai.transport = Some(std::sync::Arc::new(DesktopUp));
+    app.ui.ai_setup.ask = None;
+    connect(&mut app);
+    assert_eq!(app.ui.ai_setup.ask, None);
+    assert_eq!(app.ui.ai_setup.url, "http://127.0.0.1:8000");
+    assert!(app.ui.ai_setup.server.is_some());
+    app.session.ai.transport = Some(std::sync::Arc::new(Down));
     // Odd state from outside (a script, a later version) draws, and asks for nothing absurd.
     let c = ctx();
     let odd: AiSetupUi = serde_json::from_value(json!({
@@ -621,4 +642,66 @@ fn the_install_rows_say_what_is_being_done_not_what_to_do() {
     assert_eq!(row("configure", "Set up the models", "done", ""), "Models set up");
     // Anything else falls back to its own label.
     assert_eq!(row("odd", "Something", "pending", ""), "Something");
+}
+
+#[test]
+fn too_little_room_for_the_models_does_not_stop_the_location_page() {
+    let (mut app, _dir) = app(demo::Scale::Small);
+    let c = ctx();
+    open(&mut app);
+    app.ui.ai_setup.page = Page::Location;
+    draw(&mut app, &c);
+    assert_eq!(location_blocked(&app), None);
+    // A small drive: the recommended models don't fit, but fewer can be ticked on the next page.
+    let short = "Not enough room: 40.0 GB is free, and this needs 42.6 GB. Choose fewer models or another folder.";
+    let plan = app.ui.ai_setup.plan.as_mut().unwrap();
+    (plan["problems"], plan["modelProblems"]) = (json!([short]), json!([short]));
+    draw(&mut app, &c);
+    assert_eq!(location_blocked(&app), None);
+    // The engine alone does not fit: only another folder helps.
+    let plan = app.ui.ai_setup.plan.as_mut().unwrap();
+    (plan["folderProblems"], plan["modelProblems"]) = (json!(["Not enough room for the engine"]), json!([]));
+    draw(&mut app, &c);
+    assert_eq!(location_blocked(&app), Some("Choose folders that have the room"));
+    // No plan yet, or the user's own ComfyUI not connected: wait.
+    app.ui.ai_setup.plan = None;
+    assert!(location_blocked(&app).is_some());
+    app.ui.ai_setup.existing = true;
+    assert_eq!(location_blocked(&app), Some("Connect to your ComfyUI first"));
+}
+
+#[test]
+fn a_setup_that_stops_with_an_error_shows_all_of_it_in_a_window_to_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
+    let c = ctx();
+    // The user's own ComfyUI doesn't answer: the setup stops at its last step, with the wizard open.
+    demo::fail(&mut app, dir.path(), None);
+    draw(&mut app, &c);
+    let status = app.ui.ai_setup.status.clone().unwrap();
+    assert_eq!(status["state"], "failed");
+    assert_eq!(app.ui.ai_setup.page, Page::Install);
+    let verify = status["progress"]["steps"].as_array().unwrap().iter().find(|s| s["key"] == "verify").cloned().unwrap();
+    assert_eq!(verify["state"], "failed", "the row keeps its red \u{d7}");
+    // The window opened by itself, with the whole of what went wrong.
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::Error));
+    let said = failure(&app);
+    assert!(said.contains("not answering"), "{said}");
+    draw(&mut app, &c);
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::Error), "it stays open until it is closed");
+    // Copy puts all of it on the clipboard, and keeps the window open.
+    error_answered(&mut app, &c, widgets::ButtonRole::Apply);
+    let copied = c.output(|o| o.commands.clone());
+    assert!(copied.contains(&egui::OutputCommand::CopyText(said.clone())), "{copied:?}");
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::Error));
+    // Close closes it, and it doesn't open again by itself.
+    error_answered(&mut app, &c, widgets::ButtonRole::Cancel);
+    draw(&mut app, &c);
+    assert_eq!(app.ui.ai_setup.ask, None);
+    // A long one (a Python traceback) is kept whole, however little room the screen has.
+    let other = tempfile::tempdir().unwrap();
+    let mut long = PhotocraftApp::new(Session::new(), crate::Services::default());
+    demo::fail(&mut long, other.path(), Some(demo::TRACEBACK));
+    draw(&mut long, &c);
+    assert_eq!(failure(&long), demo::TRACEBACK);
 }

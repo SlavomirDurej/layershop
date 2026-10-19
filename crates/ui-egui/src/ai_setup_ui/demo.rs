@@ -170,6 +170,66 @@ pub fn install(app: &mut PhotocraftApp, dir: &Path, scale: Scale) -> Arc<Mutex<S
     accepted
 }
 
+/// A ComfyUI that does not answer: a setup against it stops at its last step.
+struct Down;
+
+impl Transport for Down {
+    fn send(&self, _: &Request) -> photocraft_aigen::Result<Response> {
+        Err(photocraft_aigen::Error::Network("refused".into()))
+    }
+}
+
+/// What ComfyUI said when it would not start in a Windows Sandbox: a traceback longer than the
+/// Install screen has room for.
+pub const TRACEBACK: &str = "ComfyUI stopped while starting: File \"C:\\Users\\WDAGUtilityAccount\\AppData\\Local\\PhotoCraft\\engine\\0.39.0\\python_embeded\\Lib\\site-packages\\torch\\__init__.py\", line 141, in <module>
+    raise err
+OSError: [WinError 126] The specified module could not be found. Error loading \"C:\\Users\\WDAGUtilityAccount\\AppData\\Local\\PhotoCraft\\engine\\0.39.0\\python_embeded\\Lib\\site-packages\\torch\\lib\\c10_cuda.dll\" or one of its dependencies.
+
+Traceback (most recent call last):
+  File \"C:\\Users\\WDAGUtilityAccount\\AppData\\Local\\PhotoCraft\\engine\\0.39.0\\ComfyUI\\main.py\", line 138, in <module>
+    import execution
+  File \"C:\\Users\\WDAGUtilityAccount\\AppData\\Local\\PhotoCraft\\engine\\0.39.0\\ComfyUI\\execution.py\", line 13, in <module>
+    import comfy.model_management
+  File \"C:\\Users\\WDAGUtilityAccount\\AppData\\Local\\PhotoCraft\\engine\\0.39.0\\ComfyUI\\comfy\\model_management.py\", line 21, in <module>
+    import torch";
+
+/// A setup against the user's own ComfyUI, [`Scale::Small`], run to its end with that ComfyUI
+/// not answering: it stops at its last step, with the wizard open on the Install screen. With
+/// `said`, the engine's error reads that instead (what a real failure says is longer).
+pub fn fail(app: &mut PhotocraftApp, dir: &Path, said: Option<&str>) {
+    install(app, dir, Scale::Small);
+    app.session.ai.transport = Some(Arc::new(Down));
+    app.ui.ai_setup.probe = Some(probe(dir));
+    super::open(app);
+    let s = &mut app.ui.ai_setup;
+    (s.existing, s.url) = (true, "http://127.0.0.1:8188".into());
+    s.server = Some(json!({"folders": {}, "launch": null, "local": true}));
+    s.models = vec!["qwen-image-2-1".into()];
+    s.models_dir = dir.join("models").to_string_lossy().into_owned();
+    super::install(app);
+    let began = std::time::Instant::now();
+    while super::running(app) && began.elapsed() < Duration::from_secs(20) {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    photocraft_engine::ai_setup_cmds::poll(&mut app.session);
+    let Some(said) = said else { return };
+    // Taken as seen, so the next frame doesn't read the status again over what is put in it.
+    app.ui.ai_setup.seen_seq = app.session.ai_setup.seq();
+    super::refresh_status(app);
+    if let Some(status) = app.ui.ai_setup.status.as_mut() {
+        status["result"]["error"] = json!(said);
+        if status["record"].is_object() {
+            status["record"]["error"] = json!(said);
+        }
+        if let Some(steps) = status.pointer_mut("/progress/steps").and_then(Value::as_array_mut) {
+            for step in steps.iter_mut().filter(|s| s["state"] == "failed") {
+                step["note"] = json!(said);
+            }
+        }
+    }
+    app.ui.ai_setup.page = Page::Install;
+}
+
 /// Signed in to Hugging Face as the demo's user (with [`TOKEN`]), as Sign in leaves it.
 pub fn sign_in(app: &mut PhotocraftApp) {
     use photocraft_aisetup::hf::{Credentials, Via};
@@ -269,7 +329,9 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// with ComfyUI Desktop; `models-hf`, `models-licence` and `models-ready` the Models screen with
 /// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
-/// asks while a setup runs; `env` only gives the app the stand-in, with the wizard closed (its
+/// asks while a setup runs; `install-error` and `install-failed` a setup that stopped at its last
+/// step, with the window that shows its error open, and closed; `location-full` the Location screen on a drive too small for the
+/// recommended models; `env` only gives the app the stand-in, with the wizard closed (its
 /// ways in: the File menu, the Preferences page, the AI Gen panel). Returns whether `page` names
 /// one of these.
 pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
@@ -309,6 +371,22 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         app.ui.ai_setup.ask = Some(super::Ask::Close);
         return true;
     }
+    if page == "not-running" {
+        install(app, dir, Scale::Real);
+        app.ui.ai_setup.probe = Some(probe(dir));
+        super::open(app);
+        let s = &mut app.ui.ai_setup;
+        (s.existing, s.page, s.url) = (true, Page::Location, "http://127.0.0.1:8188".into());
+        s.ask = Some(super::Ask::NotRunning);
+        return true;
+    }
+    // A setup that stopped at its last step: the error window it opens, or the screen under it
+    // once that is closed.
+    if matches!(page, "install-error" | "install-failed") {
+        fail(app, dir, Some(TRACEBACK));
+        app.ui.ai_setup.ask = (page == "install-error").then_some(super::Ask::Error);
+        return true;
+    }
     if page == "env" {
         install(app, dir, Scale::Real);
         app.ui.ai_setup.probe = Some(probe(dir));
@@ -341,6 +419,26 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         }
         super::open(app);
         app.ui.ai_setup.page = if screen == "-models" { Page::Models } else { Page::Pc };
+        return true;
+    }
+    // A small drive: the engine fits, the recommended models don't, and Next still goes on to
+    // the Models page, where fewer can be ticked.
+    if page == "location-full" {
+        install(app, dir, Scale::Real);
+        app.ui.ai_setup.probe = Some(probe(dir));
+        super::open(app);
+        app.ui.ai_setup.page = Page::Location;
+        super::replan(app);
+        let Some(plan) = app.ui.ai_setup.plan.as_mut() else { return false };
+        let free = 40_000_000_000u64;
+        let need = plan["engineBytes"].as_u64().unwrap_or(0).saturating_add(plan["modelsBytes"].as_u64().unwrap_or(0));
+        let short = format!(
+            "Not enough room: {} is free, and this needs {}. Choose fewer models or another folder.",
+            photocraft_aisetup::human_bytes(free),
+            photocraft_aisetup::human_bytes(need.saturating_add(photocraft_aisetup::plan::HEADROOM))
+        );
+        (plan["sameDrive"], plan["modelsFree"], plan["engineFree"]) = (json!(true), json!(free), json!(free));
+        (plan["problems"], plan["modelProblems"], plan["folderProblems"]) = (json!([short]), json!([short]), json!([]));
         return true;
     }
     let Some(page) = Page::ALL.into_iter().find(|p| p.key() == page) else { return false };

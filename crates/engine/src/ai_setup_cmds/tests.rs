@@ -280,6 +280,7 @@ mod native {
         assert_eq!(plan["downloadBytes"].as_u64().unwrap(), 60_000 + rig.manifest.comfy.assets["nvidia"].size);
         assert!(plan["modelsFree"].as_u64().unwrap() > 0 && plan["sameDrive"] == true);
         assert!(plan["problems"].as_array().unwrap().is_empty(), "{}", plan["problems"]);
+        assert!(plan["folderProblems"].as_array().unwrap().is_empty() && plan["modelProblems"].as_array().unwrap().is_empty());
         // Nothing was written by asking.
         assert!(!rig.dir.path().join("engine").exists() && !rig.models_dir().exists());
         assert_eq!(rig.net.served.load(Ordering::SeqCst), 0);
@@ -287,6 +288,31 @@ mod native {
         let deep = format!("{}{}", rig.dir.path().join("engine").to_string_lossy(), "\\deeper".repeat(30));
         let plan = rig.run("ai.setup.plan", json!({"models": [], "engineDir": deep})).unwrap();
         assert_eq!(plan["problems"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("too long")), cfg!(windows));
+        assert_eq!(plan["folderProblems"].as_array().unwrap().iter().any(|p| p.as_str().unwrap().contains("too long")), cfg!(windows));
+    }
+
+    #[test]
+    fn room_for_the_models_is_not_a_folder_problem() {
+        use crate::ai_setup_cmds::native::{RoomProblems, room_problems};
+        const GB: u64 = 1_000_000_000;
+        // 40 GB free on one drive: the engine fits, the models picked so far don't. Only fewer
+        // models are needed, so the Location page can go on to the Models page.
+        let room = room_problems(true, (Some(40 * GB), 5 * GB), (Some(40 * GB), 36 * GB));
+        assert!(room.folders.is_empty() && room.models.len() == 1, "{room:?}");
+        assert!(room.models[0].contains("Choose fewer models"), "{room:?}");
+        // With fewer models it all fits; with none, so does the engine alone.
+        assert_eq!(room_problems(true, (Some(40 * GB), 5 * GB), (Some(40 * GB), 20 * GB)), RoomProblems::default());
+        assert_eq!(room_problems(true, (Some(40 * GB), 5 * GB), (Some(40 * GB), 0)), RoomProblems::default());
+        // The engine alone does not fit: another folder is the only fix, on either layout.
+        let room = room_problems(true, (Some(GB), 5 * GB), (Some(GB), 0));
+        assert!(room.folders.len() == 1 && room.models.is_empty() && room.folders[0].contains("engine"), "{room:?}");
+        let room = room_problems(false, (Some(GB), 5 * GB), (Some(100 * GB), 36 * GB));
+        assert!(room.folders.len() == 1 && room.models.is_empty(), "{room:?}");
+        // Separate drives: the models' drive is short.
+        let room = room_problems(false, (Some(100 * GB), 5 * GB), (Some(10 * GB), 36 * GB));
+        assert!(room.folders.is_empty() && room.models.len() == 1 && room.models[0].contains("models folder"), "{room:?}");
+        // Free space that can't be told is not a problem.
+        assert_eq!(room_problems(false, (None, 5 * GB), (None, 36 * GB)), RoomProblems::default());
     }
 
     #[test]

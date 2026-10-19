@@ -444,44 +444,65 @@ mod native {
         Some(dir.trim()).filter(|d| !d.is_empty()).and_then(|d| download::free_space(Path::new(d)))
     }
 
+    /// Room shortfalls, split by what fixes them.
+    #[derive(Debug, Default, PartialEq)]
+    pub(super) struct RoomProblems {
+        /// Only another folder fixes these: the engine alone does not fit.
+        pub folders: Vec<String>,
+        /// Fewer models fix these.
+        pub models: Vec<String>,
+    }
+
+    /// What does not fit, given `(free, needed)` bytes for the engine and the models. Free space
+    /// that can't be told is not a problem; [`plan::HEADROOM`] is kept to spare.
+    pub(super) fn room_problems(same_drive: bool, engine: (Option<u64>, u64), models: (Option<u64>, u64)) -> RoomProblems {
+        let short = |have: Option<u64>, need: u64| have.is_some_and(|have| need > 0 && have < need.saturating_add(plan::HEADROOM));
+        let needs = |bytes: u64| photocraft_aisetup::human_bytes(bytes.saturating_add(plan::HEADROOM));
+        let human = |have: Option<u64>| photocraft_aisetup::human_bytes(have.unwrap_or(0));
+        let mut out = RoomProblems::default();
+        let engine_free = if same_drive { models.0 } else { engine.0 };
+        if short(engine_free, engine.1) {
+            out.folders.push(format!(
+                "Not enough room for the engine: {} is free, and it needs {}. Choose another engine folder.",
+                human(engine_free),
+                needs(engine.1)
+            ));
+        } else if same_drive && short(models.0, engine.1.saturating_add(models.1)) {
+            out.models.push(format!(
+                "Not enough room: {} is free, and this needs {}. Choose fewer models or another folder.",
+                human(models.0),
+                needs(engine.1.saturating_add(models.1))
+            ));
+        }
+        if !same_drive && short(models.0, models.1) {
+            out.models.push(format!(
+                "Not enough room for the models: {} is free, and they need {}. Choose fewer models or another models folder.",
+                human(models.0),
+                needs(models.1)
+            ));
+        }
+        out
+    }
+
     pub(super) fn plan_cmd(s: &mut Session, p: &Value) -> Result<Value> {
         let cmd = "ai.setup.plan";
         let choices = choices(s, p, cmd)?;
         let m = manifest(s)?;
         let planned = plan::plan(&m, &choices, &RealDisk).map_err(|e| bad(cmd, e.to_string()))?;
         let layout = Layout::new(&m, &choices).map_err(|e| bad(cmd, e.to_string()))?;
-        // What can be known to stand in the way, before Install is pressed.
-        let mut problems: Vec<String> = Vec::new();
+        // What can be known to stand in the way, before Install is pressed. What is about the
+        // folders blocks the Location page; what fewer models fix waits for the Models page, where
+        // they are chosen.
+        let mut folder_problems: Vec<String> = Vec::new();
         let managed = choices.route == Route::Managed;
         if managed && let Some(why) = m.asset(&choices.variant).ok().and_then(|asset| plan::path_too_long(asset, &layout)) {
-            problems.push(why);
+            folder_problems.push(why);
         }
         let (engine_free, models_free) = (free(&choices.engine_dir).filter(|_| managed), free(&choices.models_dir));
         let same_drive = managed && Path::new(&choices.engine_dir).components().next() == Path::new(&choices.models_dir).components().next();
-        let short = |have: Option<u64>, need: u64| have.is_some_and(|have| need > 0 && have < need.saturating_add(plan::HEADROOM));
-        let needs = |bytes: u64| photocraft_aisetup::human_bytes(bytes.saturating_add(plan::HEADROOM));
-        if same_drive && short(models_free, planned.engine_bytes.saturating_add(planned.models_bytes)) {
-            problems.push(format!(
-                "Not enough room: {} is free, and this needs {}. Choose fewer models or another folder.",
-                photocraft_aisetup::human_bytes(models_free.unwrap_or(0)),
-                needs(planned.engine_bytes.saturating_add(planned.models_bytes))
-            ));
-        } else if !same_drive {
-            if short(engine_free, planned.engine_bytes) {
-                problems.push(format!(
-                    "Not enough room for the engine: {} is free, and it needs {}. Choose another engine folder.",
-                    photocraft_aisetup::human_bytes(engine_free.unwrap_or(0)),
-                    needs(planned.engine_bytes)
-                ));
-            }
-            if short(models_free, planned.models_bytes) {
-                problems.push(format!(
-                    "Not enough room for the models: {} is free, and they need {}. Choose fewer models or another models folder.",
-                    photocraft_aisetup::human_bytes(models_free.unwrap_or(0)),
-                    needs(planned.models_bytes)
-                ));
-            }
-        }
+        let room = room_problems(same_drive, (engine_free, planned.engine_bytes), (models_free, planned.models_bytes));
+        folder_problems.extend(room.folders);
+        let problems: Vec<&String> = folder_problems.iter().chain(&room.models).collect();
         // The ticked gated models whose files are still to come: what needs a Hugging Face sign-in.
         let needs_sign_in: Vec<Value> = hf::gated(&m, &choices.models)
             .into_iter()
@@ -497,7 +518,7 @@ mod native {
             "downloadBytes": planned.download_bytes, "engineBytes": planned.engine_bytes, "modelsBytes": planned.models_bytes,
             "engineDir": choices.engine_dir, "modelsDir": choices.models_dir, "variant": choices.variant,
             "engineFree": engine_free, "modelsFree": models_free, "sameDrive": same_drive,
-            "token": choices.token, "problems": problems,
+            "token": choices.token, "problems": problems, "folderProblems": folder_problems, "modelProblems": room.models,
         }))
     }
 
@@ -974,7 +995,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Plan Local AI Setup",
             menu: &[],
             shortcut: None,
-            params: r##"{"models":[id,…]?=the last setup's,"route":"managed|existing"?,"engineDir":str?,"modelsDir":str?,"variant":"nvidia|nvidia_cu126|amd|intel"?,"recheck":bool=false,"serverFiles":{folder:[file,…]}? (existing: what the server has)} → {steps:[{step,label,bytes,have,done,recheck,skipped}],models:[{id,name,skipped}],downloadBytes,engineBytes,modelsBytes,engineFree,modelsFree,problems:[str]}: what a setup would download and the room it needs, given what is already on disk. Changes nothing"##,
+            params: r##"{"models":[id,…]?=the last setup's,"route":"managed|existing"?,"engineDir":str?,"modelsDir":str?,"variant":"nvidia|nvidia_cu126|amd|intel"?,"recheck":bool=false,"serverFiles":{folder:[file,…]}? (existing: what the server has)} → {steps:[{step,label,bytes,have,done,recheck,skipped}],models:[{id,name,skipped}],downloadBytes,engineBytes,modelsBytes,engineFree,modelsFree,problems:[str],folderProblems:[str] (only other folders fix these),modelProblems:[str] (fewer models fix these)}: what a setup would download and the room it needs, given what is already on disk. Changes nothing"##,
             enabled: can_install,
             run: imp::plan_cmd,
             journal: false,
