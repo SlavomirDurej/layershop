@@ -482,6 +482,28 @@ fn an_engine_that_does_not_start_fails_the_setup_with_its_own_words() {
     assert_eq!(rig.phase(), Phase::Failed);
 }
 
+/// What a virtual machine said (2026-10-20): PyTorch reached for a graphics card that isn't there.
+const NO_CARD_CRASH: &str = "ComfyUI stopped while starting: exit code 0xC0000005, a crash (access violation); it last printed: Windows fatal exception: \
+access violation, in File \"C:\\e\\python_embeded\\Lib\\site-packages\\torch\\cuda\\__init__.py\", line 591 in _lazy_init";
+
+#[test]
+fn an_engine_that_crashes_reaching_for_a_missing_card_says_how_it_can_run() {
+    let refused = |cpu: bool| {
+        let server = FakeServer { refuse: Some(NO_CARD_CRASH.into()), ..FakeServer::default() };
+        let rig = Rig::with(true, FakeComfy { running: false, fails: None, prompts: AtomicU64::new(0) }, server);
+        let e = rig.run_job(rig.job(Choices { cpu, ..rig.choices(&["qwen-image-2-1"]) }), plenty).0.unwrap_err();
+        let Error::Engine(why) = e else { panic!("{e:?}") };
+        why
+    };
+    let why = refused(false);
+    assert!(why.starts_with(NO_CARD_CRASH) && why.contains("on the processor") && why.contains("Cloud models"), "{why}");
+    // On the processor already, a crash is something else: it is told as it is.
+    assert_eq!(refused(true), NO_CARD_CRASH);
+    // Other ways PyTorch says there is no card.
+    assert!(no_card("RuntimeError: Found no NVIDIA driver on your system.") && no_card("AssertionError: Torch not compiled with CUDA enabled"));
+    assert!(!no_card("ImportError: DLL load failed") && !no_card("access violation in python312.dll"));
+}
+
 /// A stand-in runtime DLL: a version resource saying 14.51.
 fn runtime_dll(path: &Path) {
     let mut bytes = b"MZ".to_vec();

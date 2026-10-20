@@ -376,6 +376,12 @@ fn without_a_graphics_card_a_new_comfyui_installs_only_on_the_processor_when_ask
     open(&mut card);
     assert!(gpu_usable(&card) && can_install_new(&card));
     assert_eq!(params(&card)["cpu"], json!(false));
+    // Continue Setup goes by this PC too: a setup begun before the missing card was noticed
+    // continues on the processor; with a card, on it; before the PC is checked, as it was.
+    assert_eq!(resume_params(&app), json!({"cpu": true}));
+    assert_eq!(resume_params(&card), json!({"cpu": false}));
+    card.ui.ai_setup.probe = None;
+    assert_eq!(resume_params(&card), json!({}));
 }
 
 #[test]

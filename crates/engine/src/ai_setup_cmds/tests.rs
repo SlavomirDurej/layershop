@@ -391,6 +391,23 @@ mod native {
         assert_eq!(rig.run("ai.setup.status", json!({})).unwrap()["state"], "interrupted");
     }
 
+    /// Continue Setup sends no choices: the engine runs on the processor when the setup being
+    /// continued did, and as asked when it is asked.
+    #[test]
+    fn continuing_runs_the_engine_where_the_last_setup_did() {
+        let mut rig = Rig::new();
+        fake_engine(&rig);
+        let path = rig.s.ai_setup.env.as_ref().unwrap().state_file.clone();
+        let record = state::load(&path);
+        assert_eq!(rig.run("ai.setup.plan", json!({})).unwrap()["cpu"], false);
+        state::save(&path, &SetupState { choices: Choices { cpu: true, ..record.choices.clone() }, ..record }).unwrap();
+        assert_eq!(rig.run("ai.setup.plan", json!({})).unwrap()["cpu"], true);
+        assert_eq!(rig.run("ai.setup.plan", json!({"cpu": false})).unwrap()["cpu"], false);
+        // Someone's own ComfyUI is never started on the processor by the setup.
+        let existing = rig.existing(&["qwen-image-2-1"]);
+        assert_eq!(rig.run("ai.setup.plan", existing).unwrap()["cpu"], false);
+    }
+
     /// An engine as the setup leaves one, without running a setup.
     fn fake_engine(rig: &Rig) -> PathBuf {
         let root = rig.dir.path().join("engine").join("0.39.0");

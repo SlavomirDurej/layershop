@@ -384,7 +384,8 @@ mod native {
             engine_dir: or_default(text_param(p, "engineDir", cmd)?, &record.choices.engine_dir, &env.engine_dir),
             models_dir: or_default(text_param(p, "modelsDir", cmd)?, &record.choices.models_dir, &env.models_dir),
             variant,
-            cpu: route == Route::Managed && flag_param(p, "cpu", false, cmd)?,
+            // Not given (Continue Setup): as the last setup ran, like the variant.
+            cpu: route == Route::Managed && flag_param(p, "cpu", record.choices.cpu, cmd)?,
             token: !s.ai.hf_token().is_empty(),
             recheck: flag_param(p, "recheck", false, cmd)?,
             server_files: server_files_param(p, cmd)?,

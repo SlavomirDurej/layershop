@@ -726,13 +726,24 @@ fn install(app: &mut PhotocraftApp) {
 }
 
 /// Continue the setup the record remembers.
-fn resume(app: &mut PhotocraftApp) {
+/// What Continue Setup asks for: the setup as it was, except what this PC decides.
+fn resume_params(app: &PhotocraftApp) -> Value {
     let existing = app.ui.ai_setup.status.as_ref().is_some_and(|s| text(s, "/record/route") == "existing");
-    let p = if existing {
+    if existing {
         json!({"url": app.session.prefs().integrations.ai.comfy_url, "serverFiles": app.ui.ai_setup.server.as_ref().and_then(|s| s.get("folders")).cloned()})
     } else {
-        json!({})
-    };
+        // This PC decides how the engine runs, not the setup being continued (one started before
+        // its missing card was noticed): without a card it can use, the processor is the only
+        // way it starts at all.
+        match app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("gpuUsable")).and_then(Value::as_bool) {
+            Some(usable) => json!({"cpu": !usable}),
+            None => json!({}),
+        }
+    }
+}
+
+fn resume(app: &mut PhotocraftApp) {
+    let p = resume_params(app);
     match app.session.execute(START, p) {
         Ok(status) => {
             let s = &mut app.ui.ai_setup;

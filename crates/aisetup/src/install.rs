@@ -646,6 +646,13 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
             None => Err(Error::Engine(format!("ComfyUI is not answering at {}.", outcome.url))),
         };
         if let Err(e) = started {
+            let e = match e {
+                Error::Engine(why) if !job.choices.cpu && no_card(&why) => Error::Engine(format!(
+                    "{why} The engine could not use a graphics card on this PC. Without one it can use (in a virtual machine, say), \
+local models can only run on the processor: open this setup again and continue it, and it starts the engine that way. Cloud models work on any PC."
+                )),
+                e => e,
+            };
             if e != Error::Cancelled {
                 shared.set(i, StepState::Failed, &e.to_string());
             }
@@ -705,6 +712,15 @@ on the processor these models take a very long time per image, if they fit in me
     }
     shared.message("Done");
     Ok(outcome)
+}
+
+/// Did the engine die reaching for a graphics card that isn't there (or a driver that can't
+/// serve it)? PyTorch then crashes in `torch\cuda`, or says it found no NVIDIA driver.
+fn no_card(why: &str) -> bool {
+    let lower = why.to_ascii_lowercase();
+    lower.contains("found no nvidia driver")
+        || lower.contains("torch not compiled with cuda")
+        || ((lower.contains("torch\\cuda") || lower.contains("torch/cuda")) && lower.contains("access violation"))
 }
 
 /// The settings a finished setup leaves: `outcome` applied to the settings as they are now.
