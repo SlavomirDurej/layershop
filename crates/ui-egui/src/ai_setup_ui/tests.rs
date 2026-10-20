@@ -427,6 +427,31 @@ fn without_a_graphics_card_a_new_comfyui_installs_only_on_the_processor_when_ask
 }
 
 #[test]
+fn an_engine_slow_to_start_says_what_it_is_doing_and_shows_its_own_lines() {
+    let (mut app, dir) = app(demo::Scale::Small);
+    assert!(demo::slow_engine(&mut app, dir.path(), false), "the setup reached the engine's step");
+    let c = ctx();
+    draw(&mut app, &c);
+    // The step says where the engine is, from what it printed, and for how long.
+    let status = app.ui.ai_setup.status.clone().unwrap();
+    let verify = list(&status, "/progress/steps").iter().find(|s| text(s, "/key") == "verify").cloned().unwrap();
+    let words = step_words(&verify);
+    assert!(words.starts_with("Starting ComfyUI: loading PyTorch · 3:1"), "{words}");
+    // What's happening? shows the engine's own lines, without their colour codes, and its log.
+    let lines = list(&status, "/engine/output");
+    assert!(lines.len() == 6 && lines.iter().all(|l| !l.as_str().unwrap().contains('\u{1b}')), "{lines:?}");
+    assert!(text(&status, "/engine/log").ends_with("comfyui.log"));
+    app.ui.ai_setup.ask = Some(Ask::Activity);
+    draw(&mut app, &c);
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::Activity), "it stays open while the setup runs");
+    // Stopped: the setup ends, and the window says the engine is not working any more.
+    let _ = app.session.execute("ai.setup.cancel", json!({}));
+    finish(&mut app, &c);
+    assert!(!running(&app));
+    draw(&mut app, &c);
+}
+
+#[test]
 fn a_comfyui_on_this_pc_is_a_choice_of_two_buttons_and_its_models_folder_is_filled_in() {
     let (mut app, dir) = app(demo::Scale::Small);
     app.ui.ai_setup.probe = Some(demo::probe_with_comfy(dir.path()));
@@ -704,6 +729,9 @@ fn the_install_rows_say_what_is_being_done_not_what_to_do() {
     assert_eq!(row("verify", "Start the engine and render a test image", "pending", ""), "Engine start and a test image");
     assert_eq!(row("verify", "", "active", ""), "Starting the engine\u{2026}");
     assert_eq!(row("verify", "", "active", "Starting ComfyUI\u{2026}"), "Starting ComfyUI\u{2026}");
+    // A running clock says it is busy: no dots after it.
+    assert_eq!(row("verify", "", "active", "Starting ComfyUI: loading PyTorch \u{b7} 3:12"), "Starting ComfyUI: loading PyTorch \u{b7} 3:12");
+    assert_eq!(row("verify", "", "active", "Generating with X: step 7 of 20 \u{b7} 1:02:03"), "Generating with X: step 7 of 20 \u{b7} 1:02:03");
     assert_eq!(row("verify", "", "active", "Rendering a test image with Qwen Image 2.1"), "Rendering a test image with Qwen Image 2.1\u{2026}");
     assert_eq!(row("verify", "", "done", ""), "Engine started, test image rendered");
     assert_eq!(row("verify", "", "done", "The test image did not render"), "Engine started \u{b7} The test image did not render");

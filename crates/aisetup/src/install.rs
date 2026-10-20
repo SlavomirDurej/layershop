@@ -630,9 +630,19 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
         shared.set(i, StepState::Active, "Starting the engine");
         shared.message("Starting the engine");
         let cancelled = || shared.cancelled();
+        // A render says only that it renders: what the engine printed says how far (loading the
+        // model, step 7 of 20), and the clock that it still moves, on the processor for an hour.
+        let rendering_since = Mutex::new(None::<Instant>);
         let progress = |_: f32, text: &str| {
-            shared.note(i, text.trim_end_matches('…'));
-            shared.message(text.trim_end_matches('…'));
+            let text = text.trim_end_matches('…');
+            let words = if text.starts_with("Generating") {
+                let since = *rendering_since.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(Instant::now);
+                render_words(text, since.elapsed().as_secs(), env.server.as_deref())
+            } else {
+                text.to_string()
+            };
+            shared.note(i, &words);
+            shared.message(&words);
         };
         let sleep = |d: Duration| (env.sleep)(d);
         let control = Control { cancelled: &cancelled, progress: &progress, sleep: &sleep };
@@ -712,6 +722,16 @@ on the processor these models take a very long time per image, if they fit in me
     }
     shared.message("Done");
     Ok(outcome)
+}
+
+/// The test image's row while it renders: `text` ("Generating with …"), how far the engine says
+/// it is, and for how long it has been at it.
+fn render_words(text: &str, seconds: u64, server: Option<&dyn LocalServer>) -> String {
+    let clock = photocraft_aigen::activity::clock(seconds);
+    match server.and_then(|s| photocraft_aigen::activity::describe(&s.output(80))) {
+        Some(doing) => format!("{text}: {doing} · {clock}"),
+        None => format!("{text} · {clock}"),
+    }
 }
 
 /// Did the engine die reaching for a graphics card that isn't there (or a driver that can't

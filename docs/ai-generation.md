@@ -300,6 +300,12 @@ dialog: the editor stays usable beside it.
   violation, an instruction the processor lacks, a missing DLL), Python's crash-dump line and the
   call it crashed in (not the dump's last, outermost lines), and where its whole output is
   (`%APPDATA%\Photocraft\comfyui.log`).
+- **The engine's step says what the engine is doing**, read from what it prints
+  (`aigen::activity`): "Starting ComfyUI: loading PyTorch · 3:12", then for the test image
+  "Generating with …: loading QwenImage into memory", "step 7 of 20, about 03:50 left", with a
+  clock that keeps moving. **What's happening?** beside it opens the engine's own last 40 lines,
+  live, and where all of it is (`ai.setup.status` › `engine`). A start that hangs ends after 10
+  minutes of real time (a processor-only VM can take minutes to load PyTorch).
 - **It carries on with the window closed.** Close (or the window's ×) while it runs asks
   **Keep Downloading** (the window closes, the setup goes on) or **Stop Download** (it pauses;
   what arrived is kept). The status bar shows how far it is, and clicking it (the bar or its

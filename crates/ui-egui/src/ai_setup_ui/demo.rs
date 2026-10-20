@@ -170,6 +170,91 @@ pub fn install(app: &mut PhotocraftApp, dir: &Path, scale: Scale) -> Arc<Mutex<S
     accepted
 }
 
+/// What the engine printed while starting on the processor in a virtual machine (2026-10-20).
+const SLOW_START: &[&str] = &[
+    "\u{1b}[32m[INFO]\u{1b}[0m setup plugin alembic.autogenerate.comments",
+    "\u{1b}[1m\u{1b}[33m[WARNING]\u{1b}[0m On windows we are currently forcing single GPU mode in ComfyUI due to a Nvidia related issue, if you want to disable this use: --cuda-device all",
+    "\u{1b}[32m[INFO]\u{1b}[0m Adding extra search path diffusion_models C:\\Users\\Admin\\AppData\\Local\\LayerShop\\models\\diffusion_models",
+    "\u{1b}[32m[INFO]\u{1b}[0m Adding extra search path vae C:\\Users\\Admin\\AppData\\Local\\LayerShop\\models\\vae",
+    "\u{1b}[32m[INFO]\u{1b}[0m Found comfy_kitchen backend eager: {'available': True, 'disabled': False, 'unavailable_reason': None}",
+    "\u{1b}[32m[INFO]\u{1b}[0m Found comfy_kitchen backend cuda: {'available': False, 'disabled': False, 'unavailable_reason': 'CUDA not available on this system'}",
+];
+
+/// An engine that takes its time starting, as one without a graphics card does: it reports
+/// where it is until the setup is stopped, and has its own output to show.
+struct SlowEngine;
+
+impl photocraft_aigen::LocalServer for SlowEngine {
+    fn ensure(&self, _: &dyn Transport, _: &photocraft_aigen::Settings, control: &photocraft_aigen::Control<'_>) -> photocraft_aigen::Result<()> {
+        let began = std::time::Instant::now();
+        let doing = photocraft_aigen::activity::describe(&self.output(80)).unwrap_or_default();
+        loop {
+            if (control.cancelled)() {
+                return Err(photocraft_aigen::Error::Cancelled);
+            }
+            // Three minutes in, as the screenshot of a slow start would be.
+            let clock = photocraft_aigen::activity::clock(began.elapsed().as_secs() + 192);
+            (control.progress)(0.02, &format!("Starting ComfyUI: {doing} · {clock}"));
+            (control.sleep)(Duration::from_millis(100));
+        }
+    }
+
+    fn stop(&self) -> bool {
+        false
+    }
+
+    fn state(&self) -> photocraft_aigen::ServerState {
+        photocraft_aigen::ServerState::NotStarted
+    }
+
+    fn find(&self, _: &dyn Transport, _: &str) -> photocraft_aigen::Result<photocraft_aigen::Launch> {
+        Ok(photocraft_aigen::Launch::default())
+    }
+
+    fn output(&self, lines: usize) -> Vec<String> {
+        let all = photocraft_aigen::activity::lines(&SLOW_START.join("\n"));
+        let skip = all.len().saturating_sub(lines);
+        all.into_iter().skip(skip).collect()
+    }
+
+    fn log_file(&self) -> Option<String> {
+        Some("C:\\Users\\Admin\\AppData\\Roaming\\LayerShop\\comfyui.log".into())
+    }
+}
+
+/// A setup whose engine is slow to start ([`SlowEngine`]), on the Install screen at that step;
+/// with `details`, What's happening? pressed. It runs until it is stopped.
+pub fn slow_engine(app: &mut PhotocraftApp, dir: &Path, details: bool) -> bool {
+    install(app, dir, Scale::Small);
+    app.session.ai.server = Some(Arc::new(SlowEngine));
+    app.ui.ai_setup.probe = Some(probe(dir));
+    super::open(app);
+    let s = &mut app.ui.ai_setup;
+    (s.existing, s.url) = (true, "http://127.0.0.1:8188".into());
+    s.server = Some(json!({"folders": {}, "launch": null, "local": true}));
+    s.models = vec!["qwen-image-2-1".into()];
+    super::install(app);
+    // The downloads are a few kilobytes: wait for the engine's step.
+    let began = std::time::Instant::now();
+    let at_engine = |app: &mut PhotocraftApp| {
+        super::refresh_status(app);
+        let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+        super::list(&status, "/progress/steps").iter().any(|s| super::text(s, "/key") == "verify" && super::text(s, "/state") == "active")
+    };
+    while !at_engine(app) {
+        if began.elapsed() > Duration::from_secs(20) {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    std::thread::sleep(Duration::from_millis(150));
+    super::refresh_status(app);
+    if details {
+        app.ui.ai_setup.ask = Some(super::Ask::Activity);
+    }
+    true
+}
+
 /// A ComfyUI that does not answer: a setup against it stops at its last step.
 struct Down;
 
@@ -447,6 +532,11 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         super::open(app);
         app.ui.ai_setup.cpu = ticked;
         return true;
+    }
+    // A setup whose engine takes its time starting (a PC without a graphics card): the Install
+    // screen at that step, and What's happening? open over it.
+    if let Some(details) = page.strip_prefix("install-engine").map(|rest| rest == "-details") {
+        return slow_engine(app, dir, details);
     }
     if page == "env" {
         install(app, dir, Scale::Real);

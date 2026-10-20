@@ -59,6 +59,17 @@ pub trait LocalServer: Send + Sync {
     fn stopped(&self) -> Option<String> {
         None
     }
+    /// The last `lines` lines the server this app started printed, oldest first, as a terminal
+    /// shows them ([`crate::activity::lines`]): what it is doing while a step takes long. Empty
+    /// for a server started elsewhere.
+    fn output(&self, lines: usize) -> Vec<String> {
+        let _ = lines;
+        Vec::new()
+    }
+    /// Where all of its output goes, when this app keeps it.
+    fn log_file(&self) -> Option<String> {
+        None
+    }
 }
 
 /// Does a ComfyUI answer at `base` (no trailing slash)? Anything else on the port does not count.
@@ -502,7 +513,9 @@ mod native {
     use std::time::Duration;
 
     /// How long a started ComfyUI may take to answer (custom nodes can make it slow).
-    const STARTUP_SECONDS: u64 = 300;
+    /// A PC with no graphics card (a virtual machine running it on the processor) took minutes
+    /// to import PyTorch; one that crashes says so at once, so this only ends a hung start.
+    const STARTUP_SECONDS: u64 = 600;
 
     /// What a Windows crash code means, for the ones a Python program that crashes shows.
     pub(super) fn crash_name(code: u32) -> Option<&'static str> {
@@ -587,6 +600,21 @@ mod native {
                 out = format!("{out} (all of its output: {})", log.display());
             }
             out
+        }
+
+        /// The end of what the server printed (its last 64 KB: a long run's log can be large),
+        /// read while it keeps writing.
+        fn recent_text(&self) -> Option<String> {
+            use std::io::{Read, Seek, SeekFrom};
+            const RECENT: u64 = 64 << 10;
+            let mut file = std::fs::File::open(self.log.as_ref()?).ok()?;
+            let len = file.metadata().ok()?.len();
+            file.seek(SeekFrom::Start(len.saturating_sub(RECENT))).ok()?;
+            let mut bytes = Vec::with_capacity(RECENT.min(len) as usize);
+            file.take(RECENT).read_to_end(&mut bytes).ok()?;
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            // Started mid-line: that first piece is not a whole line.
+            Some(if len > RECENT { text.split_once('\n').map_or(String::new(), |(_, rest)| rest.to_string()) } else { text })
         }
 
         /// The last lines the server printed, for an error message.
@@ -680,14 +708,26 @@ mod native {
                 })?;
                 *self.child() = Some(child);
             }
+            // Half-second polls, but the time is what counts: a poll that waits on a busy server
+            // takes longer than half a second, and polls alone once ran a start for 30 minutes.
             let polls = STARTUP_SECONDS * 2;
+            let began = std::time::Instant::now();
             for n in 0..polls {
                 if (control.cancelled)() {
                     // A half-started server is no use to anyone.
                     self.stop();
                     return Err(Error::Cancelled);
                 }
-                (control.progress)(0.01 + 0.03 * (n as f32 / polls as f32), "Starting ComfyUI…");
+                if began.elapsed().as_secs() >= STARTUP_SECONDS {
+                    break;
+                }
+                // What it is doing, from what it last printed, and for how long.
+                let clock = crate::activity::clock(began.elapsed().as_secs());
+                let words = match crate::activity::describe(&self.output(80)) {
+                    Some(doing) => format!("Starting ComfyUI: {doing} · {clock}"),
+                    None => format!("Starting ComfyUI · {clock}"),
+                };
+                (control.progress)(0.01 + 0.03 * (n as f32 / polls as f32), &words);
                 if !self.alive() {
                     // How it ended: the exit code (what a crash was), its last words and where
                     // the rest of its output is.
@@ -723,6 +763,16 @@ mod native {
         fn stopped(&self) -> Option<String> {
             self.alive();
             self.exited().clone()
+        }
+
+        fn output(&self, lines: usize) -> Vec<String> {
+            let all = self.recent_text().map(|text| crate::activity::lines(&text)).unwrap_or_default();
+            let skip = all.len().saturating_sub(lines.min(500));
+            all.into_iter().skip(skip).collect()
+        }
+
+        fn log_file(&self) -> Option<String> {
+            self.log.as_ref().map(|p| p.display().to_string())
         }
 
         fn find(&self, transport: &dyn Transport, url: &str) -> Result<Launch> {
@@ -1178,6 +1228,23 @@ mod tests {
             server.stop();
             assert_eq!(server.stopped(), None);
             let _ = std::fs::remove_file(log);
+        }
+
+        #[test]
+        fn what_the_server_printed_is_read_from_its_end() {
+            let log = std::env::temp_dir().join(format!("photocraft-comfy-output-{}.log", std::process::id()));
+            let server = ComfyProcess::new(Some(log.clone()));
+            assert!(server.output(10).is_empty(), "no log yet");
+            std::fs::write(&log, "\u{1b}[32m[INFO]\u{1b}[0m Total VRAM 0 MB\nChecking\r  5%|5    | 1/20 [00:05<01:40]\r 10%|#    | 2/20 [00:10<01:30]\n\n").unwrap();
+            assert_eq!(server.output(10), ["[INFO] Total VRAM 0 MB", " 10%|#    | 2/20 [00:10<01:30]"]);
+            assert_eq!(server.output(1), [" 10%|#    | 2/20 [00:10<01:30]"]);
+            assert_eq!(server.log_file(), Some(log.display().to_string()));
+            // A long log: only its end is read, from a whole line on.
+            let long = format!("{}\nlast line\n", "x".repeat(200_000));
+            std::fs::write(&log, long).unwrap();
+            assert_eq!(server.output(10), ["last line"]);
+            let _ = std::fs::remove_file(log);
+            assert!(ComfyProcess::new(None).output(10).is_empty() && ComfyProcess::new(None).log_file().is_none());
         }
 
         #[test]

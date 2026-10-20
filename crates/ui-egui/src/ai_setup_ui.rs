@@ -88,6 +88,9 @@ pub enum Ask {
     /// The setup stopped with an error: the whole of it, to read and to copy. It opens when a
     /// setup fails with the wizard open; Show error, or the failed row, opens it again.
     Error,
+    /// What's happening? on the engine's step: what it is doing, for how long, and its own last
+    /// lines, live.
+    Activity,
 }
 
 /// The wizard's state (in `UiState`, so `ui.inspect` reports it).
@@ -1991,7 +1994,9 @@ fn step_words(step: &Value) -> String {
         (_, _, Some(name)) if !note.is_empty() && state != "done" => format!("{name} · {}", tr(note)),
         _ => tr(label).to_string(),
     };
-    if state == "active" { format!("{words}\u{2026}") } else { words }
+    // Busy, unless it ends on a running clock ("· 3:12"), which says so itself.
+    let clock = words.rsplit_once(" \u{b7} ").is_some_and(|(_, end)| !end.is_empty() && end.chars().all(|c| c.is_ascii_digit() || c == ':'));
+    if state == "active" && !clock { format!("{words}\u{2026}") } else { words }
 }
 
 /// What went wrong, in full, for the error window: the setup's own error (or the record's, from
@@ -2049,10 +2054,25 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let active = steps.iter().find(|s| text(s, "/state") == "active");
     if busy {
         let now = active.map_or_else(|| tr(text(&progress, "/message")).to_string(), step_words);
+        // The engine's step can take many minutes (on the processor, an hour): what it is doing
+        // is a click away, in its own words.
+        let engine_step = active.is_some_and(|s| text(s, "/key") == "verify");
+        let mut details = false;
         ui.horizontal(|ui| {
             ui.add(egui::Spinner::new().size(14.0).color(t.accent));
             ui.label(RichText::new(now).font(crate::theme::medium(13.0)).color(t.text));
+            if engine_step {
+                ui.add_space(8.0);
+                let r = ui.add(egui::Label::new(RichText::new(tr("What's happening?")).color(t.accent).size(12.0)).sense(Sense::click()));
+                details = r
+                    .on_hover_text(tr("What the engine is doing, and its own last lines, live"))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked();
+            }
         });
+        if details {
+            app.ui.ai_setup.ask = Some(Ask::Activity);
+        }
         ui.add_space(8.0);
         // The spinner and the active row's bar move between the quarter-second status reads.
         ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
@@ -2476,6 +2496,7 @@ fn questions(app: &mut PhotocraftApp, ctx: &egui::Context) {
         Some(Ask::SignIn) => sign_in_question(app, ctx),
         Some(Ask::NotRunning) => not_running_question(app, ctx),
         Some(Ask::Error) => error_window(app, ctx),
+        Some(Ask::Activity) => activity_window(app, ctx),
         None => {}
     }
 }
@@ -2529,6 +2550,81 @@ fn error_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     }
     if let Some(answer) = answer {
         error_answered(app, ctx, answer);
+    }
+}
+
+/// What's happening? was pressed: the engine's step in words (what it is doing, for how long),
+/// and the engine's own last lines, as they come. Copy takes them; Close closes it.
+fn activity_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    use widgets::{ButtonRole, DialogButton};
+    let t = Tokens::get(ctx);
+    let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
+    let steps = list(&status, "/progress/steps").to_vec();
+    let step = steps.iter().find(|s| text(s, "/key") == "verify");
+    let now = match step.map(|s| text(s, "/state")) {
+        Some("active") => step.map(step_words).unwrap_or_default(),
+        Some("done") => tr("The engine is running.").to_string(),
+        Some("failed") => tr("The engine stopped with an error: Show error says what it was.").to_string(),
+        _ => tr("The engine has not been started yet.").to_string(),
+    };
+    let lines: Vec<String> = list(&status, "/engine/output").iter().filter_map(Value::as_str).map(str::to_string).collect();
+    let log = text(&status, "/engine/log").to_string();
+    let mut answer = None;
+    let buttons = [DialogButton::new(ButtonRole::Default, tr("Close"), 84.0), DialogButton::new(ButtonRole::Apply, tr("Copy"), 84.0)];
+    let screen = ctx.content_rect();
+    let width = 640.0f32.min(screen.width() - 64.0).max(320.0);
+    let modal = egui::Modal::new(egui::Id::new("ai-setup-activity")).show(ctx, |ui| {
+        ui.set_width(width);
+        ui.label(RichText::new(tr("What the engine is doing")).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if step.is_some_and(|s| text(s, "/state") == "active") {
+                ui.add(egui::Spinner::new().size(13.0).color(t.accent));
+            }
+            ui.add(egui::Label::new(RichText::new(&now).font(crate::theme::medium(13.0)).color(t.text)).wrap());
+        });
+        ui.add_space(4.0);
+        let why = tr(
+            "Below are the engine's own last lines, as it prints them. Starting it and loading a model take minutes; on the processor, without a graphics card, a picture can take an hour. While the lines change, it is working.",
+        );
+        ui.add(egui::Label::new(RichText::new(why).color(t.text_dim).size(12.0)).wrap());
+        ui.add_space(10.0);
+        egui::Frame::NONE.fill(t.field).stroke(Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(10.0).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("ai-setup-activity-lines")
+                .max_height((screen.height() - 320.0).clamp(120.0, 340.0))
+                .auto_shrink([false, false])
+                .stick_to_bottom(true)
+                .show(ui, |ui| {
+                    if lines.is_empty() {
+                        ui.label(RichText::new(tr("The engine has not printed anything yet.")).color(t.text_faint).size(12.0));
+                    }
+                    for line in &lines {
+                        ui.add(egui::Label::new(RichText::new(line).font(crate::theme::mono(11.0)).color(t.text_dim)).wrap().selectable(true));
+                    }
+                });
+        });
+        if !log.is_empty() {
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(format!("{} {log}", tr("All of it:"))).color(t.text_faint).size(11.5)).wrap().selectable(true));
+        }
+        ui.add_space(12.0);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    // The lines come with the status, read a few times a second while the setup runs.
+    ctx.request_repaint_after(std::time::Duration::from_millis(250));
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    match answer {
+        Some(ButtonRole::Apply) => ctx.copy_text(format!("{now}\n\n{}", lines.join("\n"))),
+        Some(_) => app.ui.ai_setup.ask = None,
+        None => {}
     }
 }
 

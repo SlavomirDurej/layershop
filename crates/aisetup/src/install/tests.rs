@@ -163,9 +163,15 @@ struct FakeServer {
     /// What `ensure` answers; the settings it was asked to start.
     refuse: Option<String>,
     asked: Mutex<Vec<Settings>>,
+    /// What it last printed.
+    printed: Vec<String>,
 }
 
 impl LocalServer for FakeServer {
+    fn output(&self, lines: usize) -> Vec<String> {
+        self.printed.iter().rev().take(lines).rev().cloned().collect()
+    }
+
     fn ensure(&self, _: &dyn Transport, settings: &Settings, _: &Control<'_>) -> photocraft_aigen::Result<()> {
         self.asked.lock().unwrap().push(settings.clone());
         match &self.refuse {
@@ -480,6 +486,21 @@ fn an_engine_that_does_not_start_fails_the_setup_with_its_own_words() {
     // Everything before it is done and stays done: a repair has nothing to download again.
     assert!(progress.steps.iter().rev().skip(1).all(|s| s.state == StepState::Done));
     assert_eq!(rig.phase(), Phase::Failed);
+}
+
+/// A render that takes long says how far the engine is, and for how long it has been at it.
+#[test]
+fn a_rendering_test_image_says_how_far_the_engine_is() {
+    let rendering = FakeServer {
+        printed: vec!["got prompt".into(), "Requested to load QwenImage".into(), " 35%|###5      | 7/20 [00:41<03:50,  5.20s/it]".into()],
+        ..FakeServer::default()
+    };
+    assert_eq!(render_words("Generating with Qwen Image 2.1", 754, Some(&rendering)), "Generating with Qwen Image 2.1: step 7 of 20, about 03:50 left · 12:34");
+    let loading = FakeServer { printed: vec!["got prompt".into(), "Requested to load QwenImage".into()], ..FakeServer::default() };
+    assert_eq!(render_words("Generating with X", 5, Some(&loading)), "Generating with X: loading QwenImage into memory · 0:05");
+    // A server that prints nothing (or none at all) leaves the clock.
+    assert_eq!(render_words("Generating with X", 61, Some(&FakeServer::default())), "Generating with X · 1:01");
+    assert_eq!(render_words("Generating with X", 0, None), "Generating with X · 0:00");
 }
 
 /// What a virtual machine said (2026-10-20): PyTorch reached for a graphics card that isn't there.

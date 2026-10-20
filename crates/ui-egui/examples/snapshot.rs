@@ -18,7 +18,9 @@
 //! `sign-in-licence` a gated model ticked; `close` the question Close asks while a setup runs;
 //! `not-running` the popup Connect shows when no ComfyUI answers; `aigen-empty` the AI Gen panel
 //! with nothing set up; `install-error` and
-//! `install-failed` a setup stopped at its last step, its error window open and closed; `location-full` a drive too small
+//! `install-failed` a setup stopped at its last step, its error window open and closed;
+//! `install-engine` and `install-engine-details` an engine slow to start, with What's happening?
+//! open over it; `location-full` a drive too small
 //! for the recommended models;
 //! `env` gives the app the stand-in with the wizard closed.
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
@@ -109,7 +111,7 @@ fn main() {
                 && !photocraft_ui_egui::ai_setup_ui::demo::show(&mut app, &demo_dir_in, page)
             {
                 eprintln!(
-                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-comfy, location-comfy, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, sign-in, sign-in-licence, close, not-running, aigen-empty, install-error, install-failed, location-full or env"
+                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-comfy, location-comfy, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, sign-in, sign-in-licence, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full or env"
                 );
                 std::process::exit(2);
             }
