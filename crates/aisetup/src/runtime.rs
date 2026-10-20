@@ -85,9 +85,10 @@ pub fn write_model_paths(layout: &Layout) -> Result<()> {
 
 /// How the installed engine is started: the portable build's own command line (its
 /// `run_nvidia_gpu.bat`), without the browser it would open, with the models folder added.
-pub fn launch(manifest: &Manifest, layout: &Layout) -> Launch {
+/// `cpu`: on the processor, as its `run_cpu.bat` does, for a PC without a graphics card it can use.
+pub fn launch(manifest: &Manifest, layout: &Layout, cpu: bool) -> Launch {
     let script = manifest.comfy.script.replace('/', std::path::MAIN_SEPARATOR_STR);
-    let args = [
+    let mut args = vec![
         // Python's `-s`: the user's own site-packages stay out of the engine.
         "-s".to_string(),
         script,
@@ -96,6 +97,9 @@ pub fn launch(manifest: &Manifest, layout: &Layout) -> Launch {
         "--extra-model-paths-config".into(),
         layout.model_paths.to_string_lossy().into_owned(),
     ];
+    if cpu {
+        args.push("--cpu".into());
+    }
     Launch { python: layout.python.to_string_lossy().into_owned(), folder: layout.engine_root.to_string_lossy().into_owned(), args: join_args(&args) }
 }
 
@@ -244,7 +248,7 @@ mod tests {
     fn the_engine_starts_as_the_portable_build_does_without_a_browser() {
         let dir = tempfile::tempdir().unwrap();
         let layout = layout(dir.path());
-        let l = launch(manifest(), &layout);
+        let l = launch(manifest(), &layout, false);
         assert_eq!(l.python, layout.python.to_string_lossy());
         assert_eq!(l.folder, layout.engine_root.to_string_lossy());
         // The folder has a space in it: the arguments still split back into what was meant.
@@ -252,7 +256,10 @@ mod tests {
         let script = format!("ComfyUI{}main.py", std::path::MAIN_SEPARATOR);
         assert_eq!(args[..5], ["-s", script.as_str(), "--windows-standalone-build", "--disable-auto-launch", "--extra-model-paths-config"]);
         assert_eq!(args[5], layout.model_paths.to_string_lossy());
-        assert!(args[5].ends_with(MODEL_PATHS) && !l.args.contains("--port"));
+        assert!(args[5].ends_with(MODEL_PATHS) && !l.args.contains("--port") && !l.args.contains("--cpu"));
+        // Without a graphics card it can use, the engine runs on the processor.
+        let cpu = split_args(&launch(manifest(), &layout, true).args);
+        assert_eq!((cpu.len(), cpu.last().map(String::as_str)), (args.len() + 1, Some("--cpu")));
     }
 
     #[test]

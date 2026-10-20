@@ -504,6 +504,32 @@ mod native {
     /// How long a started ComfyUI may take to answer (custom nodes can make it slow).
     const STARTUP_SECONDS: u64 = 300;
 
+    /// What a Windows crash code means, for the ones a Python program that crashes shows.
+    pub(super) fn crash_name(code: u32) -> Option<&'static str> {
+        match code {
+            0xC000_0005 => Some("a crash (access violation)"),
+            0xC000_001D => Some("an instruction this processor does not have (a virtual machine can hide some)"),
+            0xC000_00FD => Some("a stack overflow"),
+            0xC000_0135 => Some("a DLL that was not found"),
+            0xC000_0139 => Some("a DLL without a function it should have"),
+            0xC000_0409 => Some("a crash (stack buffer overrun)"),
+            _ => None,
+        }
+    }
+
+    /// Python's crash dump (`faulthandler`, which ComfyUI switches on) in `lines`: its first line
+    /// ("Windows fatal exception: access violation") and the innermost call that is not Python's
+    /// own import machinery. The dump lists the most recent call first.
+    pub(super) fn crash_summary(lines: &[&str]) -> Option<String> {
+        let start = lines.iter().rposition(|l| l.starts_with("Windows fatal exception:") || l.starts_with("Fatal Python error:"))?;
+        let fault = lines.get(start)?;
+        let frame = lines.iter().skip(start.saturating_add(1)).find(|l| l.starts_with("File ") && !l.contains("<frozen "));
+        Some(match frame {
+            Some(frame) => format!("{fault}, in {frame}"),
+            None => (*fault).to_string(),
+        })
+    }
+
     /// ComfyUI as a child process of the app.
     pub struct ComfyProcess {
         child: Mutex<Option<Child>>,
@@ -546,7 +572,10 @@ mod native {
         /// as `0xC0000005`), then its last output and where the rest of it is.
         fn ended(&self, status: Option<std::process::ExitStatus>) -> String {
             let mut out = match status.and_then(|s| s.code()) {
-                Some(code) if !(0..=0xFFFF).contains(&code) => format!("exit code {:#010X}", code as u32),
+                Some(code) if !(0..=0xFFFF).contains(&code) => match crash_name(code as u32) {
+                    Some(name) => format!("exit code {:#010X}, {name}", code as u32),
+                    None => format!("exit code {:#010X}", code as u32),
+                },
                 Some(code) => format!("exit code {code}"),
                 None => "stopped by the system".to_string(),
             };
@@ -565,7 +594,9 @@ mod native {
             let Some(text) = self.log.as_ref().and_then(|p| std::fs::read(p).ok()) else { return String::new() };
             let text = String::from_utf8_lossy(&text);
             let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-            let tail = lines.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" | ");
+            // A crash dump's last lines are its outermost calls, which say nothing: its own
+            // first line, and the call it crashed in, do.
+            let tail = crash_summary(&lines).unwrap_or_else(|| lines.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" | "));
             comfy::clip(&tail, 400)
         }
 
@@ -658,8 +689,10 @@ mod native {
                 }
                 (control.progress)(0.01 + 0.03 * (n as f32 / polls as f32), "Starting ComfyUI…");
                 if !self.alive() {
-                    let tail = self.log_tail();
-                    let why = if tail.is_empty() { String::new() } else { format!(": {tail}") };
+                    // How it ended: the exit code (what a crash was), its last words and where
+                    // the rest of its output is.
+                    let ended = self.exited().clone().unwrap_or_else(|| self.log_tail());
+                    let why = if ended.is_empty() { String::new() } else { format!(": {ended}") };
                     return Err(Error::Server(format!("ComfyUI stopped while starting{why}")));
                 }
                 if is_running(transport, &base) {
@@ -1134,7 +1167,8 @@ mod tests {
             // The stand-in prints its test list and exits; real time passes while it does.
             let c = Control { cancelled: &|| false, progress: &|_, _| {}, sleep: &|d| std::thread::sleep(d.min(std::time::Duration::from_millis(50))) };
             let e = server.ensure(&Fake(None), &s, &c).unwrap_err().to_string();
-            assert!(e.contains("stopped while starting"), "{e}");
+            // The error itself says how it ended and where the whole output is.
+            assert!(e.contains("stopped while starting: exit code ") && e.contains(&log.display().to_string()), "{e}");
             assert_eq!(server.state(), ServerState::NotStarted);
             // How it ended stays known, for a render that loses it: the code, what it printed
             // last, and where the rest is.
@@ -1144,6 +1178,26 @@ mod tests {
             server.stop();
             assert_eq!(server.stopped(), None);
             let _ = std::fs::remove_file(log);
+        }
+
+        #[test]
+        fn a_crash_dump_is_told_by_its_cause_not_its_last_lines() {
+            use super::super::native::{crash_name, crash_summary};
+            // What ComfyUI printed when PyTorch crashed loading in a virtual machine (trimmed).
+            let dump = "Windows fatal exception: access violation\n\nCurrent thread 0x00001a2c (most recent call first):\n  \
+File \"C:\\e\\python_embeded\\Lib\\site-packages\\torch\\__init__.py\", line 281 in _load_dll_libraries\n  \
+File \"<frozen importlib._bootstrap>\", line 488 in _call_with_frames_removed\n  \
+File \"<frozen importlib._bootstrap>\", line 1331 in _find_and_load_unlocked\n  \
+File \"<frozen importlib._bootstrap>\", line 1360 in _find_and_load\n  \
+File \"C:\\e\\ComfyUI\\main.py\", line 254 in <module>\n";
+            let lines: Vec<&str> = dump.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+            let got = crash_summary(&lines).unwrap();
+            assert!(got.starts_with("Windows fatal exception: access violation, in File ") && got.contains("_load_dll_libraries"), "{got}");
+            // A Python error is not a crash dump: its own last line says it.
+            assert_eq!(crash_summary(&["Traceback (most recent call last):", "ImportError: DLL load failed"]), None);
+            assert_eq!(crash_summary(&["Fatal Python error: Aborted"]).as_deref(), Some("Fatal Python error: Aborted"));
+            assert_eq!(crash_summary(&[]), None);
+            assert!(crash_name(0xC000_001D).is_some_and(|n| n.contains("processor")) && crash_name(1).is_none());
         }
 
         #[test]

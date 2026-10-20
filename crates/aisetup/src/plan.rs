@@ -50,6 +50,10 @@ pub struct Choices {
     pub models_dir: String,
     /// Managed: the build for the graphics card (a key of the manifest's assets).
     pub variant: String,
+    /// Managed: no graphics card the engine can use, and the user installs anyway. The engine
+    /// runs on the processor (`--cpu`): it starts, but these models render far too slowly there
+    /// for a test image.
+    pub cpu: bool,
     /// The user stored a Hugging Face token: gated files can be asked for.
     pub token: bool,
     /// Look at the checksum of every file that is there (Repair), not only its size.
@@ -345,7 +349,8 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
     }
     out.steps.push(cheap(Step::Configure, "Set up the models"));
     if choices.test_image {
-        out.steps.push(cheap(Step::Verify, "Start the engine and render a test image"));
+        let label = if managed && choices.cpu { "Start the engine on the processor" } else { "Start the engine and render a test image" };
+        out.steps.push(cheap(Step::Verify, label));
     }
     Ok(out)
 }

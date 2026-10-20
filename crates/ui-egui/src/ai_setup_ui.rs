@@ -98,6 +98,9 @@ pub struct AiSetupUi {
     pub page: Page,
     /// "Use my ComfyUI": nothing is installed but the model files it lacks.
     pub existing: bool,
+    /// No graphics card the engine can use, and "Install anyway" is ticked: a new ComfyUI is
+    /// installed to run on the processor.
+    pub cpu: bool,
     /// The preset in front (`starter`, `recommended`, `everything`), or `custom`.
     pub preset: String,
     /// The ticked models (manifest ids).
@@ -175,6 +178,7 @@ impl Default for AiSetupUi {
             open: false,
             page: Page::Pc,
             existing: false,
+            cpu: false,
             preset: "recommended".into(),
             models: Vec::new(),
             engine_dir: String::new(),
@@ -674,6 +678,8 @@ fn params(app: &PhotocraftApp) -> Value {
         p["route"] = json!("managed");
         p["engineDir"] = json!(s.engine_dir);
         p["variant"] = json!(s.probe.as_ref().map_or("nvidia", |v| text(v, "/variant")));
+        // Without a card it can use, the engine runs on the processor (Install anyway was ticked).
+        p["cpu"] = json!(s.probe.as_ref().and_then(|v| v.get("gpuUsable")).and_then(Value::as_bool) == Some(false));
     }
     p
 }
@@ -972,6 +978,27 @@ fn same_folder(a: &str, b: &str) -> bool {
 /// Did the probe find a ComfyUI on this PC (running, or installed by ComfyUI Desktop)?
 fn detected(app: &PhotocraftApp) -> bool {
     app.ui.ai_setup.probe.as_ref().is_some_and(|p| !list(p, "/probe/comfy/running").is_empty() || p.pointer("/probe/comfy/installed").is_some_and(Value::is_object))
+}
+
+/// The probe found a graphics card the engine can use (an older probe that doesn't say: yes).
+fn gpu_usable(app: &PhotocraftApp) -> bool {
+    app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("gpuUsable")).and_then(Value::as_bool).unwrap_or(true)
+}
+
+/// Can a new ComfyUI be installed here: the system allows it, and there is a card for it to run
+/// on or the user chose the processor.
+fn can_install_new(app: &PhotocraftApp) -> bool {
+    let system = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("canInstall")).and_then(Value::as_bool).unwrap_or(false);
+    system && (gpu_usable(app) || app.ui.ai_setup.cpu)
+}
+
+/// Why a new ComfyUI can't be installed, for the controls that would.
+fn cant_install_why(app: &PhotocraftApp) -> &'static str {
+    if app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("canInstall")).and_then(Value::as_bool).unwrap_or(false) {
+        tr("No graphics card the engine can use was found. Tick Install anyway to run it on the processor, or use cloud models")
+    } else {
+        tr("PhotoCraft can't install the engine on this system")
+    }
 }
 
 /// Does the first screen ask which ComfyUI to use? When one was found and nothing is set up
@@ -1314,13 +1341,25 @@ fn page_pc(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         });
         ui.add_space(8.0);
     }
-    match (&app.ui.ai_setup.probe, app.ui.ai_setup.probe_job) {
+    // No card the engine can use: a new ComfyUI is installed only when asked for knowingly, to
+    // run on the processor (to try the setup in a virtual machine, say). Asked under the card's row.
+    let system = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("canInstall")).and_then(Value::as_bool).unwrap_or(false);
+    let offer_cpu = system && !gpu_usable(app);
+    match (app.ui.ai_setup.probe.clone(), app.ui.ai_setup.probe_job) {
         (Some(probe), _) => {
             // With the app's own engine installed, the row about finding a ComfyUI has been
             // answered above.
             let own = !list(&status, "/engines").is_empty();
-            for check in list(probe, "/checks").iter().filter(|c| !(own && text(c, "/id") == "comfy")) {
+            for check in list(&probe, "/checks").iter().filter(|c| !(own && text(c, "/id") == "comfy")) {
                 info_row(ui, level_icon(text(check, "/level"), &t), tr(text(check, "/title")), tr(text(check, "/detail")), tr(text(check, "/value")));
+                if offer_cpu && text(check, "/id") == "gpu" {
+                    let mut cpu = app.ui.ai_setup.cpu;
+                    widgets::checkbox(ui, &mut cpu, tr("Install anyway, to run on the processor (very slow: for trying the setup out)")).on_hover_text(tr(
+                        "The engine starts without a graphics card. No test image is rendered: one image can take an hour or more on the processor",
+                    ));
+                    app.ui.ai_setup.cpu = cpu;
+                    ui.add_space(6.0);
+                }
             }
         }
         (None, Some(_)) => {
@@ -1384,7 +1423,7 @@ fn choice_button(ui: &mut egui::Ui, rect: Rect, title: &str, sub: &str, badge: &
 
 /// The first screen's question when a ComfyUI was found: keep using it, or install a new one.
 fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
-    let can_install = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("canInstall")).and_then(Value::as_bool).unwrap_or(false);
+    let (can_install, why) = (can_install_new(app), cant_install_why(app));
     let area = ui.available_rect_before_wrap();
     let gap = 12.0;
     let width = ((area.width() - gap) / 2.0).max(0.0);
@@ -1409,7 +1448,7 @@ fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         tr("Recommended"),
         true,
     );
-    if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system")).clicked() {
+    if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_disabled_hover_text(why).clicked() {
         use_managed(app);
     }
 }
@@ -2119,8 +2158,7 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     widgets::hairline(ui);
     ui.add_space(10.0);
     let (page, existing) = (app.ui.ai_setup.page, app.ui.ai_setup.existing);
-    let probe = app.ui.ai_setup.probe.clone().unwrap_or(Value::Null);
-    let can_install = probe.get("canInstall").and_then(Value::as_bool).unwrap_or(false);
+    let (can_install, why_not) = (can_install_new(app), cant_install_why(app));
     let plan = app.ui.ai_setup.plan.clone().unwrap_or(Value::Null);
     let choosing = page == Page::Pc && offer_choice(app);
     // Right: where to next, laid out first; the left takes the room left of it, wrapping rather
@@ -2163,7 +2201,7 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 let instead = ui.add_enabled_ui(can_install, |ui| widgets::secondary_button(ui, tr("Install New ComfyUI Instead"), 0.0)).inner;
                 if instead
                     .on_hover_text(tr("A private copy with its own Python, set up for PhotoCraft. Your ComfyUI is left as it is"))
-                    .on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system"))
+                    .on_disabled_hover_text(why_not)
                     .clicked()
                 {
                     use_managed(app);
@@ -2235,9 +2273,12 @@ fn footer_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, plan: &Value, can_
             if !choosing {
                 let ready = app.ui.ai_setup.probe.is_some() && can_install;
                 let next = ui.add_enabled_ui(ready, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
-                if next
-                    .on_disabled_hover_text(tr("PhotoCraft can't install the engine on this system. Use my ComfyUI, or cloud models, still work"))
-                    .clicked()
+                let why = if gpu_usable(app) {
+                    tr("PhotoCraft can't install the engine on this system. Use my ComfyUI, or cloud models, still work")
+                } else {
+                    cant_install_why(app)
+                };
+                if next.on_disabled_hover_text(why).clicked()
                 {
                     use_managed(app);
                 }

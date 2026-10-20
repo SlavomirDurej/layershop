@@ -531,6 +531,23 @@ fn the_cpp_runtime_is_put_beside_the_engines_python_and_continue_mends_an_engine
 }
 
 #[test]
+fn without_a_graphics_card_the_engine_runs_on_the_processor_and_renders_no_test_image() {
+    let rig = Rig::new();
+    let (result, progress) = rig.run_job(rig.job(Choices { cpu: true, ..rig.choices(&["qwen-image-2-1"]) }), plenty);
+    let done = result.unwrap();
+    // Started as ComfyUI's own run_cpu.bat starts it, and so in the settings it leaves.
+    assert!(done.launch.as_ref().is_some_and(|l| l.args.ends_with("--cpu")), "{:?}", done.launch);
+    assert!(done.test.is_none() && done.test_error.clone().unwrap().contains("processor"));
+    assert_eq!(rig.comfy.prompts.load(Ordering::SeqCst), 0, "no test image on the processor");
+    let verify = progress.steps.last().unwrap();
+    assert_eq!((verify.state, verify.label.as_str()), (StepState::Done, "Start the engine on the processor"));
+    // With a card, the same setup renders its test image.
+    let rig = Rig::new();
+    let done = rig.run(&["qwen-image-2-1"]).0.unwrap();
+    assert!(done.launch.is_some_and(|l| !l.args.contains("--cpu")) && done.test.is_some());
+}
+
+#[test]
 fn a_test_image_that_does_not_render_is_not_a_failed_install() {
     let rig = Rig::with(true, FakeComfy { running: true, fails: Some(CARD_OUT_OF_MEMORY), prompts: AtomicU64::new(0) }, FakeServer::default());
     let (result, progress) = rig.run(&["qwen-image-2-1"]);

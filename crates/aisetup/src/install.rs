@@ -577,7 +577,7 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
             runtime::free_port(runtime::FIRST_PORT)
                 .ok_or_else(|| Error::Engine("No free port was found for the engine (8190 to 8389 are all taken).".into()))?
         };
-        (runtime::url(port), Some(runtime::launch(&job.manifest, &layout)), port)
+        (runtime::url(port), Some(runtime::launch(&job.manifest, &layout, job.choices.cpu)), port)
     } else {
         (job.url.clone(), job.launch.clone(), 0)
     };
@@ -651,7 +651,17 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
             }
             return Err(e);
         }
-        match configure::test_model(&settings, &configured.ready).filter(|m| outcome.installed.contains(&m.id) || !managed) {
+        let test_model = configure::test_model(&settings, &configured.ready).filter(|m| outcome.installed.contains(&m.id) || !managed);
+        match test_model {
+            // On the processor these models take far too long (and too much memory) for a test.
+            Some(_) if managed && job.choices.cpu => {
+                outcome.test_error = Some(
+                    "The engine is installed and runs on the processor: this PC has no graphics card it can use. No test image was rendered: \
+on the processor these models take a very long time per image, if they fit in memory at all. Cloud models work on any PC."
+                        .into(),
+                );
+                shared.set(i, StepState::Done, "Running on the processor");
+            }
             Some(model) => {
                 shared.note(i, &format!("Rendering a test image with {}", model.name));
                 let job =

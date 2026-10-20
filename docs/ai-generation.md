@@ -288,6 +288,18 @@ dialog: the editor stays usable beside it.
 | 4. Install | One row per file with its progress; overall size, speed and time left; Pause | Yes |
 | 5. Ready | The test image, how long it took, how many models the panel lists | Starts the engine |
 
+- **No graphics card the engine can use** (a virtual machine's display adapter, Windows' basic
+  one, or none) stops step 1: the card row says local models can't run here and points to cloud
+  models, and Next stays off. Ticking **Install anyway, to run on the processor** under that row
+  installs the engine anyway and starts it with ComfyUI's `--cpu` (also in the settings it
+  leaves); the last step then only checks that the engine starts, with no test image, as these
+  models take an hour or more per image on a processor if they fit in memory at all. For trying
+  the setup out in a VM. (`ai.setup.probe` says `gpuUsable`; `ai.setup.plan`/`install` take
+  `cpu`.)
+- **When the engine dies while starting**, the error gives Windows' exit code in words (access
+  violation, an instruction the processor lacks, a missing DLL), Python's crash-dump line and the
+  call it crashed in (not the dump's last, outermost lines), and where its whole output is
+  (`%APPDATA%\Photocraft\comfyui.log`).
 - **It carries on with the window closed.** Close (or the window's ×) while it runs asks
   **Keep Downloading** (the window closes, the setup goes on) or **Stop Download** (it pauses;
   what arrived is kept). The status bar shows how far it is, and clicking it (the bar or its

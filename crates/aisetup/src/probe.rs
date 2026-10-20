@@ -148,6 +148,9 @@ pub struct Check {
 const NVIDIA_DEFAULT_DRIVER: u32 = 580;
 /// What the first screen says to someone who has a ComfyUI already, under where it is.
 const HAS_COMFY: &str = "Choose below: use it with the models it has, or install a private copy beside it (yours is left as it is).";
+/// Why a PC without a card the engine can use (a virtual machine, say) can't run local models.
+const NO_CARD: &str = "Local models need a graphics card the engine can use (NVIDIA works best), and none was found. A virtual machine usually has none. \
+Cloud models work on any PC. The engine can still be installed to run on the processor, but these models are far too slow there.";
 /// The smallest drive worth offering: the engine alone is about 8 GB while it unpacks.
 const WORTH_LISTING: u64 = 10_000_000_000;
 /// Under this much installed memory (with a little for the system that reserves), larger models
@@ -262,6 +265,12 @@ impl Probe {
         self.gpus.iter().max_by_key(|g| (rank(g), g.vram_mb.unwrap_or(0)))
     }
 
+    /// The card the engine would use, when it is one ComfyUI has a build for. A virtual machine's
+    /// display adapter, or Windows' basic one, is not: the engine's PyTorch can't run on it.
+    pub fn usable_gpu(&self) -> Option<&Gpu> {
+        self.gpu().filter(|g| g.vendor != Vendor::Other)
+    }
+
     /// The build of ComfyUI for this machine's card (a key of the manifest's assets), and
     /// whether that pairing has been tried: only NVIDIA has.
     pub fn variant(&self) -> (&'static str, bool) {
@@ -325,22 +334,10 @@ impl Probe {
                         "Not tested: ComfyUI has a build for this card, but these models have only been run on NVIDIA cards. Cloud models work on any PC.",
                         memory,
                     ),
-                    _ => row(
-                        "gpu",
-                        Level::Warn,
-                        gpu.name.clone(),
-                        "No supported graphics card was found. Local models need one (NVIDIA works best); cloud models work on any PC.",
-                        memory,
-                    ),
+                    _ => row("gpu", Level::Stop, gpu.name.clone(), NO_CARD, "can't run local models".into()),
                 }
             }
-            None => row(
-                "gpu",
-                Level::Warn,
-                "No graphics card found".into(),
-                "Local models need a graphics card (NVIDIA works best). Cloud models work on any PC.",
-                String::new(),
-            ),
+            None => row("gpu", Level::Stop, "No graphics card found".into(), NO_CARD, "can't run local models".into()),
         });
         // Memory: models load through it on their way to the card, and Windows' paging file makes
         // up what it lacks only while the paging file may grow.
@@ -637,8 +634,15 @@ mod tests {
         let level = |p: &Probe| p.checks().into_iter().find(|c| c.id == "gpu").map(|c| (c.level, c.detail)).unwrap();
         assert!(matches!(level(&with("NVIDIA GeForce GTX 1080 Ti", "591.59")), (Level::Info, d) if d.contains("CUDA 12.6")));
         assert!(matches!(level(&with("AMD Radeon RX 7900 XTX", "31.0")), (Level::Warn, d) if d.contains("Not tested")));
-        assert!(matches!(level(&Probe { gpus: Vec::new(), ..probe() }), (Level::Warn, d) if d.contains("Cloud models")));
-        assert!(matches!(level(&with("Microsoft Basic Display Adapter", "")), (Level::Warn, _)));
+        // No card the engine can use (a virtual machine's): local models stop here.
+        let none = Probe { gpus: Vec::new(), ..probe() };
+        assert!(matches!(level(&none), (Level::Stop, d) if d.contains("Cloud models") && d.contains("virtual machine")));
+        let vm = with("VMware SVGA 3D", "9.17");
+        assert!(matches!(level(&vm), (Level::Stop, _)) && matches!(level(&with("Microsoft Basic Display Adapter", "")), (Level::Stop, _)));
+        assert!(none.usable_gpu().is_none() && vm.usable_gpu().is_none() && vm.gpu().is_some());
+        assert!(with("AMD Radeon RX 7900 XTX", "31.0").usable_gpu().is_some() && with("NVIDIA GeForce RTX 3060", "591.59").usable_gpu().is_some());
+        // Installing stays possible (on the processor): the system is fine, only the card is missing.
+        assert!(vm.can_install());
     }
 
     #[test]

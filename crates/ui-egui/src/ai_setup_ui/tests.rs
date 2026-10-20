@@ -352,6 +352,33 @@ fn an_installed_setup_can_lose_a_model_or_everything_without_being_taken_for_a_n
 }
 
 #[test]
+fn without_a_graphics_card_a_new_comfyui_installs_only_on_the_processor_when_asked() {
+    let (mut app, dir) = app(demo::Scale::Small);
+    app.ui.ai_setup.probe = Some(demo::probe_without_card(dir.path()));
+    let c = ctx();
+    open(&mut app);
+    // The card's row stops local models, and nothing can be installed yet.
+    let checks = app.ui.ai_setup.probe.clone().unwrap()["checks"].clone();
+    let gpu = list(&checks, "").iter().find(|c| c["id"] == "gpu").cloned().unwrap();
+    assert_eq!((gpu["level"].as_str(), gpu["title"].as_str()), (Some("stop"), Some("VMware SVGA 3D")));
+    assert!(!gpu_usable(&app) && !can_install_new(&app));
+    assert!(cant_install_why(&app).contains("Install anyway"));
+    draw(&mut app, &c);
+    // Install anyway: on the processor, which the setup is told.
+    app.ui.ai_setup.cpu = true;
+    assert!(can_install_new(&app));
+    use_managed(&mut app);
+    assert_eq!(params(&app)["cpu"], json!(true));
+    draw(&mut app, &c);
+    // With a card, the processor is never asked for, even when the box was ticked before.
+    let (mut card, _dir2) = self::app(demo::Scale::Small);
+    card.ui.ai_setup.cpu = true;
+    open(&mut card);
+    assert!(gpu_usable(&card) && can_install_new(&card));
+    assert_eq!(params(&card)["cpu"], json!(false));
+}
+
+#[test]
 fn a_comfyui_on_this_pc_is_a_choice_of_two_buttons_and_its_models_folder_is_filled_in() {
     let (mut app, dir) = app(demo::Scale::Small);
     app.ui.ai_setup.probe = Some(demo::probe_with_comfy(dir.path()));

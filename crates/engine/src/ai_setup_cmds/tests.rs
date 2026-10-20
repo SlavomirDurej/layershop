@@ -241,7 +241,7 @@ mod native {
         let rows: Vec<&str> = rows.into_iter().filter(|r| *r != "memory").collect();
         assert_eq!(rows, ["os", "gpu", "disk", "comfy", "net"]);
         assert_eq!(seen["defaults"]["modelsDir"], rig.models_dir().to_string_lossy().as_ref());
-        assert!(seen["variant"].is_string() && seen["canInstall"].is_boolean());
+        assert!(seen["variant"].is_string() && seen["canInstall"].is_boolean() && seen["gpuUsable"].is_boolean());
         assert!(!rig.s.ai_setup.running(), "nothing was started by odd parameters");
         assert_eq!(rig.net.served.load(Ordering::SeqCst), 0);
         assert!(!rig.dir.path().join("engine").exists());

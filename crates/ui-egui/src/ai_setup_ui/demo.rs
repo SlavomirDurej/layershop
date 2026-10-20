@@ -257,6 +257,14 @@ pub fn probe(dir: &Path) -> Value {
     probe_with(dir, Existing::default())
 }
 
+/// A virtual machine's: its display adapter is no card the engine can use.
+pub fn probe_without_card(dir: &Path) -> Value {
+    use photocraft_aisetup::probe::{Gpu, Vendor};
+    let mut p: photocraft_aisetup::probe::Probe = serde_json::from_value(probe(dir)["probe"].clone()).unwrap_or_default();
+    p.gpus = vec![Gpu { name: "VMware SVGA 3D".into(), vendor: Vendor::Other, vram_mb: Some(256), driver: "9.17.7.4".into() }];
+    describe(dir, &p)
+}
+
 /// [`probe`] on a machine with ComfyUI Desktop installed but not running, its models in the
 /// folders of [`comfy_folders`].
 pub fn probe_with_comfy(dir: &Path) -> Value {
@@ -287,9 +295,16 @@ fn probe_with(dir: &Path, comfy: Existing) -> Value {
         hosts: vec![host("github.com"), host("huggingface.co")],
         vc_runtime: VcRuntime::Bundled,
     };
+    describe(dir, &p)
+}
+
+/// `ai.setup.probe`'s answer for `p`.
+fn describe(dir: &Path, p: &photocraft_aisetup::probe::Probe) -> Value {
     let (variant, tested) = p.variant();
+    let vram = p.usable_gpu().and_then(|g| g.vram_mb).map(|mb| (mb as f64 / 1024.0).round() as u64);
     json!({
-        "probe": p, "checks": p.checks(), "variant": variant, "variantTested": tested, "canInstall": p.can_install(), "vramGb": 24,
+        "probe": p, "checks": p.checks(), "variant": variant, "variantTested": tested, "canInstall": p.can_install(),
+        "gpuUsable": p.usable_gpu().is_some(), "vramGb": vram,
         "defaults": {"engineDir": dir.join("engine").to_string_lossy(), "modelsDir": dir.join("models").to_string_lossy()},
     })
 }
@@ -405,6 +420,15 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         app.ui.ai_setup.probe = Some(probe(dir));
         super::refresh_status(app);
         let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+        return true;
+    }
+    // A PC without a graphics card the engine can use (a virtual machine): the first screen
+    // stops there, unless installing on the processor is ticked (`pc-no-card-cpu`).
+    if let Some(ticked) = page.strip_prefix("pc-no-card").map(|rest| rest == "-cpu") {
+        install(app, dir, Scale::Real);
+        app.ui.ai_setup.probe = Some(probe_without_card(dir));
+        super::open(app);
+        app.ui.ai_setup.cpu = ticked;
         return true;
     }
     if page == "env" {
