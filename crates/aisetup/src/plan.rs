@@ -423,7 +423,7 @@ mod tests {
     #[test]
     fn shared_files_are_planned_once_for_every_preset() {
         let m = manifest();
-        for preset in ["starter", "recommended", "everything"] {
+        for preset in ["light", "starter", "recommended", "everything"] {
             let ids: Vec<&str> = m.preset(preset).iter().map(String::as_str).collect();
             let p = plan(m, &Choices { token: true, ..choices(&ids) }, &Fake::default()).unwrap();
             let files: Vec<String> = keys(&p).into_iter().filter(|k| k.starts_with("file:")).collect();
@@ -569,7 +569,7 @@ mod tests {
     fn the_layout_keeps_one_engine_per_version_and_the_models_outside_it() {
         let m = manifest();
         let layout = Layout::new(m, &choices(&[])).unwrap();
-        assert_eq!(layout.engine_root, PathBuf::from(root("engine")).join("0.39.0"));
+        assert_eq!(layout.engine_root, PathBuf::from(root("engine")).join("0.42.1"));
         assert_eq!(layout.archive, PathBuf::from(root("engine")).join("ComfyUI_windows_portable_nvidia.7z"));
         assert_eq!(layout.python, layout.engine_root.join("python_embeded").join("python.exe"));
         assert_eq!(layout.script, layout.engine_root.join("ComfyUI").join("main.py"));

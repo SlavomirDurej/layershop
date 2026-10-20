@@ -333,11 +333,24 @@ fn suggest(app: &mut PhotocraftApp) {
     }
 }
 
-/// The probe answered: keep it.
+/// The probe answered: keep it. A selection the user has not touched yet becomes the preset
+/// suggested for the card (Light on a small one).
 fn probed(app: &mut PhotocraftApp, found: Value) {
     app.ui.ai_setup.probe = Some(found);
     suggest(app);
+    let untouched = app.ui.ai_setup.models.is_empty() || app.ui.ai_setup.models == preset_models(app, &app.ui.ai_setup.preset);
+    let default = app.ui.ai_setup.preset == AiSetupUi::default().preset;
     refresh_manifest(app);
+    if untouched && default {
+        let preset = suggested_preset(app);
+        app.ui.ai_setup.models = preset_models(app, &preset);
+        app.ui.ai_setup.preset = preset;
+    }
+}
+
+/// The preset the manifest suggests for this PC's card.
+fn suggested_preset(app: &PhotocraftApp) -> String {
+    app.ui.ai_setup.manifest.as_ref().map(|m| text(m, "/suggested")).filter(|p| !p.is_empty()).unwrap_or("recommended").to_string()
 }
 
 /// Open the wizard on the screen that fits where things stand.
@@ -369,6 +382,9 @@ pub fn open(app: &mut PhotocraftApp) {
         _ => Page::Pc,
     };
     if app.ui.ai_setup.models.is_empty() {
+        if app.ui.ai_setup.preset == AiSetupUi::default().preset {
+            app.ui.ai_setup.preset = suggested_preset(app);
+        }
         let preset = app.ui.ai_setup.preset.clone();
         app.ui.ai_setup.models = preset_models(app, &preset);
     }
@@ -1112,7 +1128,7 @@ fn name_preset(app: &mut PhotocraftApp) {
         b.sort();
         a == b
     };
-    app.ui.ai_setup.preset = ["starter", "recommended", "everything"].into_iter().find(|p| same(p)).unwrap_or("custom").to_string();
+    app.ui.ai_setup.preset = PRESETS.into_iter().map(|(key, _)| key).find(|p| same(p)).unwrap_or("custom").to_string();
 }
 
 // ---------- the test image ----------
@@ -1690,6 +1706,9 @@ fn licence_note(model: &Value) -> String {
     }
 }
 
+/// The presets of the Models step, smallest first: `light` is the one for a small card.
+const PRESETS: [(&str, &str); 4] = [("light", "Light"), ("starter", "Starter"), ("recommended", "Recommended"), ("everything", "Everything")];
+
 fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let t = Tokens::get(ui.ctx());
     heading(ui, "Choose your models", "Each model is a few large files. Files that models share are downloaded once. You can add more later.");
@@ -1699,7 +1718,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let mut chosen_preset = None;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        for (key, label) in [("starter", "Starter"), ("recommended", "Recommended"), ("everything", "Everything")] {
+        for (key, label) in PRESETS {
             let bytes = number(&manifest, &format!("/presets/{key}/bytes"));
             if widgets::pill_tab(ui, &format!("{} · {}", tr(label), download_size(bytes)), app.ui.ai_setup.preset == key).clicked() {
                 chosen_preset = Some(key);
@@ -1715,6 +1734,11 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     ui.add_space(8.0);
     let vram = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("vramGb")).and_then(Value::as_u64);
+    // On a small card the light preset's models come first, and say why.
+    let for_card: Vec<String> = match text(&manifest, "/suggested") {
+        "light" => list(&manifest, "/presets/light/models").iter().filter_map(Value::as_str).map(str::to_string).collect(),
+        _ => Vec::new(),
+    };
     // Files this app downloaded for its own engine are its to delete again.
     let managed = !list(&status, "/engines").is_empty() && !running(app);
     let needing = needs_sign_in(app);
@@ -1749,6 +1773,9 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             inner.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 10.0;
                 link(app, ui, &licence_note(&model), text(&model, "/licence/url"));
+                if let (true, Some(gb)) = (for_card.contains(&id), vram) {
+                    ui.label(RichText::new(format!("{} {gb} GB {}", tr("suggested for your"), tr("card"))).color(t.accent_text).size(11.5));
+                }
                 match (text(&model, "/fit"), vram) {
                     ("tooLarge", Some(gb)) => {
                         ui.label(RichText::new(format!("{} {gb} GB", tr("too large for your card:"))).color(t.warning).size(11.5));

@@ -60,12 +60,13 @@ fn fit(model: &photocraft_aisetup::manifest::ModelEntry, vram_gb: Option<u64>) -
     }
 }
 
-/// What the wizard offers, with sizes: `{comfy, models, presets}`. `installed` (manifest ids)
-/// marks the models that are there already.
+/// What the wizard offers, with sizes: `{comfy, models, presets, suggested}`. `installed`
+/// (manifest ids) marks the models that are there already. A small card is offered the light
+/// preset, its models listed first.
 fn manifest_value(m: &Manifest, installed: &[String], vram_gb: Option<u64>) -> Value {
     let models: Vec<Value> = m
-        .models
-        .iter()
+        .offered(vram_gb)
+        .into_iter()
         .map(|model| {
             let files: Vec<Value> =
                 model.files.iter().filter_map(|key| m.files.get(key).map(|f| json!({"key": key, "bytes": f.size, "gated": f.gated}))).collect();
@@ -82,7 +83,10 @@ fn manifest_value(m: &Manifest, installed: &[String], vram_gb: Option<u64>) -> V
         m.presets.iter().map(|(name, ids)| (name.clone(), json!({"models": ids, "bytes": m.download_bytes(ids)}))).collect();
     let assets: serde_json::Map<String, Value> =
         m.comfy.assets.iter().map(|(name, a)| (name.clone(), json!({"bytes": a.size, "unpackedBytes": a.unpacked_bytes}))).collect();
-    json!({"version": m.version, "checked": m.checked, "comfy": {"version": m.comfy.version, "builds": assets}, "models": models, "presets": presets})
+    json!({
+        "version": m.version, "checked": m.checked, "comfy": {"version": m.comfy.version, "builds": assets}, "models": models, "presets": presets,
+        "suggested": m.suggested_preset(vram_gb),
+    })
 }
 
 fn vram_param(p: &Value, cmd: &str) -> Result<Option<u64>> {
@@ -996,7 +1000,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Local AI Models to Install",
             menu: &[],
             shortcut: None,
-            params: r##"{"vramGb":int?} → {comfy:{version,builds},models:[{id,name,about,family,does:[create|edit|fill],licence:{name,url,commercial (true|false|null: read the licence)},page,gated (needs a Hugging Face sign-in),minVramGb,testedVramGb,bytes (downloaded alone),files:[{key,bytes,gated}],installed,fit:tested|untested|tooLarge}],presets:{starter|recommended|everything:{models,bytes (shared files counted once)}}}: what the setup can install"##,
+            params: r##"{"vramGb":int?} → {comfy:{version,builds},models:[{id,name,about,family,does:[create|edit|fill],licence:{name,url,commercial (true|false|null: read the licence)},page,gated (needs a Hugging Face sign-in),minVramGb,testedVramGb,bytes (downloaded alone),files:[{key,bytes,gated}],installed,fit:tested|untested|tooLarge}],presets:{light|starter|recommended|everything:{models,bytes (shared files counted once)}},suggested:light|recommended (the preset to start on: light on a card under 16 GB, its models then listed first)}: what the setup can install"##,
             enabled: always,
             run: imp::manifest_cmd,
             journal: false,

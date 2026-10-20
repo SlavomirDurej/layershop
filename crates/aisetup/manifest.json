@@ -1,37 +1,37 @@
 {
   "version": 1,
-  "checked": "2026-10-13",
+  "checked": "2026-10-20",
   "comfy": {
-    "version": "0.39.0",
+    "version": "0.42.1",
     "python": "python_embeded/python.exe",
     "script": "ComfyUI/main.py",
     "assets": {
       "nvidia": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.39.0/ComfyUI_windows_portable_nvidia.7z",
-        "size": 2003629308,
-        "sha256": "3dca347842ed1c6c833105fafb1669284685a3e54df41578d5f94bcc898ae039",
-        "unpackedBytes": 4406417632,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_nvidia.7z",
+        "size": 2018444114,
+        "sha256": "496afd18790ec685d99ebba2edf200d7371a29fbdd3a992bb0f4f52f244a6874",
+        "unpackedBytes": 4444541117,
         "longestPath": 160
       },
       "nvidia_cu126": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.39.0/ComfyUI_windows_portable_nvidia_cu126.7z",
-        "size": 1895335518,
-        "sha256": "c42e7d5f6a5e931f6551dcf102d739a55c5f4a4df921f748e1de9de9f648d6a2",
-        "unpackedBytes": 5580961635,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_nvidia_cu126.7z",
+        "size": 1910153206,
+        "sha256": "0506abc6563ea5928a052fe0bc0b32c2a063098558bd593fe39345a27f1e47fc",
+        "unpackedBytes": 5619088436,
         "longestPath": 160
       },
       "amd": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.39.0/ComfyUI_windows_portable_amd.7z",
-        "size": 1621312076,
-        "sha256": "19be1e3c8690c4f9eeefb0f2ee8f835a98e2fbf33cd9b80d0ca309f4c86d37c1",
-        "unpackedBytes": 6153559583,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_amd.7z",
+        "size": 1636139353,
+        "sha256": "8af051e342de65e5ca2d9f43a5f0b11a6377da10bd96159dc41e8722cc5841fc",
+        "unpackedBytes": 6191685727,
         "longestPath": 191
       },
       "intel": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.39.0/ComfyUI_windows_portable_intel.7z",
-        "size": 1436509991,
-        "sha256": "50f629c3743b1fb64509d8e582ae30b06105d9614587a514e79ac9f3c3f62939",
-        "unpackedBytes": 5313461686,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_intel.7z",
+        "size": 1451207360,
+        "sha256": "a1e03d31ea364af2f80820461cd0c5ae5bbba4b562c023c1f43b2cf65541d4ab",
+        "unpackedBytes": 5351586975,
         "longestPath": 159
       }
     }
@@ -82,6 +82,21 @@
       "url": "https://huggingface.co/Comfy-Org/flux2-dev/resolve/main/split_files/vae/flux2-vae.safetensors",
       "size": 336213556,
       "sha256": "d64f3a68e1cc4f9f4e29b6e0da38a0204fe9a49f2d4053f0ec1fa1ca02f9c4b5"
+    },
+    "diffusion_models/moss_image_sft_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/diffusion_models/moss_image_sft_int8_convrot.safetensors",
+      "size": 5413698958,
+      "sha256": "b4d1475bc7eeffd7b809e82ea13a1fba1fb85c4e18365af3813722faa5c0fe4f"
+    },
+    "text_encoders/qwen3.5_9b_w4a8_gptq.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/text_encoders/qwen3.5_9b_w4a8_gptq.safetensors",
+      "size": 7343591088,
+      "sha256": "4cc6a1543ad2061806da46f35f90cadb4801dcba246c44782cf42ec0feb6407c"
+    },
+    "vae/flux2-vae_small.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/MOSS-Image/resolve/main/vae/flux2-vae_small.safetensors",
+      "size": 249521340,
+      "sha256": "d8d52ba036475f5fb07c8b435e176d3d97ebfa82f0d1a1c317f9cc1e25bd013b"
     },
     "diffusion_models/krea2_turbo_int8_convrot.safetensors": {
       "url": "https://huggingface.co/Comfy-Org/Krea-2/resolve/main/diffusion_models/krea2_turbo_int8_convrot.safetensors",
@@ -206,6 +221,23 @@
       "testedVramGb": [24]
     },
     {
+      "id": "moss-image",
+      "name": "MOSS Image",
+      "about": "Pictures from a prompt at the selection's own size and shape. Light on graphics memory.",
+      "family": "mossImage",
+      "files": [
+        "diffusion_models/moss_image_sft_int8_convrot.safetensors",
+        "text_encoders/qwen3.5_9b_w4a8_gptq.safetensors",
+        "vae/flux2-vae_small.safetensors"
+      ],
+      "does": ["create"],
+      "licence": { "name": "Apache 2.0", "url": "https://huggingface.co/OpenMOSS-Team/MOSS-Image-SFT/blob/main/LICENSE", "commercial": true },
+      "page": "https://huggingface.co/Comfy-Org/MOSS-Image",
+      "gated": false,
+      "minVramGb": null,
+      "testedVramGb": [24]
+    },
+    {
       "id": "krea-2-turbo",
       "name": "Krea 2 Turbo",
       "about": "Stylish, detailed pictures from a prompt, in eight steps.",
@@ -299,12 +331,14 @@
     }
   ],
   "presets": {
+    "light": ["moss-image"],
     "starter": ["qwen-image-2-1"],
     "recommended": ["qwen-image-2-1", "z-image-turbo", "flux-3-klein"],
     "everything": [
       "qwen-image-2-1",
       "z-image-turbo",
       "flux-3-klein",
+      "moss-image",
       "krea-2-turbo",
       "ideogram-4",
       "hidream-o1",

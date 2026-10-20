@@ -102,6 +102,48 @@ fn opening_fills_in_the_folders_and_the_recommended_models() {
     assert!(!dir.path().join("engine").exists(), "looking changes nothing");
 }
 
+/// A card with little memory starts on Light (MOSS Image), whether the probe has answered when
+/// the wizard opens or answers after; a selection the user made stays theirs.
+#[test]
+fn a_small_card_starts_on_the_light_preset() {
+    let small = |dir: &std::path::Path| {
+        let mut found = demo::probe(dir);
+        found["vramGb"] = json!(8);
+        found
+    };
+    let (mut app, dir) = app(demo::Scale::Real);
+    app.ui.ai_setup.probe = Some(small(dir.path()));
+    open(&mut app);
+    assert_eq!((app.ui.ai_setup.preset.as_str(), app.ui.ai_setup.models.clone()), ("light", vec!["moss-image".to_string()]));
+    assert_eq!(list(app.ui.ai_setup.manifest.as_ref().unwrap(), "/models")[0]["id"], "moss-image");
+    let c = ctx();
+    app.ui.ai_setup.page = Page::Models;
+    draw(&mut app, &c);
+    assert_eq!(app.ui.ai_setup.plan.as_ref().unwrap()["models"][0]["id"], "moss-image");
+
+    // Opened before the probe answered: Recommended, until the answer says the card is small.
+    let (mut app, dir) = app_without_probe();
+    open(&mut app);
+    assert_eq!(app.ui.ai_setup.preset, "recommended");
+    probed(&mut app, small(dir.path()));
+    assert_eq!((app.ui.ai_setup.preset.as_str(), app.ui.ai_setup.models.clone()), ("light", vec!["moss-image".to_string()]));
+
+    // Ticked by hand first: the answer changes nothing.
+    let (mut app, dir) = app_without_probe();
+    open(&mut app);
+    toggle_model(&mut app, "krea-2-turbo", true);
+    let chosen = app.ui.ai_setup.models.clone();
+    probed(&mut app, small(dir.path()));
+    assert_eq!((app.ui.ai_setup.preset.as_str(), app.ui.ai_setup.models.clone()), ("custom", chosen));
+}
+
+/// [`app`] before this PC was looked at.
+fn app_without_probe() -> (PhotocraftApp, tempfile::TempDir) {
+    let (mut app, dir) = app(demo::Scale::Real);
+    app.ui.ai_setup.probe = None;
+    (app, dir)
+}
+
 #[test]
 fn a_setup_runs_from_the_wizard_to_its_test_image() {
     let (mut app, dir) = app(demo::Scale::Small);
@@ -324,7 +366,7 @@ fn an_installed_setup_can_lose_a_model_or_everything_without_being_taken_for_a_n
     assert!(set_up(&app), "the record says it is installed");
     assert_eq!(crate::menus::menu_items(&app).into_iter().find(|i| i.id == OPEN).unwrap().label, "Local AI Setup\u{2026}");
     let summary = summary(&app);
-    assert!(summary["text"].as_str().unwrap().contains("Installed: ComfyUI 0.39.0 \u{b7} 2 models"), "{summary}");
+    assert!(summary["text"].as_str().unwrap().contains("Installed: ComfyUI 0.42.1 \u{b7} 2 models"), "{summary}");
     assert_eq!((summary["installed"].as_bool(), summary["managed"].as_bool()), (Some(true), Some(true)));
     // The first screen says what is there, and the Models screen marks both installed.
     for page in [Page::Pc, Page::Models] {

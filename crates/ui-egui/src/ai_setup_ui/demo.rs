@@ -257,6 +257,14 @@ pub fn probe(dir: &Path) -> Value {
     probe_with(dir, Existing::default())
 }
 
+/// [`probe`] with a smaller card: an 8 GB one, which is offered the Light preset.
+pub fn probe_small_card(dir: &Path) -> Value {
+    use photocraft_aisetup::probe::{Gpu, Vendor};
+    let mut p: photocraft_aisetup::probe::Probe = serde_json::from_value(probe(dir)["probe"].clone()).unwrap_or_default();
+    p.gpus = vec![Gpu { name: "NVIDIA GeForce RTX 4060".into(), vendor: Vendor::Nvidia, vram_mb: Some(8188), driver: "591.59".into() }];
+    describe(dir, &p)
+}
+
 /// A virtual machine's: its display adapter is no card the engine can use.
 pub fn probe_without_card(dir: &Path) -> Value {
     use photocraft_aisetup::probe::{Gpu, Vendor};
@@ -316,11 +324,12 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
     use photocraft_aisetup::plan::{Choices, Route};
     use photocraft_aisetup::state::{Phase, SetupState, save};
     use photocraft_aisetup::{manifest::split_key, runtime};
-    let root = dir.join("engine").join("0.39.0");
+    let manifest = small_manifest()?;
+    let version = manifest.comfy.version.clone();
+    let root = dir.join("engine").join(&version);
     std::fs::create_dir_all(root.join("python_embeded")).ok()?;
     std::fs::write(root.join("python_embeded").join("python.exe"), vec![0u8; 4000]).ok()?;
-    runtime::write_marker(&root, &runtime::Marker { version: "0.39.0".into(), variant: "nvidia".into(), sha256: "ab".into() }).ok()?;
-    let manifest = small_manifest()?;
+    runtime::write_marker(&root, &runtime::Marker { version: version.clone(), variant: "nvidia".into(), sha256: "ab".into() }).ok()?;
     for key in manifest.files.keys() {
         let (folder, name) = split_key(key)?;
         std::fs::create_dir_all(dir.join("models").join(folder)).ok()?;
@@ -338,7 +347,7 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
             ..Choices::default()
         },
         port: 8190,
-        comfy_version: "0.39.0".into(),
+        comfy_version: version,
         installed: models,
         ..SetupState::default()
     };
@@ -352,6 +361,7 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// already; `pc-comfy` and `location-comfy` the first screen and Use my ComfyUI's on a machine
 /// with ComfyUI Desktop; `models-hf`, `models-licence` and `models-ready` the Models screen with
 /// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
+/// `models-light` the Models screen on an 8 GB card (the Light preset, MOSS Image first),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
 /// asks while a setup runs; `aigen-empty` the AI Gen panel with nothing set up and no ComfyUI
 /// answering; `install-error` and `install-failed` a setup that stopped at its last
@@ -385,6 +395,13 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         if asked {
             super::install_clicked(app);
         }
+        return true;
+    }
+    if page == "models-light" {
+        install(app, dir, Scale::Real);
+        app.ui.ai_setup.probe = Some(probe_small_card(dir));
+        super::open(app);
+        app.ui.ai_setup.page = Page::Models;
         return true;
     }
     if page == "close" {

@@ -174,8 +174,8 @@ mod native {
         }
         // What can be installed is no secret: the bundled manifest, with its totals.
         let m = s.execute("ai.setup.manifest", json!({"vramGb": 24})).unwrap();
-        assert_eq!(m["comfy"]["version"], "0.39.0");
-        assert_eq!(m["models"].as_array().unwrap().len(), 8);
+        assert_eq!(m["comfy"]["version"], "0.42.1");
+        assert_eq!(m["models"].as_array().unwrap().len(), 9);
         assert_eq!(
             (m["presets"]["starter"]["bytes"].as_u64(), m["presets"]["recommended"]["models"].as_array().map(Vec::len)),
             (Some(18_520_930_264), Some(3))
@@ -185,9 +185,16 @@ mod native {
             (qwen["id"].as_str(), qwen["installed"].as_bool(), qwen["fit"].as_str(), qwen["licence"]["commercial"].as_bool()),
             (Some("qwen-image-2-1"), Some(false), Some("tested"), Some(false))
         );
+        assert_eq!(m["suggested"], "recommended");
         // A smaller card than any it has run on: not tested, and it says so instead of guessing.
-        assert_eq!(s.execute("ai.setup.manifest", json!({"vramGb": 8})).unwrap()["models"][0]["fit"], "untested");
-        assert_eq!(s.execute("ai.setup.manifest", json!({})).unwrap()["models"][0]["fit"], "untested");
+        // It starts on the light preset, its model listed first.
+        let small = s.execute("ai.setup.manifest", json!({"vramGb": 8})).unwrap();
+        assert_eq!((small["suggested"].as_str(), small["models"][0]["id"].as_str()), (Some("light"), Some("moss-image")));
+        assert_eq!(small["presets"]["light"]["models"], json!(["moss-image"]));
+        assert_eq!(small["models"][0]["fit"], "untested");
+        assert_eq!(small["models"][1]["id"], "qwen-image-2-1");
+        let unknown = s.execute("ai.setup.manifest", json!({})).unwrap();
+        assert_eq!((unknown["suggested"].as_str(), unknown["models"][0]["fit"].as_str()), (Some("recommended"), Some("untested")));
         let status = s.execute("ai.setup.status", json!({})).unwrap();
         assert_eq!((status["available"].as_bool(), status["state"].as_str(), status["running"].as_bool()), (Some(false), Some("none"), Some(false)));
         assert_eq!(s.execute("ai.setup.cancel", json!({})).unwrap()["stopping"], false);

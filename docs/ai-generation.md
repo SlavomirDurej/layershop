@@ -284,7 +284,7 @@ dialog: the editor stays usable beside it.
 |---|---|---|
 | 1. Your PC | Windows version, graphics card and its memory, driver, free space, an existing ComfyUI, whether the download servers answer | No |
 | 2. Location | The engine folder (default `%LOCALAPPDATA%\LayerShop\engine`) and the models folder (default beside it; any drive), with the room needed against the room free | No |
-| 3. Models | Starter / Recommended / Everything, and a checklist: size, what each is for, its licence and whether that allows commercial work, a gated model's two steps (Sign in with Hugging Face, Accept the licence), "not tested on cards this size" | No |
+| 3. Models | Light / Starter / Recommended / Everything (Light, MOSS Image alone, on a card under 16 GB, its model listed first and "suggested for your card"), and a checklist: size, what each is for, its licence and whether that allows commercial work, a gated model's two steps (Sign in with Hugging Face, Accept the licence), "not tested on cards this size" | No |
 | 4. Install | One row per file with its progress; overall size, speed and time left; Pause | Yes |
 | 5. Ready | The test image, how long it took, how many models the panel lists | Starts the engine |
 
@@ -312,7 +312,15 @@ dialog: the editor stays usable beside it.
 - **Every file is checked against a pinned sha256** before it takes its final name. A file that
   arrives wrong is fetched once more, then refused with both checksums in the message.
 - **Shared files are downloaded once** (Ideogram 4 uses Qwen Image 2.1's text encoder), and the
-  totals count them once: Starter 18.5 GB, Recommended 44.1 GB, Everything 169.1 GB.
+  totals count them once: Light 13.0 GB, Starter 18.5 GB, Recommended 44.1 GB, Everything
+  182.1 GB.
+- **A small card starts on Light.** With less than 16 GB of video memory
+  (`photocraft_aisetup::manifest::LIGHT_BELOW_VRAM_GB`), the Models step starts on the Light
+  preset, MOSS Image (13.0 GB, Apache 2.0, ungated), and lists it first; larger cards and
+  unknown ones start on Recommended. A selection the user has already changed is kept when the
+  probe answers. `ai.setup.manifest` says `suggested` (`light` | `recommended`) and orders
+  `models` to match. "Not tested on cards this size" still shows: MOSS Image has only been run
+  on a 24 GB card.
 - **Gated models** (FLUX.3 Klein: Black Forest Labs' FLUX Kommunity License) can be
   downloaded only by someone signed in to Hugging Face who accepted the licence on the model's
   page. Its row says where the user stands and the one thing to do next: **Step 1 of 2: Sign in
@@ -343,7 +351,7 @@ dialog: the editor stays usable beside it.
     links to Hugging Face's settings, where the app is revoked. **How does this work?** links to
     <https://layershop.aardvarkstudios.net/hugging-face/>.
 - **The engine** is ComfyUI's official Windows portable build, pinned by version and sha256
-  (0.39.0 today; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
+  (0.42.1 today, since 2026-10-20 for MOSS Image; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
   builds, the last two untested). It is unpacked in pure Rust; the archive is refused whole if
   any entry would land outside the engine folder. It gets a port of its own (8190 or the next
   free one), so it never collides with a ComfyUI on 8188 or ComfyUI Desktop on 8000, and it is
@@ -620,8 +628,8 @@ rewriting the prompt as a caption), which can rewrite a layout away.
 
 MOSS Image came to ComfyUI on 2026-10-16, after its 0.41.0 release, so it needs a later
 ComfyUI (ComfyUI Desktop has it); an older server rejects its text encoder type, and the error
-says to update. The Local AI setup's pinned ComfyUI (0.39) predates it, so the wizard does not
-offer it yet; Scan Server finds it on a ComfyUI that has its files (`moss_image_sft_…` or
+says to update. The Local AI setup pins ComfyUI 0.42.1, which has it, and offers it (the Light
+preset on a small card); Scan Server finds it on a ComfyUI that has its files (`moss_image_sft_…` or
 `moss_image_base_…`, `qwen3.5_9b_w4a8_gptq…`, `flux2-vae_small…`).
 
 **Custom workflow.** For anything the built-in graphs don't cover (LoRA stacks, prompt

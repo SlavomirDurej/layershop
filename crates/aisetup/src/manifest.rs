@@ -26,6 +26,8 @@ const ASSET_HOST: &str = "github.com";
 const MAX_FILE_BYTES: u64 = 96 << 30;
 const MAX_FILES: usize = 2000;
 const MAX_MODELS: usize = 500;
+/// A card with less video memory than this is offered the `light` preset first.
+pub const LIGHT_BELOW_VRAM_GB: u64 = 16;
 
 /// One downloadable file: where it is, how large, and its checksum.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -121,7 +123,7 @@ pub struct Manifest {
     /// By `folder/name`, as the file sits in a ComfyUI `models` directory.
     pub files: BTreeMap<String, FileEntry>,
     pub models: Vec<ModelEntry>,
-    /// Named selections of model ids: `starter`, `recommended`, `everything`.
+    /// Named selections of model ids: `light`, `starter`, `recommended`, `everything`.
     #[serde(default)]
     pub presets: BTreeMap<String, Vec<String>>,
 }
@@ -241,6 +243,22 @@ impl Manifest {
         self.presets.get(name).map_or(&[], Vec::as_slice)
     }
 
+    /// The preset the wizard starts on for a card with `vram_gb` of memory: `light` on a card
+    /// with less than [`LIGHT_BELOW_VRAM_GB`], `recommended` otherwise and when it is not known.
+    pub fn suggested_preset(&self, vram_gb: Option<u64>) -> &'static str {
+        let small = vram_gb.is_some_and(|gb| gb < LIGHT_BELOW_VRAM_GB);
+        if small && !self.preset("light").is_empty() { "light" } else { "recommended" }
+    }
+
+    /// The models in the order the wizard lists them for a card with `vram_gb` of memory: the
+    /// suggested preset's first, the rest in the manifest's order.
+    pub fn offered(&self, vram_gb: Option<u64>) -> Vec<&ModelEntry> {
+        let first = self.preset(self.suggested_preset(vram_gb));
+        let (mut out, rest): (Vec<&ModelEntry>, Vec<&ModelEntry>) = self.models.iter().partition(|m| first.contains(&m.id));
+        out.extend(rest);
+        out
+    }
+
     /// The models named by `ids`, in the manifest's order; an unknown id is an error.
     pub fn select(&self, ids: &[String]) -> Result<Vec<&ModelEntry>> {
         if let Some(unknown) = ids.iter().find(|id| self.model(id).is_none()) {
@@ -302,9 +320,9 @@ mod tests {
     #[test]
     fn the_bundled_manifest_is_valid_and_pins_one_comfyui() {
         let m = bundled();
-        assert_eq!(m.comfy.version, "0.39.0");
+        assert_eq!(m.comfy.version, "0.42.1");
         assert_eq!(m.comfy.assets.keys().map(String::as_str).collect::<Vec<_>>(), ["amd", "intel", "nvidia", "nvidia_cu126"]);
-        assert!(m.comfy.assets.values().all(|a| a.url.contains("/v0.39.0/")));
+        assert!(m.comfy.assets.values().all(|a| a.url.contains("/v0.42.1/")));
         assert!(m.asset("nvidia").is_ok() && m.asset("voodoo").is_err());
         // Measured from each archive's header (`--example archive_contents`).
         assert!(m.comfy.assets.values().all(|a| a.unpacked_bytes > a.size && (100..=200).contains(&a.longest_path)));
@@ -318,16 +336,19 @@ mod tests {
     fn presets_total_what_the_website_says() {
         let m = bundled();
         let gb = |ids: &[String]| (m.download_bytes(ids) as f64 / 1e9 * 10.0).round() / 10.0;
+        assert_eq!(gb(m.preset("light")), 13.0);
         assert_eq!(gb(m.preset("starter")), 18.5);
         assert_eq!(gb(m.preset("recommended")), 44.1);
-        // FLUX.3 Klein (2026-10-16) is 7.4 GB less than the FLUX.2 Klein 9B it replaced.
-        assert_eq!(gb(m.preset("everything")), 169.1);
+        // FLUX.3 Klein (2026-10-16) is 7.4 GB less than the FLUX.2 Klein 9B it replaced; MOSS
+        // Image (2026-10-20) shares no file with the others.
+        assert_eq!(gb(m.preset("everything")), 182.1);
         assert_eq!(m.preset("everything").len(), m.models.len());
         assert!(m.preset("nope").is_empty());
         for (id, alone) in [
             ("qwen-image-2-1", 18.5),
             ("z-image-turbo", 14.6),
             ("flux-3-klein", 11.0),
+            ("moss-image", 13.0),
             ("krea-2-turbo", 19.0),
             ("ming-image-0-1-design", 25.9),
             ("ernie-image-turbo", 24.1),
@@ -457,6 +478,27 @@ mod tests {
             assert!(Manifest::parse(junk).is_err(), "{junk}");
         }
         assert!(Manifest::parse(&" ".repeat((4 << 20) + 1)).is_err());
+    }
+
+    /// A card with little memory starts on Light, MOSS Image, listed first; a larger card, or one
+    /// whose memory is not known, on Recommended, in the manifest's order.
+    #[test]
+    fn a_small_card_is_offered_the_light_preset_first() {
+        let m = bundled();
+        assert_eq!(m.preset("light"), ["moss-image"]);
+        for (vram, preset) in [(Some(4), "light"), (Some(8), "light"), (Some(15), "light"), (Some(16), "recommended"), (Some(24), "recommended"), (None, "recommended")] {
+            assert_eq!(m.suggested_preset(vram), preset, "{vram:?}");
+        }
+        let order = |vram| m.offered(vram).iter().map(|x| x.id.as_str()).collect::<Vec<_>>();
+        assert_eq!(order(Some(8))[0], "moss-image");
+        assert_eq!(order(Some(8)).len(), m.models.len());
+        assert_eq!(order(Some(24)), m.models.iter().map(|x| x.id.as_str()).collect::<Vec<_>>());
+        assert_eq!(order(None), order(Some(24)));
+        // A manifest without a Light preset suggests Recommended on any card.
+        let mut without = m.clone();
+        without.presets.remove("light");
+        assert_eq!(without.suggested_preset(Some(8)), "recommended");
+        assert_eq!(without.offered(Some(8)).first().map(|x| x.id.as_str()), Some("qwen-image-2-1"));
     }
 
     #[test]
