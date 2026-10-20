@@ -444,7 +444,8 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// `models`, `install` (a setup under way) or `ready` (one that has just finished); `installed`
 /// and `installed-models` are the first screen and the Models screen of a setup that is there
 /// already; `pc-comfy` and `location-comfy` the first screen and Use my ComfyUI's on a machine
-/// with ComfyUI Desktop; `models-hf`, `models-licence` and `models-ready` the Models screen with
+/// with ComfyUI Desktop; `pc-checking` the first screen while this PC is looked at (for real);
+/// `models-hf`, `models-licence` and `models-ready` the Models screen with
 /// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
 /// `models-light` the Models screen on an 8 GB card (the Light preset, MOSS Image first),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
@@ -537,6 +538,14 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
     // screen at that step, and What's happening? open over it.
     if let Some(details) = page.strip_prefix("install-engine").map(|rest| rest == "-details") {
         return slow_engine(app, dir, details);
+    }
+    // The first look at this PC, under way: the real one, in the background, so the screen in
+    // front is its steps (this machine's, for the few seconds they take).
+    if page == "pc-checking" {
+        install(app, dir, Scale::Real);
+        app.background_jobs = true;
+        super::open(app);
+        return app.ui.ai_setup.probe_job.is_some();
     }
     if page == "env" {
         install(app, dir, Scale::Real);

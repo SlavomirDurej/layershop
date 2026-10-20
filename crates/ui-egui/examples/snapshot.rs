@@ -111,7 +111,7 @@ fn main() {
                 && !photocraft_ui_egui::ai_setup_ui::demo::show(&mut app, &demo_dir_in, page)
             {
                 eprintln!(
-                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-comfy, location-comfy, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, sign-in, sign-in-licence, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full or env"
+                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-checking, pc-comfy, location-comfy, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, sign-in, sign-in-licence, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full or env"
                 );
                 std::process::exit(2);
             }

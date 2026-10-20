@@ -417,6 +417,39 @@ impl Probe {
     }
 }
 
+/// The steps of [`collect`], in the order it takes them: what the wizard shows while it looks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Stage {
+    /// Windows, the graphics card, memory and the drives.
+    Hardware,
+    /// A ComfyUI that is running, or installed.
+    Comfy,
+    /// The hosts the downloads come from.
+    Servers,
+}
+
+impl Stage {
+    pub const ALL: [Stage; 3] = [Stage::Hardware, Stage::Comfy, Stage::Servers];
+
+    /// What is being done, as a progress message (the wizard knows the step by it).
+    pub fn message(self) -> &'static str {
+        match self {
+            Stage::Hardware => "Checking your hardware",
+            Stage::Comfy => "Looking for ComfyUI",
+            Stage::Servers => "Checking the download servers",
+        }
+    }
+
+    /// Where it has got to, for a progress bar.
+    pub fn fraction(self) -> f32 {
+        match self {
+            Stage::Hardware => 0.1,
+            Stage::Comfy => 0.4,
+            Stage::Servers => 0.7,
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::*;
@@ -455,8 +488,17 @@ mod native {
     }
 
     /// Look at this machine. `urls` are the addresses a ComfyUI is looked for at (the one in the
-    /// settings, and the usual ports). Takes a few seconds: run it off the UI thread.
-    pub fn collect(manifest: &Manifest, transport: &dyn Transport, fetch: &dyn Fetch, urls: &[String], cancelled: &dyn Fn() -> bool) -> Probe {
+    /// settings, and the usual ports). Takes a few seconds: run it off the UI thread. `stage` is
+    /// told each step as it begins.
+    pub fn collect(
+        manifest: &Manifest,
+        transport: &dyn Transport,
+        fetch: &dyn Fetch,
+        urls: &[String],
+        cancelled: &dyn Fn() -> bool,
+        stage: &dyn Fn(Stage),
+    ) -> Probe {
+        stage(Stage::Hardware);
         let (os, system_gpus, drives) = system();
         let smi = output("nvidia-smi", &["--query-gpu=name,memory.total,driver_version", "--format=csv,noheader,nounits"])
             .map(|t| parse_nvidia_smi(&t))
@@ -466,6 +508,7 @@ mod native {
         if cancelled() {
             return probe;
         }
+        stage(Stage::Comfy);
         for url in urls.iter().take(8) {
             if !probe.comfy.running.contains(url) && photocraft_aigen::launch::is_running(transport, url) {
                 probe.comfy.running.push(url.clone());
@@ -481,6 +524,10 @@ mod native {
         {
             probe.comfy.models = photocraft_aigen::launch::models_folders_here(launch);
         }
+        if cancelled() {
+            return probe;
+        }
+        stage(Stage::Servers);
         // One real file from each host: what will be downloaded is what is asked about.
         let runtime = manifest.comfy.assets.values().next().map(|a| ("github.com", a.url.as_str(), a.size));
         let model = manifest.files.values().find(|f| !f.gated).map(|f| ("huggingface.co", f.url.as_str(), f.size));
@@ -532,6 +579,13 @@ mod tests {
     }
 
     #[test]
+    fn the_steps_are_told_in_order_each_by_a_message_of_its_own() {
+        let messages: std::collections::BTreeSet<_> = Stage::ALL.iter().map(|s| s.message()).collect();
+        assert_eq!(messages.len(), Stage::ALL.len());
+        assert!(Stage::ALL.windows(2).all(|w| w[0] < w[1] && w[0].fraction() < w[1].fraction()));
+    }
+
+    #[test]
     fn the_first_screen_reads_as_the_walkthrough_shows_it() {
         let p = probe();
         let rows: Vec<(String, Level, String, String)> = p.checks().into_iter().map(|c| (c.id, c.level, c.title, c.value)).collect();
@@ -562,7 +616,7 @@ mod tests {
         let fetch = crate::fetch::UreqFetch::default();
         let transport = photocraft_aigen::UreqTransport::new();
         let urls = ["http://127.0.0.1:8188".to_string(), "http://127.0.0.1:8000".to_string()];
-        let found = collect(m, &transport, &fetch, &urls, &|| false);
+        let found = collect(m, &transport, &fetch, &urls, &|| false, &|step| println!("{}", step.message()));
         println!("{}", serde_json::to_string_pretty(&found).unwrap());
         for check in found.checks() {
             println!("{:?} {} | {} | {}", check.level, check.title, check.detail, check.value);

@@ -466,9 +466,13 @@ fn a_comfyui_on_this_pc_is_a_choice_of_two_buttons_and_its_models_folder_is_fill
     assert!(comfy["detail"].as_str().unwrap().contains(&folders[0]), "{comfy}");
     assert!(offer_choice(&app));
     draw(&mut app, &c);
-    // Without one, it is the usual Next.
+    // Without one, the same two buttons: one this look missed can still be connected.
     let (mut plain, _dir2) = self::app(demo::Scale::Small);
     open(&mut plain);
+    assert!(offer_choice(&plain) && !detected(&plain));
+    draw(&mut plain, &c);
+    // Before the look has answered, there is nothing to choose yet.
+    plain.ui.ai_setup.probe = None;
     assert!(!offer_choice(&plain));
     // Continue with My ComfyUI: its models folder is filled in, the one it saves new models to
     // first, and the others are offered.
@@ -807,4 +811,34 @@ fn a_setup_that_stops_with_an_error_shows_all_of_it_in_a_window_to_copy() {
     demo::fail(&mut long, other.path(), Some(demo::TRACEBACK));
     draw(&mut long, &c);
     assert_eq!(failure(&long), demo::TRACEBACK);
+}
+
+/// The first look at this PC is its steps in the middle of the screen, ticked as the job reports
+/// each, with no Next under them; a setup that is there already keeps its rows while it looks.
+#[test]
+fn the_first_look_at_this_pc_shows_its_steps() {
+    let (mut app, dir0) = app_without_probe();
+    // A look that is under way (its job stands in here: no test asks this PC what it has).
+    app.ui.ai_setup.probe_job = Some(u64::MAX);
+    open(&mut app);
+    assert!(first_look(&app) && !offer_choice(&app));
+    assert_eq!(probe_stage(&app), Stage::Hardware, "a job that has said nothing yet is on its first step");
+    for step in Stage::ALL {
+        assert_eq!(stage_of(step.message()), step);
+    }
+    assert_eq!(stage_of("something else"), Stage::Hardware);
+    let c = ctx();
+    for _ in 0..3 {
+        c.run_ui(Default::default(), |ui| page_checking(&app, ui)).textures_delta.clear();
+    }
+    // Answered: the rows and the two buttons.
+    app.ui.ai_setup.probe_job = None;
+    app.ui.ai_setup.probe = Some(demo::probe(dir0.path()));
+    assert!(!first_look(&app) && offer_choice(&app));
+    // Set up already: Check Again looks with the setup's own rows in place, not the steps.
+    let (mut installed, dir) = self::app(demo::Scale::Small);
+    demo::pretend_installed(&installed, dir.path()).unwrap();
+    (installed.ui.ai_setup.probe, installed.ui.ai_setup.probe_job) = (None, Some(u64::MAX));
+    open(&mut installed);
+    assert!(!first_look(&installed));
 }

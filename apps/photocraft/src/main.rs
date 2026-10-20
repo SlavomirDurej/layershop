@@ -762,6 +762,10 @@ fn main() -> eframe::Result {
                     hf_client_id: photocraft_aisetup::hf::client_id(),
                 });
             }
+            // Long commands and file opens run as background jobs with progress and Cancel (#210).
+            // Set before the wizard is offered: its look at this PC (seconds of system queries)
+            // must run beside the first frames, never hold the window back.
+            app.background_jobs = std::env::var_os("PHOTOCRAFT_INLINE_JOBS").is_none();
             if setup_ai {
                 photocraft_ui_egui::ai_setup_ui::open(&mut app);
             } else if control.is_none() {
@@ -774,8 +778,6 @@ fn main() -> eframe::Result {
             // Only the title bar's free gap drags the window, never the menus (mac_window.rs).
             #[cfg(target_os = "macos")]
             mac_window::disable_native_title_drag();
-            // Long commands and file opens run as background jobs with progress and Cancel (#210).
-            app.background_jobs = std::env::var_os("PHOTOCRAFT_INLINE_JOBS").is_none();
             // Displays and their profiles (#569): wait briefly so the first frames already use
             // the right profile; a slower reading is applied when it arrives, and the shell reads
             // again when the displays may have changed.

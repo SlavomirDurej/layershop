@@ -432,8 +432,9 @@ mod native {
             "Check This PC",
             false,
             move |ctx| {
-                ctx.progress(0.1, "Looking at this PC\u{2026}");
-                let found = probe::collect(&m, transport.as_ref(), env.fetch.as_ref(), &urls, &|| ctx.cancelled());
+                // Each step as it begins: the wizard lists them while it waits.
+                let stage = |step: probe::Stage| ctx.progress(step.fraction(), step.message());
+                let found = probe::collect(&m, transport.as_ref(), env.fetch.as_ref(), &urls, &|| ctx.cancelled(), &stage);
                 ctx.check()?;
                 Ok(found)
             },

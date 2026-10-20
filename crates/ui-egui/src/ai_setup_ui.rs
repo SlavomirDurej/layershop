@@ -19,6 +19,8 @@ use egui::{Align, Color32, Layout, Rect, RichText, Sense, Stroke, StrokeKind, Ui
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use photocraft_aisetup::probe::Stage;
+
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -31,7 +33,7 @@ const START: &str = "ai.setup.start";
 const WIDTH: f32 = 900.0;
 const HEIGHT: f32 = 600.0;
 const SIDEBAR: f32 = 210.0;
-/// The two big buttons above the footer of the first screen, when a ComfyUI was found.
+/// The two big buttons above the footer of the first screen: the user's ComfyUI, or a new one.
 const CHOICE: f32 = 96.0;
 /// How often the running setup's progress is read.
 const POLL_SECONDS: f64 = 0.25;
@@ -1047,11 +1049,34 @@ fn cant_install_why(app: &PhotocraftApp) -> &'static str {
     }
 }
 
-/// Does the first screen ask which ComfyUI to use? When one was found and nothing is set up
-/// (or setting up) yet.
+/// Does the first screen ask which ComfyUI to use, with its big buttons? Once this PC has been
+/// looked at, when nothing is set up (or setting up) yet: the user's own, found or not, or a new
+/// one.
 fn offer_choice(app: &PhotocraftApp) -> bool {
     let status = app.ui.ai_setup.status.clone().unwrap_or(Value::Null);
-    detected(app) && list(&status, "/engines").is_empty() && !matches!(text(&status, "/state"), "done" | "running")
+    app.ui.ai_setup.probe.is_some() && list(&status, "/engines").is_empty() && !matches!(text(&status, "/state"), "done" | "running")
+}
+
+/// Is this PC being looked at for the first time: nothing set up, nothing begun, and no answer
+/// yet? The first screen is then only its steps, in the middle.
+fn first_look(app: &PhotocraftApp) -> bool {
+    let s = &app.ui.ai_setup;
+    let status = s.status.clone().unwrap_or(Value::Null);
+    s.probe.is_none()
+        && s.probe_job.is_some()
+        && list(&status, "/engines").is_empty()
+        && !matches!(text(&status, "/state"), "done" | "running" | "interrupted" | "paused" | "failed")
+}
+
+/// The step the look at this PC is on, by the message its job reports.
+fn probe_stage(app: &PhotocraftApp) -> Stage {
+    let Some(id) = app.ui.ai_setup.probe_job else { return Stage::Hardware };
+    let message = app.session.jobs_with_recent().into_iter().find(|j| j.id.0 == id).map(|j| j.message).unwrap_or_default();
+    stage_of(&message)
+}
+
+fn stage_of(message: &str) -> Stage {
+    Stage::ALL.into_iter().find(|s| s.message() == message).unwrap_or(Stage::Hardware)
 }
 
 /// Use my ComfyUI learnt where it reads models (`found`, not empty): the folder chosen stays when
@@ -1409,14 +1434,65 @@ fn page_pc(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
         }
         (None, Some(_)) => {
+            let step = probe_stage(app);
             ui.horizontal(|ui| {
                 ui.spinner();
-                ui.label(RichText::new(tr("Looking at this PC…")).color(t.text_dim));
+                ui.label(RichText::new(format!("{}\u{2026}", tr(step.message()))).color(t.text_dim));
             });
         }
         (None, None) => {}
     }
     problem(ui, &app.ui.ai_setup.note.clone());
+}
+
+/// The first look at this PC, while it runs: its steps in the middle of the screen, each ticked
+/// as the next begins, so the wait reads as work being done.
+fn page_checking(app: &PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    let current = probe_stage(app);
+    let area = ui.available_rect_before_wrap();
+    ui.allocate_rect(area, Sense::hover());
+    let painter = ui.painter_at(area);
+    let title = painter.layout_no_wrap(tr("Checking your PC").to_string(), crate::theme::semibold(20.0), t.text);
+    let sub = painter.layout(
+        tr("Nothing is changed: PhotoCraft only looks at what you have.").to_string(),
+        egui::FontId::proportional(13.0),
+        t.text_dim,
+        area.width(),
+    );
+    const MARK: f32 = 40.0;
+    const ROW: f32 = 50.0;
+    const COLUMN: f32 = 340.0;
+    let height = MARK + 18.0 + title.size().y + 6.0 + sub.size().y + 28.0 + ROW * Stage::ALL.len() as f32;
+    let mut y = (area.center().y - height / 2.0).max(area.top());
+    let centre = area.center().x;
+    crate::brand::paint_mark(ui, Rect::from_center_size(pos2(centre, y + MARK / 2.0), vec2(MARK, MARK)));
+    y += MARK + 18.0;
+    let title_height = title.size().y;
+    painter.galley(pos2(centre - title.size().x / 2.0, y), title, t.text);
+    y += title_height + 6.0;
+    let sub_height = sub.size().y;
+    painter.galley(pos2(centre - sub.size().x / 2.0, y), sub, t.text_dim);
+    y += sub_height + 28.0;
+    let left = centre - COLUMN.min(area.width()) / 2.0;
+    for (step, detail) in Stage::ALL.into_iter().zip([
+        "Windows, the graphics card, memory and free disk space",
+        "One that is running, or installed on this PC",
+        "Where the engine and the models download from",
+    ]) {
+        let icon = Rect::from_center_size(pos2(left + 9.0, y + 10.0), vec2(18.0, 18.0));
+        let (title_color, detail_color) = if step > current { (t.text_faint, t.text_faint) } else { (t.text, t.text_dim) };
+        if step < current {
+            crate::icons::paint(ui, icon, "check", 16.0, t.accent);
+        } else if step == current {
+            egui::Spinner::new().size(16.0).color(t.accent).paint_at(ui, icon);
+        } else {
+            painter.circle_stroke(icon.center(), 7.0, Stroke::new(1.0, t.field_border));
+        }
+        painter.text(pos2(left + 30.0, y + 10.0), egui::Align2::LEFT_CENTER, tr(step.message()), crate::theme::medium(13.5), title_color);
+        painter.text(pos2(left + 30.0, y + 29.0), egui::Align2::LEFT_CENTER, tr(detail), egui::FontId::proportional(12.0), detail_color);
+        y += ROW;
+    }
 }
 
 /// A big button: a title, a line under it, and a badge beside the title. Filled when it is the
@@ -1467,9 +1543,25 @@ fn choice_button(ui: &mut egui::Ui, rect: Rect, title: &str, sub: &str, badge: &
     resp
 }
 
-/// The first screen's question when a ComfyUI was found: keep using it, or install a new one.
+/// The first screen's question: the user's ComfyUI, or a new one. When one was found, keep
+/// using it; when none was, one this look missed can still be connected.
 fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let (can_install, why) = (can_install_new(app), cant_install_why(app));
+    let (mine_title, mine_sub, new_title, new_sub) = if detected(app) {
+        (
+            tr("Continue with My ComfyUI"),
+            tr("Keeps your ComfyUI and its models. Only missing model files are downloaded."),
+            tr("Continue with New ComfyUI"),
+            tr("A private copy with its own Python, set up for PhotoCraft. Yours is left as it is."),
+        )
+    } else {
+        (
+            tr("Use My ComfyUI"),
+            tr("Have one this check didn't find? Connect it. Only missing model files are downloaded."),
+            tr("Install New ComfyUI"),
+            tr("A private copy with its own Python, set up for PhotoCraft. Nothing else on this PC is changed."),
+        )
+    };
     let area = ui.available_rect_before_wrap();
     let gap = 12.0;
     let width = ((area.width() - gap) / 2.0).max(0.0);
@@ -1478,7 +1570,7 @@ fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let new = Rect::from_min_size(pos2(area.left() + width + gap, area.top()), vec2(width, height));
     // Each in a Ui of its own: side by side, and the second greyed where it can't install.
     let mut left = ui.new_child(UiBuilder::new().max_rect(mine));
-    let r = choice_button(&mut left, mine, tr("Continue with My ComfyUI"), tr("Keeps your ComfyUI and its models. Only missing model files are downloaded."), "", false);
+    let r = choice_button(&mut left, mine, mine_title, mine_sub, "", false);
     if r.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
         use_existing(app);
     }
@@ -1489,8 +1581,8 @@ fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let r = choice_button(
         &mut right,
         new,
-        tr("Continue with New ComfyUI"),
-        tr("A private copy with its own Python, set up for PhotoCraft. Yours is left as it is."),
+        new_title,
+        new_sub,
         tr("Recommended"),
         true,
     );
@@ -2248,25 +2340,16 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         // Left: the other ways in, or what the screen adds up to.
         match page {
             Page::Pc => {
-                // With a ComfyUI found, the big buttons above ask which one; otherwise a link.
-                if choosing {
-                    ui.label(RichText::new(tr("Prefer cloud models?")).color(t.text_dim).size(12.0));
-                } else {
-                    ui.label(RichText::new(tr("Already use ComfyUI?")).color(t.text_dim).size(12.0));
-                    let r = ui.add(egui::Label::new(RichText::new(tr("Use my ComfyUI")).color(t.accent).size(12.0)).sense(Sense::click()));
-                    if r.on_hover_text(tr("Connect the ComfyUI you have. Nothing is installed; only missing model files are fetched"))
-                        .on_hover_cursor(egui::CursorIcon::PointingHand)
-                        .clicked()
-                    {
+                // The big buttons above ask which ComfyUI once this PC has been looked at; on a
+                // setup that is there already, the user's own is a button here.
+                if !choosing && !first_look(app) {
+                    let r = widgets::secondary_button(ui, tr("Use My ComfyUI"), 0.0);
+                    if r.on_hover_text(tr("Connect the ComfyUI you have. Nothing is installed; only missing model files are fetched")).clicked() {
                         use_existing(app);
                     }
-                    ui.label(RichText::new("·").color(t.text_faint));
                 }
-                let r = ui.add(egui::Label::new(RichText::new(tr("Cloud models only")).color(t.accent).size(12.0)).sense(Sense::click()));
-                if r.on_hover_text(tr("Skip local models: add an API key for OpenAI, Google, xAI, Meta or Black Forest Labs instead"))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked()
-                {
+                let r = widgets::secondary_button(ui, tr("Cloud Models Only"), 0.0);
+                if r.on_hover_text(tr("Skip local models: add an API key for OpenAI, Google, xAI, Meta or Black Forest Labs instead")).clicked() {
                     app.ui.ai_setup.open = false;
                     crate::ai_gen_ui::open_api_keys(app);
                 }
@@ -2343,8 +2426,8 @@ fn footer_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, plan: &Value, can_
     let (page, busy) = (app.ui.ai_setup.page, running(app));
     match page {
         Page::Pc => {
-            // The big buttons above stand for Next.
-            if !choosing {
+            // The big buttons above stand for Next; while this PC is first looked at, nothing does.
+            if !choosing && !first_look(app) {
                 let ready = app.ui.ai_setup.probe.is_some() && can_install;
                 let next = ui.add_enabled_ui(ready, |ui| widgets::primary_button(ui, tr("Next"), 96.0)).inner;
                 let why = if gpu_usable(app) {
@@ -2471,7 +2554,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             // The screen in front, and under it where to next.
             let content = Rect::from_min_max(pos2(side.right(), title.bottom()), rect.max).shrink2(vec2(28.0, 18.0));
             let foot = Rect::from_min_max(pos2(content.left(), content.bottom() - 46.0), content.max);
-            // A ComfyUI was found: which one to use is asked above the footer, where it is seen.
+            // Which ComfyUI to use is asked above the footer, where it is seen.
             let choice_height = if app.ui.ai_setup.page == Page::Pc && offer_choice(app) { CHOICE } else { 0.0 };
             let body = Rect::from_min_max(content.min, pos2(content.right(), foot.top() - 8.0 - choice_height));
             if choice_height > 0.0 {
@@ -2482,6 +2565,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             let mut page = ui.new_child(UiBuilder::new().max_rect(body).layout(Layout::top_down(Align::Min)));
             page.set_clip_rect(body.expand(2.0));
             match app.ui.ai_setup.page {
+                Page::Pc if first_look(app) => page_checking(app, &mut page),
                 Page::Pc => {
                     egui::ScrollArea::vertical().id_salt("ai-setup-pc").auto_shrink([false, false]).show(&mut page, |ui| page_pc(app, ui));
                 }
