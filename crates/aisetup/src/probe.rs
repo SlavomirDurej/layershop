@@ -54,6 +54,12 @@ pub struct Os {
     pub sixty_four_bit: bool,
     /// Windows, where the app can install the engine itself.
     pub windows: bool,
+    /// Installed memory, when it can be told.
+    pub memory_mb: Option<u64>,
+    /// Memory and the paging file together, as they stand now (Windows' commit limit).
+    pub virtual_mb: Option<u64>,
+    /// Whether Windows sizes the paging file itself (it then grows when it must, room allowing).
+    pub paging_managed: Option<bool>,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -144,6 +150,11 @@ const NVIDIA_DEFAULT_DRIVER: u32 = 580;
 const HAS_COMFY: &str = "Choose below: use it with the models it has, or install a private copy beside it (yours is left as it is).";
 /// The smallest drive worth offering: the engine alone is about 8 GB while it unpacks.
 const WORTH_LISTING: u64 = 10_000_000_000;
+/// Under this much installed memory (with a little for the system that reserves), larger models
+/// may not load.
+const LITTLE_MEMORY_MB: u64 = 15_000;
+/// A paging file set by hand to leave less than this (memory included) is called small.
+const SMALL_VIRTUAL_MB: u64 = 32_000;
 
 /// `nvidia-smi --query-gpu=name,memory.total,driver_version --format=csv,noheader,nounits`
 pub fn parse_nvidia_smi(text: &str) -> Vec<Gpu> {
@@ -181,7 +192,18 @@ pub fn parse_system(json: &str) -> (Os, Vec<Gpu>, Vec<Drive>) {
     let Ok(v) = serde_json::from_str::<serde_json::Value>(json.trim().trim_start_matches('\u{feff}')) else { return Default::default() };
     let o = v.get("os").cloned().unwrap_or_default();
     let name = text(&o, "Caption").trim_start_matches("Microsoft ").to_string();
-    let os = Os { windows: !name.is_empty(), sixty_four_bit: text(&o, "OSArchitecture").contains("64"), version: text(&o, "Version"), name };
+    // Win32_OperatingSystem counts memory in kilobytes.
+    let mb = |key: &str| number(&o, key).map(|kb| kb / 1024).filter(|mb| *mb > 0);
+    let paging_managed = v.get("cs").and_then(|cs| cs.get("AutomaticManagedPagefile")).and_then(serde_json::Value::as_bool);
+    let os = Os {
+        windows: !name.is_empty(),
+        sixty_four_bit: text(&o, "OSArchitecture").contains("64"),
+        version: text(&o, "Version"),
+        name,
+        memory_mb: mb("TotalVisibleMemorySize"),
+        virtual_mb: mb("TotalVirtualMemorySize"),
+        paging_managed,
+    };
     // The registry knows the real memory of a card; `AdapterRAM` stops at 4 GB.
     let reg: Vec<(String, u64)> = list(v.get("reg").unwrap_or(&serde_json::Value::Null))
         .into_iter()
@@ -208,11 +230,12 @@ pub fn parse_system(json: &str) -> (Os, Vec<Gpu>, Vec<Drive>) {
 
 /// Asks Windows for everything [`parse_system`] reads, as one line of JSON.
 pub const SYSTEM_SCRIPT: &str = "$ErrorActionPreference='SilentlyContinue'; \
-$os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,OSArchitecture; \
+$os = Get-CimInstance Win32_OperatingSystem | Select-Object Caption,Version,OSArchitecture,TotalVisibleMemorySize,TotalVirtualMemorySize; \
+$cs = Get-CimInstance Win32_ComputerSystem | Select-Object AutomaticManagedPagefile; \
 $gpu = @(Get-CimInstance Win32_VideoController | Select-Object Name,AdapterRAM,DriverVersion); \
 $reg = @(Get-ItemProperty 'HKLM:\\SYSTEM\\CurrentControlSet\\Control\\Class\\{4d36e968-e325-11ce-bfc1-08002be10318}\\0*' | Select-Object DriverDesc,'HardwareInformation.qwMemorySize'); \
 $disk = @(Get-CimInstance Win32_LogicalDisk -Filter 'DriveType=3' | Select-Object DeviceID,FreeSpace,Size); \
-@{os=$os;gpu=$gpu;reg=$reg;disk=$disk} | ConvertTo-Json -Depth 4 -Compress";
+@{os=$os;cs=$cs;gpu=$gpu;reg=$reg;disk=$disk} | ConvertTo-Json -Depth 4 -Compress";
 
 /// The cards of both readings as one list: `nvidia-smi`'s where it has them (it knows the real
 /// memory and the driver's own version number), the system's for the rest.
@@ -319,6 +342,31 @@ impl Probe {
                 String::new(),
             ),
         });
+        // Memory: models load through it on their way to the card, and Windows' paging file makes
+        // up what it lacks only while the paging file may grow.
+        if let Some(mb) = self.os.memory_mb {
+            let value = format!("{} GB", (mb as f64 / 1024.0).round() as u64);
+            let fixed_small = self.os.paging_managed == Some(false) && self.os.virtual_mb.is_some_and(|v| v < SMALL_VIRTUAL_MB);
+            out.push(if mb < LITTLE_MEMORY_MB {
+                row(
+                    "memory",
+                    Level::Warn,
+                    "Little memory".into(),
+                    "Local models load through this PC's memory. With under 16 GB, larger models may not load: Windows' paging file makes up the rest only while drive C: has free space. Cloud models work on any PC.",
+                    value,
+                )
+            } else if fixed_small {
+                row(
+                    "memory",
+                    Level::Warn,
+                    "Small paging file".into(),
+                    "The paging file has a fixed, small size, so larger models may not load. Let Windows manage its size (Advanced system settings › Performance › Virtual memory).",
+                    value,
+                )
+            } else {
+                row("memory", Level::Ok, "Memory".into(), "", value)
+            });
+        }
         // Room.
         out.push(match self.roomiest() {
             Some(d) if d.free >= WORTH_LISTING => {
@@ -406,7 +454,7 @@ mod native {
             "linux" => "Linux",
             other => other,
         };
-        (Os { name: name.to_string(), version: String::new(), sixty_four_bit: cfg!(target_pointer_width = "64"), windows: false }, Vec::new(), Vec::new())
+        (Os { name: name.to_string(), version: String::new(), sixty_four_bit: cfg!(target_pointer_width = "64"), windows: false, ..Os::default() }, Vec::new(), Vec::new())
     }
 
     /// Look at this machine. `urls` are the addresses a ComfyUI is looked for at (the one in the
@@ -523,7 +571,25 @@ mod tests {
             println!("{:?} {} | {} | {}", check.level, check.title, check.detail, check.value);
         }
         println!("variant: {:?}", found.variant());
-        assert_eq!(found.checks().len(), 5);
+        assert_eq!(found.checks().len(), if found.os.memory_mb.is_some() { 6 } else { 5 });
+    }
+
+    #[test]
+    fn memory_is_read_and_little_of_it_or_a_small_fixed_paging_file_is_a_warning() {
+        let json = r#"{"os":{"Caption":"Microsoft Windows 11 Pro","OSArchitecture":"64-bit","TotalVisibleMemorySize":16760832,"TotalVirtualMemorySize":"19251200"},"cs":{"AutomaticManagedPagefile":true}}"#;
+        let (os, _, _) = parse_system(json);
+        assert_eq!((os.memory_mb, os.virtual_mb, os.paging_managed), (Some(16_368), Some(18_800), Some(true)));
+        let row = |os: &Os| Probe { os: os.clone(), ..Probe::default() }.checks().into_iter().find(|c| c.id == "memory").map(|c| (c.level, c.title, c.value));
+        assert_eq!(row(&os), Some((Level::Ok, "Memory".to_string(), "16 GB".to_string())));
+        // A fixed paging file that leaves little: it won't grow when a model needs it to.
+        let fixed = Os { paging_managed: Some(false), ..os.clone() };
+        assert_eq!(row(&fixed).map(|r| (r.0, r.1)), Some((Level::Warn, "Small paging file".to_string())));
+        let little = Os { memory_mb: Some(8_192), ..os.clone() };
+        assert_eq!(row(&little).map(|r| (r.0, r.1, r.2)), Some((Level::Warn, "Little memory".to_string(), "8 GB".to_string())));
+        // Not told: no row, and odd numbers are no answer.
+        assert_eq!(row(&Os::default()), None);
+        let (odd, _, _) = parse_system(r#"{"os":{"TotalVisibleMemorySize":-5,"TotalVirtualMemorySize":"lots"},"cs":{"AutomaticManagedPagefile":"yes"}}"#);
+        assert_eq!((odd.memory_mb, odd.virtual_mb, odd.paging_managed), (None, None, None));
     }
 
     #[test]

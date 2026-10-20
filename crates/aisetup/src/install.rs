@@ -674,7 +674,9 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
                     Err(e) => {
                         let why = e.to_string();
                         let lower = why.to_ascii_lowercase();
-                        let hint = if lower.contains("out of memory") || lower.contains("allocation") {
+                        // System memory (the paging file) comes with its own advice; this is the card's.
+                        let card = !lower.contains("paging file") && !lower.contains("os error 1455");
+                        let hint = if card && (lower.contains("out of memory") || lower.contains("allocation")) {
                             " The model may be too large for this graphics card: try a smaller model, or a lower render size in its settings."
                         } else {
                             ""

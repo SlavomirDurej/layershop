@@ -122,10 +122,13 @@ impl Fetch for FakeNet {
     }
 }
 
-/// A ComfyUI that renders one fixed "image", or fails the way a card out of memory does.
+const CARD_OUT_OF_MEMORY: &str = "Allocation on device: out of memory";
+
+/// A ComfyUI that renders one fixed "image", or fails as `fails` says.
 struct FakeComfy {
     running: bool,
-    out_of_memory: bool,
+    /// The `exception_message` the render fails with, if it does.
+    fails: Option<&'static str>,
     prompts: AtomicU64,
 }
 
@@ -141,9 +144,9 @@ impl Transport for FakeComfy {
         } else if url.ends_with("/prompt") && request.method == Method::Post {
             self.prompts.fetch_add(1, Ordering::SeqCst);
             ok(r#"{"prompt_id":"p1"}"#)
-        } else if url.contains("/history/p1") && self.out_of_memory {
+        } else if let (true, Some(why)) = (url.contains("/history/p1"), self.fails) {
             ok(
-                r#"{"p1":{"status":{"status_str":"error","messages":[["execution_error",{"node_type":"KSampler","exception_message":"Allocation on device: out of memory"}]]}}}"#,
+                &serde_json::json!({"p1": {"status": {"status_str": "error", "messages": [["execution_error", {"node_type": "KSampler", "exception_message": why}]]}}}).to_string(),
             )
         } else if url.contains("/history/p1") {
             ok(r#"{"p1":{"outputs":{"9":{"images":[{"filename":"test.png","subfolder":"","type":"output"}]}},"status":{"completed":true}}}"#)
@@ -204,7 +207,7 @@ fn cramped(_: &Path) -> Option<u64> {
 
 impl Rig {
     fn new() -> Self {
-        Self::with(true, FakeComfy { running: true, out_of_memory: false, prompts: AtomicU64::new(0) }, FakeServer::default())
+        Self::with(true, FakeComfy { running: true, fails: None, prompts: AtomicU64::new(0) }, FakeServer::default())
     }
 
     fn with(python: bool, comfy: FakeComfy, server: FakeServer) -> Self {
@@ -468,7 +471,7 @@ fn a_repair_replaces_a_damaged_file_and_keeps_the_good_ones() {
 #[test]
 fn an_engine_that_does_not_start_fails_the_setup_with_its_own_words() {
     let server = FakeServer { refuse: Some("ComfyUI stopped while starting: ImportError: DLL load failed".into()), ..FakeServer::default() };
-    let rig = Rig::with(true, FakeComfy { running: false, out_of_memory: false, prompts: AtomicU64::new(0) }, server);
+    let rig = Rig::with(true, FakeComfy { running: false, fails: None, prompts: AtomicU64::new(0) }, server);
     let (result, progress) = rig.run(&["qwen-image-2-1"]);
     let e = result.unwrap_err();
     assert!(matches!(&e, Error::Engine(m) if m.contains("DLL load failed")), "{e:?}");
@@ -529,7 +532,7 @@ fn the_cpp_runtime_is_put_beside_the_engines_python_and_continue_mends_an_engine
 
 #[test]
 fn a_test_image_that_does_not_render_is_not_a_failed_install() {
-    let rig = Rig::with(true, FakeComfy { running: true, out_of_memory: true, prompts: AtomicU64::new(0) }, FakeServer::default());
+    let rig = Rig::with(true, FakeComfy { running: true, fails: Some(CARD_OUT_OF_MEMORY), prompts: AtomicU64::new(0) }, FakeServer::default());
     let (result, progress) = rig.run(&["qwen-image-2-1"]);
     let done = result.unwrap();
     let why = done.test_error.clone().unwrap();
@@ -537,6 +540,12 @@ fn a_test_image_that_does_not_render_is_not_a_failed_install() {
     assert!(done.test.is_none() && done.installed == ["qwen-image-2-1"]);
     assert_eq!(progress.steps.last().map(|s| s.state), Some(StepState::Done));
     assert_eq!(rig.phase(), Phase::Done);
+    // Windows' paging file ran out (error 1455): that is system memory, not the card's, and the
+    // message says what to do about it.
+    let paging = "The paging file is too small for this operation to complete. (os error 1455)";
+    let rig = Rig::with(true, FakeComfy { running: true, fails: Some(paging), prompts: AtomicU64::new(0) }, FakeServer::default());
+    let why = rig.run(&["qwen-image-2-1"]).0.unwrap().test_error.unwrap();
+    assert!(why.contains("os error 1455") && why.contains("Virtual memory") && !why.contains("graphics card"), "{why}");
     // With no model installed there is nothing to render with: the engine alone is still a setup.
     let rig = Rig::new();
     let done = rig.run(&[]).0.unwrap();
@@ -548,7 +557,7 @@ fn a_test_image_that_does_not_render_is_not_a_failed_install() {
 #[test]
 fn an_archive_that_is_not_the_build_leaves_no_engine_and_is_fetched_again() {
     // The right checksum (the manifest pins it), but no Python inside.
-    let rig = Rig::with(false, FakeComfy { running: true, out_of_memory: false, prompts: AtomicU64::new(0) }, FakeServer::default());
+    let rig = Rig::with(false, FakeComfy { running: true, fails: None, prompts: AtomicU64::new(0) }, FakeServer::default());
     let (result, progress) = rig.run(&[]);
     let e = result.unwrap_err();
     assert!(matches!(&e, Error::Archive(m) if m.contains("python_embeded/python.exe")), "{e:?}");

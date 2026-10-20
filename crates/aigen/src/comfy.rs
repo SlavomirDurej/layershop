@@ -824,6 +824,18 @@ pub enum History {
     Done(ImageRef),
 }
 
+/// What a person can do about a node's failure, for the ones that read as nothing to them.
+fn what_to_do(detail: &str) -> Option<&'static str> {
+    let lower = detail.to_ascii_lowercase();
+    // Windows error 1455: memory and the paging file together ran out while a model loaded. The
+    // paging file grows on its drive, and model downloads may just have filled that drive.
+    (lower.contains("paging file") || lower.contains("os error 1455")).then_some(
+        "Windows ran out of memory loading the model: the computer's memory and its paging file together are too small for it. \
+Free some space on the drive that holds the paging file (usually C:), or let Windows manage the paging file size \
+(Advanced system settings › Performance › Settings › Advanced › Virtual memory), then try again. A smaller model needs less memory.",
+    )
+}
+
 /// Read `GET /history/<id>`: pending while the id is absent, the first image once it finished,
 /// an error when a node failed.
 pub fn parse_history(body: &[u8], id: &str) -> Result<History> {
@@ -843,7 +855,8 @@ pub fn parse_history(body: &[u8], id: &str) -> Result<History> {
                 Some(format!("{node}: {}", d.get("exception_message").and_then(Value::as_str).unwrap_or("failed")))
             })
             .unwrap_or_else(|| "the workflow failed".into());
-        return Err(Error::Server(format!("ComfyUI: {}", clip(&detail, 400))));
+        let fix = what_to_do(&detail).map_or_else(String::new, |fix| format!(" {fix}"));
+        return Err(Error::Server(format!("ComfyUI: {}{fix}", clip(&detail, 400))));
     }
     let image = entry.get("outputs").and_then(Value::as_object).into_iter().flat_map(|o| o.values()).find_map(|out| {
         let img = out.get("images")?.as_array()?.first()?;
@@ -1642,6 +1655,11 @@ mod tests {
             ["execution_error",{"node_type":"KSampler","exception_message":"CUDA out of memory"}]]}}}"#;
         let e = parse_history(failed, "abc").unwrap_err().to_string();
         assert!(e.contains("KSampler") && e.contains("out of memory"), "{e}");
+        // Windows' paging-file error says what to do about it.
+        let paging = br#"{"abc":{"status":{"status_str":"error","messages":[["execution_error",{"node_type":"CLIPLoader","exception_message":"The paging file is too small for this operation to complete. (os error 1455)"}]]}}}"#;
+        let e = parse_history(paging, "abc").unwrap_err().to_string();
+        assert!(e.contains("CLIPLoader") && e.contains("os error 1455") && e.contains("Virtual memory"), "{e}");
+        assert!(!parse_history(failed, "abc").unwrap_err().to_string().contains("paging file"));
         let empty = br#"{"abc":{"outputs":{},"status":{"status_str":"success","completed":true}}}"#;
         assert!(parse_history(empty, "abc").unwrap_err().to_string().contains("no image"));
         for hostile in [&b"null"[..], b"[]", b"{\"abc\":7}", b"{\"abc\":{\"outputs\":[1,2]}}", b"{\"abc\":{\"outputs\":{\"1\":{\"images\":[{}]}}}}"] {

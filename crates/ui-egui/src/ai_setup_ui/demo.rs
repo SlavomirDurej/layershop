@@ -272,7 +272,15 @@ fn probe_with(dir: &Path, comfy: Existing) -> Value {
     use photocraft_aisetup::probe::{Drive, Gpu, Host, Os, Probe, VcRuntime, Vendor};
     let host = |name: &str| Host { name: name.into(), ok: true, note: String::new() };
     let p = Probe {
-        os: Os { name: "Windows 11 Pro".into(), version: "10.0.26100".into(), sixty_four_bit: true, windows: true },
+        os: Os {
+            name: "Windows 11 Pro".into(),
+            version: "10.0.26100".into(),
+            sixty_four_bit: true,
+            windows: true,
+            memory_mb: Some(65_536),
+            virtual_mb: Some(75_000),
+            paging_managed: Some(true),
+        },
         gpus: vec![Gpu { name: "NVIDIA GeForce RTX 4090".into(), vendor: Vendor::Nvidia, vram_mb: Some(24564), driver: "591.59".into() }],
         drives: vec![Drive { name: "D:".into(), free: 412_000_000_000, total: 2_000_000_000_000 }],
         comfy,

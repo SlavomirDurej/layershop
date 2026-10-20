@@ -237,6 +237,8 @@ mod native {
         }
         let seen = rig.run("ai.setup.probe", json!({"odd": [1, 2]})).unwrap();
         let rows: Vec<&str> = seen["checks"].as_array().unwrap().iter().map(|c| c["id"].as_str().unwrap()).collect();
+        // Memory is listed where Windows says how much there is.
+        let rows: Vec<&str> = rows.into_iter().filter(|r| *r != "memory").collect();
         assert_eq!(rows, ["os", "gpu", "disk", "comfy", "net"]);
         assert_eq!(seen["defaults"]["modelsDir"], rig.models_dir().to_string_lossy().as_ref());
         assert!(seen["variant"].is_string() && seen["canInstall"].is_boolean());
