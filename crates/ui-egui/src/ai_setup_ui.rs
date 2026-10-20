@@ -358,6 +358,11 @@ fn suggested_preset(app: &PhotocraftApp) -> String {
 
 /// Open the wizard on the screen that fits where things stand.
 pub fn open(app: &mut PhotocraftApp) {
+    show(app, true);
+}
+
+/// Open the wizard; `recall` starts it from the models the last setup chose.
+fn show(app: &mut PhotocraftApp, recall: bool) {
     refresh_status(app);
     if app.ui.ai_setup.manifest.is_none() {
         refresh_manifest(app);
@@ -375,7 +380,7 @@ pub fn open(app: &mut PhotocraftApp) {
     }
     let recorded: Vec<String> = list(&status, "/record/models").iter().filter_map(Value::as_str).map(str::to_string).collect();
     let state = text(&status, "/state").to_string();
-    if !recorded.is_empty() && s.models.is_empty() {
+    if recall && !recorded.is_empty() && s.models.is_empty() {
         s.models = recorded;
         s.preset = "custom".into();
         s.existing = text(&status, "/record/route") == "existing";
@@ -399,6 +404,17 @@ pub fn open(app: &mut PhotocraftApp) {
     app.ui.ai_setup.ask = None;
     refresh_hf(app);
     start_probe(app);
+}
+
+/// The wizard from its first screen with the route and models chosen so far forgotten, so it
+/// suggests afresh: what the AI Gen panel's "Run Setup Wizard Again…" does. The folders of the
+/// last setup are kept (that is where its ComfyUI is), and so is what the engine said.
+pub fn restart(app: &mut PhotocraftApp) {
+    let s = &mut app.ui.ai_setup;
+    let fresh = AiSetupUi::default();
+    (s.existing, s.cpu, s.preset, s.models) = (fresh.existing, fresh.cpu, fresh.preset, fresh.models);
+    (s.url, s.folders, s.server, s.token_open) = (fresh.url, fresh.folders, fresh.server, false);
+    show(app, false);
 }
 
 /// The wizard on its Install screen, as the running setup's progress: what clicking the status

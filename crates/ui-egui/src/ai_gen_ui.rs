@@ -598,6 +598,7 @@ enum Lead {
     SetUp,
     Keys,
     Manage,
+    Again,
 }
 
 /// The panel when no model can run for the task in front: why, and the way to one. While the
@@ -633,16 +634,21 @@ fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool, roo
     };
     // The ways on, the first the one to take (drawn as the primary button where it is).
     let setup = crate::ai_setup_ui::available(app);
-    let leads: Vec<(Lead, bool)> = match local {
+    let mut leads: Vec<(Lead, bool)> = match local {
         Local::Installing => [(Lead::Progress, true)].into_iter().chain((!keys).then_some((Lead::Keys, false))).collect(),
         Local::NotSetUp if !keys => setup.then_some((Lead::SetUp, true)).into_iter().chain([(Lead::Keys, !setup)]).collect(),
         _ => [(Lead::Manage, false)].into_iter().chain((setup && local == Local::NotSetUp).then_some((Lead::SetUp, false))).collect(),
     };
+    // Last: the wizard from its first screen, whatever the last setup chose.
+    if setup && local != Local::Installing {
+        leads.push((Lead::Again, false));
+    }
     let label = |lead: Lead| match lead {
         Lead::Progress => tr("Show Progress"),
         Lead::SetUp => tr("Set Up Local AI…"),
         Lead::Keys => tr("Add an API Key…"),
         Lead::Manage => tr("Manage Models…"),
+        Lead::Again => tr("Run Setup Wizard Again…"),
     };
     // Centred: as tall as it was last frame, so the space above it is known before it is drawn.
     let height_id = ui.id().with("ai-gen-nothing-ready-height");
@@ -691,6 +697,7 @@ fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool, roo
     match clicked {
         Some(Lead::Progress) => crate::ai_setup_ui::show_progress(app),
         Some(Lead::SetUp) => crate::ai_setup_ui::open(app),
+        Some(Lead::Again) => crate::ai_setup_ui::restart(app),
         Some(Lead::Keys) => {
             open_api_keys(app);
         }

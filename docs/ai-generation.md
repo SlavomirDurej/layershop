@@ -468,7 +468,9 @@ after a Local AI setup ends, and when the app gets the focus back (at most once 
 server that isn't running is not reported as an error, and what it said last stays. While a
 setup runs, local models wait: the panel says "Local AI is being set up", with its progress and
 **Show Progress**, and cloud models with a key still work. With nothing that can run it says why
-and offers **Set Up Local AI…** and **Add an API Key…** (or **Manage Models…**). `ai.generate`
+and offers **Set Up Local AI…** and **Add an API Key…** (or **Manage Models…**), then **Run
+Setup Wizard Again…**, which opens the wizard on its first screen with the last setup's route and
+models forgotten (its folders are kept). `ai.generate`
 and `ai.models` are unchanged: an agent can still name any model.
 
 **Leaving a kind out.** Switch off **Cloud models** or **Local models** at the top of Manage Models
