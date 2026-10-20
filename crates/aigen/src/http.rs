@@ -108,6 +108,14 @@ impl Response {
 /// an `Err`: the body says what went wrong. `Err` is for a request that got no answer.
 pub trait Transport: Send + Sync {
     fn send(&self, request: &Request) -> Result<Response>;
+
+    /// A websocket's text messages (`ws://`), each to `on_text`, until the server closes it or
+    /// `stop` says so: ComfyUI's word on the render it is running. A transport without one says
+    /// so, and the render is followed by polling alone.
+    fn listen(&self, url: &str, stop: &dyn Fn() -> bool, on_text: &mut dyn FnMut(&str)) -> Result<()> {
+        let _ = (url, stop, on_text);
+        Err(crate::Error::Network("no live updates over this connection".into()))
+    }
 }
 
 /// [`Transport`] over `ureq` (rustls). One agent, so connections to ComfyUI are reused while a
@@ -158,6 +166,10 @@ impl Transport for UreqTransport {
         let status = response.status().as_u16();
         let body = response.body_mut().with_config().limit(MAX_RESPONSE_BYTES).read_to_vec().map_err(net)?;
         Ok(Response { status, body })
+    }
+
+    fn listen(&self, url: &str, stop: &dyn Fn() -> bool, on_text: &mut dyn FnMut(&str)) -> Result<()> {
+        crate::ws::listen(url, stop, on_text)
     }
 }
 

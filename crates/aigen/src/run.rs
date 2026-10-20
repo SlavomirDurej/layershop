@@ -3,8 +3,12 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::{Mutex, PoisonError};
+
 use crate::comfy::{self, History};
 use crate::http::{Request, Transport};
+use crate::live::Live;
 use crate::model::{Model, Provider, Settings};
 use crate::size::render_size;
 use crate::{Error, Result, cloud};
@@ -285,8 +289,84 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
         }
         None => comfy::workflow(model, &render)?,
     };
-    (control.progress)(0.02, "Sending to ComfyUI…");
-    let queued = transport.send(&Request::post_json(format!("{base}/prompt"), comfy::queue_body(&workflow, "photocraft"))).map_err(unreachable)?;
+    // A name of this render's own: ComfyUI tells the client that queued a render what it is doing
+    // with it, over its websocket, which is listened to beside the polls.
+    let client = format!("photocraft-{:012x}", random_seed());
+    let listening = Listening { live: Mutex::new(Live::new(&workflow)), state: AtomicU8::new(CONNECTING), stop: AtomicBool::new(false) };
+    let ws = base.strip_prefix("http://").map(|host| format!("ws://{host}/ws?clientId={client}"));
+    with_listener(transport, ws.as_deref(), &listening, || {
+        // Its first word is its queue's state: wait for it (briefly), so none about this render is missed.
+        (control.progress)(0.02, "Sending to ComfyUI…");
+        for _ in 0..40 {
+            if listening.state.load(Ordering::Relaxed) != CONNECTING || (control.cancelled)() {
+                break;
+            }
+            (control.sleep)(Duration::from_millis(50));
+        }
+        poll_comfy(transport, model, job, control, timeout, &Queued { base: &base, client: &client, workflow: &workflow, size: (width, height) }, &listening)
+    })
+}
+
+/// The websocket's side of a render: what it has heard, and whether it is open.
+struct Listening {
+    live: Mutex<Live>,
+    state: AtomicU8,
+    stop: AtomicBool,
+}
+
+const CONNECTING: u8 = 0;
+const OPEN: u8 = 1;
+const CLOSED: u8 = 2;
+
+/// Run `render` with `ws` listened to on a thread of its own (when there is an address to listen
+/// at, and threads), until `render` returns.
+fn with_listener<R>(transport: &dyn Transport, ws: Option<&str>, listening: &Listening, render: impl FnOnce() -> R) -> R {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(url) = ws {
+        return std::thread::scope(|scope| {
+            let listener = std::thread::Builder::new().name("comfyui-live".into()).spawn_scoped(scope, || {
+                let mut heard = |text: &str| {
+                    listening.state.store(OPEN, Ordering::Relaxed);
+                    listening.live.lock().unwrap_or_else(PoisonError::into_inner).take(text);
+                };
+                let _ = transport.listen(url, &|| listening.stop.load(Ordering::Relaxed), &mut heard);
+                listening.state.store(CLOSED, Ordering::Relaxed);
+            });
+            if listener.is_err() {
+                listening.state.store(CLOSED, Ordering::Relaxed);
+            }
+            // The listener is told to stop however the render ends: the scope waits for it.
+            let _stop = StopOnDrop(&listening.stop);
+            render()
+        });
+    }
+    let _ = (transport, ws);
+    listening.state.store(CLOSED, Ordering::Relaxed);
+    render()
+}
+
+/// Sets its flag when dropped.
+struct StopOnDrop<'a>(&'a AtomicBool);
+
+impl Drop for StopOnDrop<'_> {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+/// What is queued: where, for which client, the workflow, and the size it renders.
+struct Queued<'a> {
+    base: &'a str,
+    client: &'a str,
+    workflow: &'a serde_json::Value,
+    size: (u32, u32),
+}
+
+/// Queue the workflow, and follow it until its image is downloaded.
+fn poll_comfy(transport: &dyn Transport, model: &Model, job: &Job, control: &Control<'_>, timeout: u64, q: &Queued<'_>, listening: &Listening) -> Result<Generated> {
+    let (base, (width, height)) = (q.base, q.size);
+    let unreachable = |e: Error| Error::Network(format!("Could not reach ComfyUI at {base}. Is it running? ({e})"));
+    let queued = transport.send(&Request::post_json(format!("{base}/prompt"), comfy::queue_body(q.workflow, q.client))).map_err(unreachable)?;
     let id = comfy::parse_queued(queued.status, &queued.body).map_err(|e| too_old(model, e))?;
     let label = if model.name.is_empty() { model.family.label() } else { model.name.as_str() };
     let message = format!("Generating with {label}…");
@@ -299,8 +379,13 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
             let _ = transport.send(&Request::post_json(format!("{base}/queue"), serde_json::json!({"delete": [id]}).to_string().into_bytes()).timeout(5));
             return Err(Error::Cancelled);
         }
-        // No step count without ComfyUI's websocket: creep towards done so the bar moves.
-        (control.progress)(0.05 + 0.9 * (1.0 - 1.0 / (1.0 + n as f32 / 40.0)), &message);
+        // What ComfyUI says it is doing; without its word, creep towards done so the bar moves.
+        let heard = listening.live.lock().unwrap_or_else(PoisonError::into_inner).words(label);
+        match heard {
+            Some((fraction, words)) => (control.progress)(fraction, &words),
+            None if listening.state.load(Ordering::Relaxed) == OPEN => (control.progress)(0.03, "Waiting for ComfyUI…"),
+            None => (control.progress)(0.05 + 0.9 * (1.0 - 1.0 / (1.0 + n as f32 / 40.0)), &message),
+        }
         (control.sleep)(POLL);
         let history = match transport.send(&Request::get(format!("{base}/history/{id}")).timeout(20)) {
             Ok(r) if r.ok() => comfy::parse_history(&r.body, &id)?,
@@ -316,7 +401,7 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
         if let History::Done(image) = history {
             (control.progress)(0.97, "Downloading the image…");
             let r = transport
-                .send(&Request::get(comfy::view_url(&base, &image)).timeout(120))
+                .send(&Request::get(comfy::view_url(base, &image)).timeout(120))
                 .map_err(|e| Error::Network(format!("Could not download the image from ComfyUI: {e}")))?;
             if !r.ok() || r.body.is_empty() {
                 return Err(Error::Server(format!("ComfyUI could not serve the generated image (HTTP {})", r.status)));
@@ -420,7 +505,7 @@ mod tests {
         let fake = Fake::new(|r, n| match (r.url.as_str(), n) {
             (u, _) if u.ends_with("/prompt") => {
                 let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
-                assert_eq!(body["client_id"], "photocraft");
+                assert!(body["client_id"].as_str().unwrap().starts_with("photocraft-"), "{body}");
                 assert!(body["prompt"].to_string().contains("a frog"));
                 ok(r#"{"prompt_id":"abc"}"#)
             }
@@ -441,6 +526,132 @@ mod tests {
         assert_eq!((g.width, g.height, g.seed), (1008, 1008, 7));
         assert_eq!(fake.urls().first().map(String::as_str), Some("http://comfy:8188/prompt"));
         assert!(progress.load(Ordering::Relaxed) >= 3);
+    }
+
+    /// A ComfyUI that says over its websocket what it does with the render (`messages`), and has
+    /// the image ready once it has said all of it.
+    struct Talking {
+        messages: Vec<String>,
+        said: AtomicBool,
+        asked: Mutex<String>,
+    }
+
+    impl Transport for Talking {
+        fn send(&self, r: &Request) -> Result<Response> {
+            match r.url.as_str() {
+                u if u.ends_with("/prompt") => {
+                    let body: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+                    // The render is queued for the client that listens.
+                    assert!(self.asked.lock().unwrap().ends_with(body["client_id"].as_str().unwrap()), "{body}");
+                    ok(r#"{"prompt_id":"abc"}"#)
+                }
+                u if u.ends_with("/history/abc") => ok(if self.said.load(Ordering::Relaxed) { DONE } else { "{}" }),
+                u if u.contains("/view?") => ok("PNGDATA"),
+                u => panic!("unexpected request {u}"),
+            }
+        }
+
+        fn listen(&self, url: &str, stop: &dyn Fn() -> bool, on_text: &mut dyn FnMut(&str)) -> Result<()> {
+            *self.asked.lock().unwrap() = url.to_string();
+            on_text(r#"{"type":"status","data":{}}"#);
+            // Each message once the render has had time to report the last.
+            for message in &self.messages {
+                std::thread::sleep(Duration::from_millis(30));
+                on_text(message);
+            }
+            std::thread::sleep(Duration::from_millis(30));
+            self.said.store(true, Ordering::Relaxed);
+            while !stop() {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_local_render_says_what_comfyui_is_doing() {
+        let model = Family::ZImage.preset();
+        // The nodes as the workflow numbers them.
+        let workflow = comfy::workflow(&model, &Job { width: 1008, height: 1008, ..job() }).unwrap();
+        let id_of = |class: &str| workflow.as_object().unwrap().iter().find(|(_, n)| n["class_type"] == class).map(|(id, _)| id.clone()).unwrap();
+        let executing = |class: &str| format!(r#"{{"type":"executing","data":{{"node":"{}"}}}}"#, id_of(class));
+        let messages = vec![
+            r#"{"type":"execution_start","data":{}}"#.to_string(),
+            executing("UNETLoader"),
+            executing("CLIPTextEncode"),
+            executing("KSampler"),
+            r#"{"type":"progress","data":{"value":4,"max":8}}"#.into(),
+            executing("VAEDecode"),
+        ];
+        let talking = Talking { messages, said: AtomicBool::new(false), asked: Mutex::new(String::new()) };
+        let said = Mutex::new(Vec::<String>::new());
+        let c = Control {
+            cancelled: &|| false,
+            progress: &|_, words| {
+                let mut said = said.lock().unwrap();
+                if said.last().is_none_or(|last| last != words) {
+                    said.push(words.to_string());
+                }
+            },
+            // Twenty polls (a 10 s timeout): time enough for all it says.
+            sleep: &|d| std::thread::sleep(d.min(Duration::from_millis(40))),
+        };
+        let g = generate(&talking, &settings(), &model, "", &job(), &c).unwrap();
+        assert_eq!(g.bytes, b"PNGDATA");
+        assert!(talking.asked.lock().unwrap().starts_with("ws://comfy:8188/ws?clientId=photocraft-"));
+        let said = said.into_inner().unwrap();
+        let name = &model.name;
+        for want in [
+            "Sending to ComfyUI…".to_string(),
+            format!("Loading {name}…"),
+            "Reading the prompt…".into(),
+            format!("Rendering with {name}: step 4 of 8"),
+            "Finishing the image…".into(),
+            "Downloading the image…".into(),
+        ] {
+            assert!(said.contains(&want), "{want:?} not in {said:?}");
+        }
+        assert!(!said.iter().any(|s| s.starts_with("Generating with")), "{said:?}");
+        // Without live updates (a transport without them, or an https address), it creeps as before.
+        let quiet = Fake::new(|r, n| match r.url.as_str() {
+            u if u.ends_with("/prompt") => ok(r#"{"prompt_id":"abc"}"#),
+            u if u.ends_with("/history/abc") => ok(if n < 3 { "{}" } else { DONE }),
+            _ => ok("PNGDATA"),
+        });
+        let words = Mutex::new(Vec::<String>::new());
+        let c = Control { cancelled: &|| false, progress: &|_, w| words.lock().unwrap().push(w.to_string()), sleep: &|_| {} };
+        generate(&quiet, &settings(), &model, "", &job(), &c).unwrap();
+        assert!(words.lock().unwrap().iter().any(|w| w == &format!("Generating with {name}…")), "{:?}", words.lock().unwrap());
+    }
+
+    /// A real render on the ComfyUI at `PHOTOCRAFT_COMFY_URL` (default ComfyUI Desktop's
+    /// address), printing what the dialog would say and when: `cargo test -p photocraft-aigen
+    /// --lib a_real_render -- --ignored --nocapture`. Z-Image Turbo, or MOSS Image with
+    /// `PHOTOCRAFT_LIVE_MODEL=moss`; the model's files must be there.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    #[ignore = "renders on a running ComfyUI"]
+    fn a_real_render_says_each_step() {
+        let url = std::env::var("PHOTOCRAFT_COMFY_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".into());
+        let began = std::time::Instant::now();
+        let last = Mutex::new(String::new());
+        let c = Control {
+            cancelled: &|| false,
+            progress: &|fraction, words| {
+                let mut last = last.lock().unwrap();
+                if *last != words {
+                    println!("{:>6.2} s  {:>3.0}%  {words}", began.elapsed().as_secs_f64(), fraction * 100.0);
+                    *last = words.to_string();
+                }
+            },
+            sleep: &|d| std::thread::sleep(d),
+        };
+        let settings = Settings { comfy_url: url, timeout_seconds: 600, ..Settings::default() };
+        let job = Job { prompt: "a lighthouse on a cliff at dusk".into(), width: 768, height: 768, seed: random_seed(), alpha: false, source: None };
+        let family = if std::env::var("PHOTOCRAFT_LIVE_MODEL").is_ok_and(|m| m == "moss") { Family::MossImage } else { Family::ZImage };
+        let g = generate(&crate::UreqTransport::new(), &settings, &family.preset(), "", &job, &c).unwrap();
+        println!("{:>6.2} s  done: {} bytes, {}x{}", began.elapsed().as_secs_f64(), g.bytes.len(), g.width, g.height);
+        assert!(!g.bytes.is_empty());
     }
 
     fn source() -> Source {

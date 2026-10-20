@@ -635,9 +635,12 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
         let rendering_since = Mutex::new(None::<Instant>);
         let progress = |_: f32, text: &str| {
             let text = text.trim_end_matches('…');
+            let since = || *rendering_since.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(Instant::now);
             let words = if text.starts_with("Generating") {
-                let since = *rendering_since.lock().unwrap_or_else(PoisonError::into_inner).get_or_insert_with(Instant::now);
-                render_words(text, since.elapsed().as_secs(), env.server.as_deref())
+                render_words(text, since().elapsed().as_secs(), env.server.as_deref())
+            } else if from_render(text) {
+                // ComfyUI said which step it is on: the clock is all there is to add.
+                format!("{text} · {}", photocraft_aigen::activity::clock(since().elapsed().as_secs()))
             } else {
                 text.to_string()
             };
@@ -732,6 +735,11 @@ fn render_words(text: &str, seconds: u64, server: Option<&dyn LocalServer>) -> S
         Some(doing) => format!("{text}: {doing} · {clock}"),
         None => format!("{text} · {clock}"),
     }
+}
+
+/// Is `text` ComfyUI's own word on the render (over its websocket): the step it is on?
+fn from_render(text: &str) -> bool {
+    ["Loading ", "Reading the ", "Rendering with ", "Finishing the image", "Waiting for ComfyUI"].iter().any(|p| text.starts_with(p))
 }
 
 /// Did the engine die reaching for a graphics card that isn't there (or a driver that can't

@@ -501,6 +501,9 @@ fn a_rendering_test_image_says_how_far_the_engine_is() {
     // A server that prints nothing (or none at all) leaves the clock.
     assert_eq!(render_words("Generating with X", 61, Some(&FakeServer::default())), "Generating with X · 1:01");
     assert_eq!(render_words("Generating with X", 0, None), "Generating with X · 0:00");
+    // ComfyUI's own word on the render gets the clock alone; the engine starting has its own.
+    assert!(from_render("Rendering with X: step 7 of 20") && from_render("Loading X") && from_render("Finishing the image"));
+    assert!(!from_render("Starting ComfyUI: loading PyTorch · 0:12") && !from_render("Sending to ComfyUI") && !from_render("Downloading the image"));
 }
 
 /// What a virtual machine said (2026-10-20): PyTorch reached for a graphics card that isn't there.

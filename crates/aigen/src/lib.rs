@@ -20,10 +20,12 @@ pub mod comfy;
 pub mod detect;
 mod http;
 pub mod launch;
+mod live;
 pub mod model;
 pub mod pricing;
 mod run;
 pub mod size;
+mod ws;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::UreqTransport;
