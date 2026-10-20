@@ -554,12 +554,12 @@ mod tests {
         fn listen(&self, url: &str, stop: &dyn Fn() -> bool, on_text: &mut dyn FnMut(&str)) -> Result<()> {
             *self.asked.lock().unwrap() = url.to_string();
             on_text(r#"{"type":"status","data":{}}"#);
-            // Each message once the render has had time to report the last.
+            // Each message once the render has had time to report the last (polls come every 40 ms).
             for message in &self.messages {
-                std::thread::sleep(Duration::from_millis(30));
+                std::thread::sleep(Duration::from_millis(150));
                 on_text(message);
             }
-            std::thread::sleep(Duration::from_millis(30));
+            std::thread::sleep(Duration::from_millis(150));
             self.said.store(true, Ordering::Relaxed);
             while !stop() {
                 std::thread::sleep(Duration::from_millis(5));
@@ -593,10 +593,10 @@ mod tests {
                     said.push(words.to_string());
                 }
             },
-            // Twenty polls (a 10 s timeout): time enough for all it says.
+            // Polls of 40 ms: several for each message.
             sleep: &|d| std::thread::sleep(d.min(Duration::from_millis(40))),
         };
-        let g = generate(&talking, &settings(), &model, "", &job(), &c).unwrap();
+        let g = generate(&talking, &Settings { timeout_seconds: 60, ..settings() }, &model, "", &job(), &c).unwrap();
         assert_eq!(g.bytes, b"PNGDATA");
         assert!(talking.asked.lock().unwrap().starts_with("ws://comfy:8188/ws?clientId=photocraft-"));
         let said = said.into_inner().unwrap();

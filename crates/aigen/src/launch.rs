@@ -85,6 +85,39 @@ fn server_argv(transport: &dyn Transport, base: &str) -> Option<Vec<String>> {
     Some(system.get("argv").and_then(|a| a.as_array()).into_iter().flatten().filter_map(|a| a.as_str().map(str::to_string)).take(256).collect())
 }
 
+/// Why a ComfyUI that quit while starting quit, from its output (oldest line first): the last
+/// line that names a failure (`Failed to …`, `SomethingError: …`, `main.py: error: …`) and the
+/// one after it, which often says what it needed. Its last lines are usually unrelated chatter
+/// (add-ons finishing their own start).
+pub fn startup_cause(lines: &[&str]) -> Option<String> {
+    let names_failure = |l: &&str| {
+        let l = l.trim();
+        let exception = l.split_once(": ").is_some_and(|(head, _)| !head.contains(' ') && (head.ends_with("Error") || head.ends_with("Exception")));
+        l.starts_with("Failed to ") || l.contains(": error: ") || exception
+    };
+    let at = lines.iter().rposition(names_failure)?;
+    let cause = lines.get(at)?.trim();
+    let next = lines.get(at.saturating_add(1)).map(|l| l.trim()).filter(|l| !l.is_empty() && !l.starts_with("File ") && !l.starts_with("Traceback"));
+    let mut out = match next {
+        Some(next) => format!("{cause} | {next}"),
+        None => cause.to_string(),
+    };
+    // Two copies of ComfyUI that share a user folder: the newer one moved the database on.
+    if out.contains("Can't locate revision") {
+        out.push_str(
+            ". This ComfyUI is older than one that has used the same user folder. With your usual ComfyUI running, press Find Installation in Preferences › Generative AI › Local Server so that one is started instead",
+        );
+    }
+    Some(out)
+}
+
+/// The version the ComfyUI at `base` says it is (`/system_stats`).
+fn server_version(transport: &dyn Transport, base: &str) -> Option<String> {
+    let r = transport.send(&Request::get(format!("{base}/system_stats")).timeout(3)).ok().filter(|r| r.ok())?;
+    let v: serde_json::Value = serde_json::from_slice(&r.body).ok()?;
+    v.pointer("/system/comfyui_version").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty() && s.len() <= 32).map(str::to_string)
+}
+
 /// The port of an `http://host:port` address (ComfyUI's default without one), and whether the
 /// host is this computer.
 pub fn port_of(base: &str) -> (u16, bool) {
@@ -275,6 +308,42 @@ pub fn desktop_install(record: &str, config: &std::path::Path, exists: &dyn Fn(&
         return Some(Launch { python: python.to_string_lossy().into_owned(), folder: install.to_string_lossy().into_owned(), args: join_args(&args) });
     }
     None
+}
+
+/// The installation folders in ComfyUI Desktop's record (`installations.json`), the one launched
+/// last first: where a ComfyUI it runs is started from.
+pub fn desktop_folders(record: &str) -> Vec<std::path::PathBuf> {
+    let Ok(serde_json::Value::Array(entries)) = serde_json::from_str::<serde_json::Value>(record) else { return Vec::new() };
+    let mut entries: Vec<&serde_json::Value> = entries.iter().take(64).collect();
+    let stamp = |e: &serde_json::Value| e.get("lastLaunchedAt").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    entries.sort_by(|a, b| stamp(b).total_cmp(&stamp(a)));
+    entries.iter().filter_map(|e| e.get("installPath")?.as_str()).filter(|p| !p.trim().is_empty()).map(std::path::PathBuf::from).collect()
+}
+
+/// The version a ComfyUI source folder says it is (`comfyui_version.py`: `__version__ = "0.42.0"`).
+pub fn version_in(text: &str) -> Option<String> {
+    let line = text.lines().find(|l| l.trim_start().starts_with("__version__"))?;
+    let value = line.split_once('=')?.1.trim().trim_matches(['"', '\'']);
+    (!value.is_empty() && value.len() <= 32).then(|| value.to_string())
+}
+
+/// The first of `candidates` that holds `script` (relative to it) and, when the running server
+/// said its `version`, is that version: a stale copy beside the real one is never taken for it.
+/// `read` reads a small text file.
+pub fn pick_folder(
+    candidates: &[std::path::PathBuf],
+    script: &str,
+    version: Option<&str>,
+    read: &dyn Fn(&std::path::Path) -> Option<String>,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let holds = |d: &&std::path::PathBuf| is_file(&d.join(script));
+    let same = |d: &&std::path::PathBuf| {
+        let file = d.join(script).parent().map(|p| p.join("comfyui_version.py"));
+        let found = file.and_then(|f| read(&f)).and_then(|t| version_in(&t));
+        version.is_none_or(|want| found.as_deref() == Some(want))
+    };
+    candidates.iter().filter(holds).find(same).cloned()
 }
 
 /// The folders a model file can go in for the ComfyUI `launch` starts to see it, in ComfyUI's
@@ -624,8 +693,13 @@ mod native {
             let lines: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
             // A crash dump's last lines are its outermost calls, which say nothing: its own
             // first line, and the call it crashed in, do.
-            let tail = crash_summary(&lines).unwrap_or_else(|| lines.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" | "));
-            comfy::clip(&tail, 400)
+            // A start that failed says why somewhere above its last lines.
+            // Only near the end: an error from a render long before is not why it stopped now.
+            let recent = lines.get(lines.len().saturating_sub(80)..).unwrap_or(&[]);
+            let tail = crash_summary(&lines)
+                .or_else(|| startup_cause(recent))
+                .unwrap_or_else(|| lines.iter().rev().take(3).rev().copied().collect::<Vec<_>>().join(" | "));
+            comfy::clip(&tail, 600)
         }
 
         fn spawn(&self, settings: &Settings, port: u16) -> Result<Child> {
@@ -820,6 +894,11 @@ mod native {
         desktop_install(&std::fs::read_to_string(file).ok()?, &config, &|p| p.is_file())
     }
 
+    /// A small text file's contents (a settings or version file; anything over a megabyte is not one).
+    fn small_text(p: &Path) -> Option<String> {
+        std::fs::metadata(p).ok().filter(|m| m.is_file() && m.len() <= 1 << 20).and_then(|_| std::fs::read_to_string(p).ok())
+    }
+
     /// [`models_folders`] on this computer's disk.
     pub fn models_folders_here(launch: &Launch) -> Vec<String> {
         // Settings files, not databases: anything big is not one.
@@ -934,13 +1013,21 @@ mod native {
         if Path::new(&script).is_absolute() {
             candidates.extend(Path::new(&script).parent().map(Path::to_path_buf));
         }
+        // ComfyUI Desktop's own record of where its installations are (it starts the one it runs
+        // from there), before the folders around the app, which may hold an older copy.
+        if let Some(record) = desktop_config_dir().map(|d| d.join("installations.json")).and_then(|f| small_text(&f)) {
+            candidates.extend(desktop_folders(&record));
+        }
         if let Some(exe) = &parent_exe {
             candidates.extend(exe.ancestors().skip(1).take(3).flat_map(|d| [d.join("resources"), d.to_path_buf()]));
         }
         candidates.extend(arg_after(&argv, "--base-directory").map(PathBuf::from));
         candidates.extend(venv_root);
-        let folder = candidates.into_iter().find(|d| d.join(&script).is_file()).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-        Ok(Launch { python: server.exe.clone(), folder, args })
+        // The copy that is the version the server says it is: two copies of ComfyUI can share a
+        // user folder, and starting the older one fails on the newer one's database.
+        let version = server_version(transport, &base);
+        let folder = pick_folder(&candidates, &script, version.as_deref(), &small_text, &|p| p.is_file());
+        Ok(Launch { python: server.exe.clone(), folder: folder.map(|d| d.to_string_lossy().into_owned()).unwrap_or_default(), args })
     }
 }
 
@@ -1052,6 +1139,51 @@ mod tests {
         // An id that isn't a plain name can't reach outside the settings folder.
         let sneaky = r#"[{"id":"../../etc/passwd","installPath":"/installs/ComfyUI","adoptedPythonPath":"/docs/ComfyUI/.venv/bin/python"}]"#;
         assert!(!desktop_install(sneaky, Path::new("/cfg"), &|_| true).unwrap().args.contains("passwd"));
+        // Its installations, the one launched last first: where a ComfyUI it runs is started from.
+        assert_eq!(desktop_folders(record), vec![std::path::PathBuf::from("/installs/ComfyUI"), "/installs/Old".into()]);
+        assert!(desktop_folders("not json").is_empty() && desktop_folders("[{\"installPath\":7}]").is_empty());
+    }
+
+    /// The user's machine, 2026-10-20: Comfy Desktop ran ComfyUI 0.42.0 from its installation,
+    /// started as `ComfyUI\main.py`; an old 0.22.3 copy sat in the folder above the app. Find
+    /// Installation took the old copy, which then failed on the newer one's database.
+    #[test]
+    fn the_running_servers_own_copy_is_chosen_not_an_older_one_beside_it() {
+        use std::path::{Path, PathBuf};
+        let script = "ComfyUI/main.py";
+        let versions = [("/installs/ComfyUI/ComfyUI/comfyui_version.py", "0.42.0"), ("/desktop/resources/ComfyUI/comfyui_version.py", "0.22.3")];
+        let read = |p: &Path| versions.iter().find(|(f, _)| Path::new(f) == p).map(|(_, v)| format!("# updated in pyproject.toml.\n__version__ = \"{v}\"\n"));
+        let is_file = |p: &Path| ["/installs/ComfyUI/ComfyUI/main.py", "/desktop/resources/ComfyUI/main.py"].iter().any(|f| Path::new(f) == p);
+        let around_the_app_first = [PathBuf::from("/desktop/resources"), "/installs/ComfyUI".into()];
+        assert_eq!(pick_folder(&around_the_app_first, script, Some("0.42.0"), &read, &is_file), Some("/installs/ComfyUI".into()));
+        // A server that doesn't say its version: the first that holds the script, as before.
+        assert_eq!(pick_folder(&around_the_app_first, script, None, &read, &is_file), Some("/desktop/resources".into()));
+        // None of its version: none, rather than the wrong one.
+        assert_eq!(pick_folder(&around_the_app_first, script, Some("0.50.0"), &read, &is_file), None);
+        assert_eq!((version_in("__version__ = '1.2'"), version_in("nothing"), version_in("__version__ = \"\"")), (Some("1.2".into()), None, None));
+    }
+
+    /// What that old copy printed before it quit: the cause is ten lines above the end.
+    #[test]
+    fn a_failed_start_names_its_cause_not_its_last_chatter() {
+        let log = "Import times for custom nodes:\n   2.4 seconds: C:\\x\\comfyui-easy-use\nError upgrading database: \nTraceback (most recent call last):\n  File \"C:\\a.py\", line 213, in f\n\
+                   alembic.script.revision.ResolutionError: No such revision or branch '0009_created_at_from_mtime'\n\
+                   alembic.util.exc.CommandError: Can't locate revision identified by '0009_created_at_from_mtime'\n\
+                   Failed to initialize database: Can't locate revision identified by '0009_created_at_from_mtime'\n\
+                   The --enable-assets flag requires a working database connection.\nTo resolve this, try one of the following:\n\
+                   Cannot connect to comfyregistry.\nFETCH DATA from: C:\\cache.json [DONE]\n[ComfyUI-Manager] All startup tasks have been completed.";
+        let lines: Vec<&str> = log.lines().collect();
+        let cause = startup_cause(&lines).unwrap();
+        assert!(
+            cause.starts_with("Failed to initialize database: Can't locate revision identified by '0009_created_at_from_mtime' | The --enable-assets flag requires"),
+            "{cause}"
+        );
+        assert!(cause.contains("older than one that has used the same user folder") && cause.contains("Find Installation"), "{cause}");
+        // An exception's own line, and argparse's complaint, name a cause too; chatter does not.
+        assert_eq!(startup_cause(&["x", "ModuleNotFoundError: No module named 'yaml'"]).as_deref(), Some("ModuleNotFoundError: No module named 'yaml'"));
+        assert!(startup_cause(&["main.py: error: unrecognized arguments: --bogus"]).is_some_and(|c| c.contains("unrecognized")));
+        assert_eq!(startup_cause(&["Starting server", "To see the GUI go to: http://127.0.0.1:8188", "Some text: with a colon"]), None);
+        assert_eq!(startup_cause(&[]), None);
     }
 
     #[test]
