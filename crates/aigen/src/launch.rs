@@ -1281,6 +1281,23 @@ mod tests {
             Settings { comfy_url: "http://127.0.0.1:8000".into(), comfy_autostart: autostart, ..Settings::default() }
         }
 
+        /// What Find Installation saves for the ComfyUI running at `PHOTOCRAFT_COMFY_URL`
+        /// (default ComfyUI Desktop's address): `cargo test -p photocraft-aigen --lib
+        /// this_machines_running -- --ignored --nocapture`. Changes nothing.
+        #[test]
+        #[ignore = "looks at the ComfyUI running on this machine"]
+        fn this_machines_running_comfyui_is_found() {
+            let url = std::env::var("PHOTOCRAFT_COMFY_URL").unwrap_or_else(|_| "http://127.0.0.1:8000".into());
+            let transport = crate::UreqTransport::new();
+            println!("server version: {:?}", server_version(&transport, &url));
+            let found = find_running(&transport, &url).unwrap();
+            println!("python: {}\nfolder: {}\nargs:   {}", found.python, found.folder, found.args);
+            let script = split_args(&found.args).into_iter().next().unwrap_or_default();
+            let version = std::fs::read_to_string(std::path::Path::new(&found.folder).join(&script).with_file_name("comfyui_version.py")).ok().and_then(|t| version_in(&t));
+            println!("its copy's version: {version:?}");
+            assert!(!found.folder.is_empty() && version == server_version(&transport, &url), "{found:?}");
+        }
+
         #[test]
         fn a_running_server_is_used_and_never_stopped() {
             let server = ComfyProcess::new(None);
