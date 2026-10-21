@@ -9,7 +9,7 @@ Please give the maintainer a reasonable opportunity to investigate and coordinat
 Report privately, using either of these:
 
 - **GitHub private reporting:** the repository's **Security** tab › **Report a vulnerability**.
-- **Email:** `<SECURITY CONTACT EMAIL: fill in before publishing>`.
+- **Email:** `info@aardvarkstudios.net`.
 
 Do not open a public issue containing a working exploit, secret, sensitive crash dump, or malicious attachment. You can expect an acknowledgement within a few days; LayerShop is maintained by one person, so a fix may take longer. If a problem is in PhotoCraft itself rather than in LayerShop's additions, it may be forwarded to the PhotoCraft maintainers, with your agreement.
 
