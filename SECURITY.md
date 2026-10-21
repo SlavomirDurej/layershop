@@ -1,14 +1,19 @@
 # Security Policy
 
-PhotoCraft processes complex document and image formats and exposes CLI, JSON control, and MCP automation. Treat files, paths, metadata, automation requests, and command parameters as potentially malicious.
+LayerShop is built on PhotoCraft. It processes complex document and image formats, exposes CLI, JSON control, and MCP automation, and installs and drives a local ComfyUI. Treat files, paths, metadata, automation requests, and command parameters as potentially malicious.
 
 ## Reporting a vulnerability
 
-Please give the repository maintainers a reasonable opportunity to investigate and coordinate a fix before publishing exploitable details, proof-of-concept code, or weaponized files.
+Please give the maintainer a reasonable opportunity to investigate and coordinate a fix before publishing exploitable details, proof-of-concept code, or weaponized files.
 
-This repository does not currently document a dedicated private security email or private reporting channel. Contact the repository maintainers through the repository owner/maintainer channels already listed in the project, provide only a minimal non-exploitable summary in public, and ask for an appropriate private transfer method before sharing sensitive details. Do not open a public issue containing a working exploit, secret, sensitive crash dump, or malicious attachment.
+Report privately, using either of these:
 
-If no private channel can be established, withhold weaponized material and report the smallest safe description that allows maintainers to make contact.
+- **GitHub private reporting:** the repository's **Security** tab › **Report a vulnerability**.
+- **Email:** `<SECURITY CONTACT EMAIL: fill in before publishing>`.
+
+Do not open a public issue containing a working exploit, secret, sensitive crash dump, or malicious attachment. You can expect an acknowledgement within a few days; LayerShop is maintained by one person, so a fix may take longer. If a problem is in PhotoCraft itself rather than in LayerShop's additions, it may be forwarded to the PhotoCraft maintainers, with your agreement.
+
+If no private channel works, withhold weaponized material and report the smallest safe description that allows the maintainer to make contact.
 
 ## What to include
 
@@ -43,6 +48,8 @@ Security reports may cover:
 - the desktop control server, headless JSON server, MCP server, and MCP-to-GUI bridge;
 - authentication, authorization/capabilities, request limits, batch limits, and connection exhaustion;
 - GPU resource validation or driver-facing input handling;
+- the local AI setup: the ComfyUI and Python install, model downloads and their integrity checks, the Hugging Face sign-in and token handling, and how cloud API keys are stored and sent;
+- the connection to ComfyUI and the workflows LayerShop sends it;
 - dependencies, CI, packaging, signing, checksums, and release artifact integrity.
 
 General bugs without a security impact should use the project's normal issue and contribution process.

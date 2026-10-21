@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Question or idea
+    url: https://github.com/SlavomirDurej/layershop/discussions
+    about: Ask how something works, show what you made, or float an idea before it is a feature request.
+  - name: Security vulnerability
+    url: https://github.com/SlavomirDurej/layershop/security/policy
+    about: Do not open a public issue for a security problem. See the policy for how to report it privately.
+  - name: A bug in the PhotoCraft editor itself
+    url: https://github.com/storytold/photocraft/issues
+    about: LayerShop is built on PhotoCraft. Bugs that also happen in the unmodified PhotoCraft belong upstream (check first that LayerShop's AI Gen is not involved).

@@ -1,0 +1,32 @@
+name: Feature request
+description: A model, a tool, or a change you would like in LayerShop.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        LayerShop aims to feel like Photoshop with AI inside. Requests that say what you were trying to
+        get done are the most useful. Questions and open-ended ideas also fit
+        [Discussions](https://github.com/SlavomirDurej/layershop/discussions).
+  - type: textarea
+    id: goal
+    attributes:
+      label: What are you trying to do?
+      description: The task, not the solution. For example "replace the sky and keep the foreground sharp".
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What would you like LayerShop to do?
+      description: If another app does this well, say how.
+  - type: dropdown
+    id: kind
+    attributes:
+      label: What kind of request is it?
+      options:
+        - A new model (say which, and where it is published)
+        - A change to AI Gen (Create, Edit, Restyle, references)
+        - A missing editor feature or tool
+        - macOS or Linux support
+        - Something else
