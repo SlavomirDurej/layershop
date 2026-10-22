@@ -346,6 +346,32 @@ pub fn pick_folder(
     candidates.iter().filter(holds).find(same).cloned()
 }
 
+/// `0.42.1` as numbers, for ordering versions (a part's leading digits; `0.42.1+9` is `0.42.1`).
+fn version_parts(v: &str) -> Vec<u64> {
+    v.split(['+', '-']).next().unwrap_or("").split('.').take(8).map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)).collect()
+}
+
+/// A newer copy of the ComfyUI in `folder` to start instead: the first of `installed`
+/// (ComfyUI Desktop's installations, [`desktop_folders`]) that holds `script` and is a newer
+/// version than `folder`'s. Two copies can share a user folder, and the older one then quits on
+/// the database the newer one moved on (settings saved by an older Find Installation pointed at
+/// such a copy). None when `folder`'s version is unknown or nothing newer is there.
+pub fn newer_copy(
+    folder: &std::path::Path,
+    script: &str,
+    installed: &[std::path::PathBuf],
+    read: &dyn Fn(&std::path::Path) -> Option<String>,
+    is_file: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let version = |d: &std::path::Path| d.join(script).parent().and_then(|p| read(&p.join("comfyui_version.py"))).and_then(|t| version_in(&t));
+    let own = version_parts(&version(folder)?);
+    installed
+        .iter()
+        .filter(|d| d.as_path() != folder && is_file(&d.join(script)))
+        .find(|d| version(d).is_some_and(|v| version_parts(&v) > own))
+        .cloned()
+}
+
 /// The folders a model file can go in for the ComfyUI `launch` starts to see it, in ComfyUI's
 /// own order: the first is where it saves new ones itself. Each is a models folder, the one
 /// that holds `checkpoints`, `diffusion_models`, `vae` and the rest: ComfyUI's own (`models` in
@@ -720,10 +746,14 @@ mod native {
             if args.is_empty() {
                 args.push("main.py".into());
             }
+            // An older copy than the one ComfyUI Desktop runs would quit on its database.
+            let script = args.iter().find(|a| a.to_ascii_lowercase().ends_with(".py")).cloned().unwrap_or_else(|| "main.py".into());
+            let installed = desktop_config_dir().map(|d| d.join("installations.json")).and_then(|f| small_text(&f)).map(|r| desktop_folders(&r)).unwrap_or_default();
+            let folder = newer_copy(Path::new(folder), &script, &installed, &small_text, &|p| p.is_file()).unwrap_or_else(|| PathBuf::from(folder));
             args.push("--port".into());
             args.push(port.to_string());
             let mut cmd = Command::new(python);
-            cmd.current_dir(folder).args(&args).stdin(Stdio::null());
+            cmd.current_dir(&folder).args(&args).stdin(Stdio::null());
             let output = |log: &Option<PathBuf>| {
                 log.as_ref().and_then(|p| std::fs::OpenOptions::new().create(true).append(true).open(p).ok()).map_or_else(Stdio::null, Stdio::from)
             };
@@ -1161,6 +1191,33 @@ mod tests {
         // None of its version: none, rather than the wrong one.
         assert_eq!(pick_folder(&around_the_app_first, script, Some("0.50.0"), &read, &is_file), None);
         assert_eq!((version_in("__version__ = '1.2'"), version_in("nothing"), version_in("__version__ = \"\"")), (Some("1.2".into()), None, None));
+    }
+
+    /// The user's machine, 2026-10-22: settings saved by the older Find Installation still named
+    /// the 0.22.3 copy, and every start quit on the 0.42.0 one's database. The newer copy that
+    /// Comfy Desktop records is started instead; never an older one or one without the script.
+    #[test]
+    fn a_saved_older_copy_starts_the_newer_installation_instead() {
+        use std::path::{Path, PathBuf};
+        let script = "ComfyUI/main.py";
+        let versions = [
+            ("/installs/ComfyUI/ComfyUI/comfyui_version.py", "0.42.0"),
+            ("/installs/Older/ComfyUI/comfyui_version.py", "0.9.1"),
+            ("/desktop/resources/ComfyUI/comfyui_version.py", "0.22.3"),
+        ];
+        let read = |p: &Path| versions.iter().find(|(f, _)| Path::new(f) == p).map(|(_, v)| format!("__version__ = \"{v}\"\n"));
+        let is_file = |p: &Path| ["/installs/ComfyUI/ComfyUI/main.py", "/installs/Older/ComfyUI/main.py", "/desktop/resources/ComfyUI/main.py"].iter().any(|f| Path::new(f) == p);
+        let stale = Path::new("/desktop/resources");
+        let installed = [PathBuf::from("/installs/Older"), "/installs/ComfyUI".into()];
+        assert_eq!(newer_copy(stale, script, &installed, &read, &is_file), Some("/installs/ComfyUI".into()));
+        // The newest copy is kept, and so is a folder whose version is unknown.
+        assert_eq!(newer_copy(Path::new("/installs/ComfyUI"), script, &[stale.into(), "/installs/Older".into()], &read, &is_file), None);
+        assert_eq!(newer_copy(Path::new("/elsewhere"), script, &installed, &read, &is_file), None);
+        // Without the same script it isn't a copy of the same thing.
+        assert_eq!(newer_copy(stale, "main.py", &installed, &read, &is_file), None);
+        assert_eq!(newer_copy(stale, script, &[], &read, &is_file), None);
+        assert!(version_parts("0.42.1+9") > version_parts("0.42.0") && version_parts("0.10") > version_parts("0.9.9"));
+        assert!(version_parts("") == version_parts("x"));
     }
 
     /// What that old copy printed before it quit: the cause is ten lines above the end.
