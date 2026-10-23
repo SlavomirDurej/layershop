@@ -44,7 +44,8 @@ pub struct Source {
     /// less keeps more of its shapes and colours. Local models; cloud models have no such control.
     pub strength: f64,
     /// Edit: the prompt is an instruction about the image, which an edit model
-    /// ([`Model::can_edit`]) is shown whole. There is no mask, and the strength does not apply.
+    /// ([`Model::can_edit`]) is shown whole. The strength does not apply. A local model may be
+    /// given a `mask` too: it then paints only there, and what is outside comes back as it was.
     pub edit: bool,
     /// Edit: further pictures the instruction may refer to (PNG, any size), in the order the
     /// model numbers them after the image ([`Model::max_references`] at most).
@@ -250,8 +251,11 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
                 return Err(Error::Config(format!("{} takes {} reference pictures at most", model.name, model.max_references())));
             }
             (control.progress)(0.01, "Sending the picture to ComfyUI…");
-            let mut names = Vec::with_capacity(1 + source.references.len());
+            // The picture, its mask when it has one, then the references.
+            let masked = !source.mask.is_empty();
+            let mut names = Vec::with_capacity(2 + source.references.len());
             let uploads = std::iter::once((comfy::UPLOAD_IMAGE.to_string(), &source.image))
+                .chain(masked.then(|| (comfy::UPLOAD_MASK.to_string(), &source.mask)))
                 .chain(source.references.iter().enumerate().map(|(i, bytes)| (comfy::upload_reference(i), bytes)));
             for (name, bytes) in uploads {
                 let r = transport.send(&comfy::upload_request(&base, &name, bytes)).map_err(unreachable)?;
@@ -260,8 +264,12 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
                     return Err(Error::Cancelled);
                 }
             }
-            let Some((image, references)) = names.split_first() else { return Err(Error::BadResponse("ComfyUI did not take the picture".into())) };
-            comfy::edit_workflow(model, &render, &comfy::Edit { image, references })?
+            let Some((image, rest)) = names.split_first() else { return Err(Error::BadResponse("ComfyUI did not take the picture".into())) };
+            let (mask, references) = match rest.split_first() {
+                Some((mask, references)) if masked => (Some(mask.as_str()), references),
+                _ => (None, rest),
+            };
+            comfy::edit_workflow(model, &render, &comfy::Edit { image, mask, references })?
         }
         Some(source) => {
             // The set-up is checked before anything is uploaded.
@@ -699,6 +707,33 @@ mod tests {
         let e = generate(&uploads, &settings(), &Family::Flux2.preset(), "", &job, &control(&|| n.fetch_add(1, Ordering::Relaxed) >= 2)).unwrap_err();
         assert_eq!(e, Error::Cancelled);
         assert!(!uploads.urls().iter().any(|u| u.ends_with("/prompt")));
+    }
+
+    #[test]
+    fn a_masked_edit_uploads_its_mask_after_the_picture() {
+        let fake = Fake::new(|r, n| match r.url.as_str() {
+            u if u.ends_with("/upload/image") => {
+                let body = String::from_utf8_lossy(&r.body).into_owned();
+                let want = ["photocraft_inpaint_image.png", "photocraft_inpaint_mask.png", "photocraft_edit_reference_1.png"][n];
+                assert!(body.contains(want) && body.contains(["IMAGEPNG", "MASKPNG", "SHIRT"][n]), "{n}: {body}");
+                ok(&format!(r#"{{"name":"stored {n}.png","subfolder":""}}"#))
+            }
+            u if u.ends_with("/prompt") => {
+                let w = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].clone();
+                let nodes = w.as_object().unwrap();
+                let masked = nodes.values().find(|n| n["class_type"] == "SetLatentNoiseMask").unwrap();
+                assert_eq!(nodes[masked["inputs"]["mask"][0].as_str().unwrap()]["inputs"]["image"], "stored 1.png");
+                assert!(w.to_string().contains("stored 2.png"), "{w}");
+                ok(r#"{"prompt_id":"abc"}"#)
+            }
+            u if u.ends_with("/history/abc") => ok(DONE),
+            u if u.contains("/view?") => ok("PNGDATA"),
+            u => panic!("unexpected request {u}"),
+        });
+        let edit = Source { edit: true, references: vec![b"SHIRT".to_vec()], ..source() };
+        let job = Job { source: Some(edit), ..job() };
+        generate(&fake, &settings(), &Family::QwenImage21.preset(), "", &job, &control(&|| false)).unwrap();
+        assert_eq!(fake.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 3);
     }
 
     #[test]

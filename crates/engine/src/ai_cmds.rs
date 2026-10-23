@@ -64,7 +64,8 @@ pub const DEFAULT_IMG2IMG_STRENGTH: f64 = 0.6;
 /// How much of the layer around the selection the model is shown when `context` is not given:
 /// this fraction of the selection's longer edge, on every side. A model frames its subject in
 /// the picture it renders, so the nearer that picture is to the selection, the surer what it
-/// paints fits inside it; a margin is still needed to match the light and the perspective.
+/// paints fits inside it; a margin is still needed to match the light and the perspective. A
+/// local model editing is also told where the selection is ([`edit_mask`]).
 pub const DEFAULT_CONTEXT: f64 = 0.25;
 /// How far into the selection the mask a local model gets fades in, as a fraction of the
 /// selection's shorter edge: in that band the model keeps more and more of what is there, so
@@ -437,25 +438,35 @@ fn transposed(v: &[f32], width: usize, height: usize) -> Vec<f32> {
 }
 
 /// Fade a `width` × `height` coverage mask in from its edge: zero at the edge of what it covers
-/// (and at the picture's own edge), rising to the mask's value `band` pixels inside. Nothing
-/// outside the mask is added to it.
-fn fade_inwards(mask: &mut [f32], width: usize, height: usize, band: usize) {
+/// (and at the picture's own edge, except on its `open` sides: left, top, right, bottom, where
+/// the mask goes on as it is), rising to the mask's value `band` pixels inside. Nothing outside
+/// the mask is added to it.
+fn fade_inwards(mask: &mut [f32], width: usize, height: usize, band: usize, open: [bool; 4]) {
     if band == 0 || width == 0 || height == 0 || mask.len() != width * height {
         return;
     }
-    // Three box blurs make a Gaussian near enough, about `band` / 2 wide.
-    let radius = (band / 4).max(1);
-    let mut soft = mask.to_vec();
-    for _ in 0..3 {
-        soft = box_blur_rows(&soft, width, radius);
+    // Three box blurs make a Gaussian near enough, about `band` / 2 wide. Wider than the picture
+    // they blur no further, and the padding below stays the picture's size.
+    let radius = (band / 4).clamp(1, width.max(height));
+    // An open side is padded with its edge, as far as the blurs reach.
+    let [left, top, right, bottom] = open.map(|o| if o { 3 * radius + 1 } else { 0 });
+    let (w, h) = (width + left + right, height + top + bottom);
+    let mut soft = Vec::with_capacity(w * h);
+    for y in 0..h {
+        let row = y.saturating_sub(top).min(height - 1) * width;
+        soft.extend((0..w).map(|x| mask.get(row + x.saturating_sub(left).min(width - 1)).copied().unwrap_or(0.0)));
     }
-    soft = transposed(&soft, width, height);
     for _ in 0..3 {
-        soft = box_blur_rows(&soft, height, radius);
+        soft = box_blur_rows(&soft, w, radius);
     }
-    soft = transposed(&soft, height, width);
+    soft = transposed(&soft, w, h);
+    for _ in 0..3 {
+        soft = box_blur_rows(&soft, h, radius);
+    }
+    soft = transposed(&soft, h, w);
     // Half covered is the edge itself: from there to fully covered becomes 0 to 1.
-    for (m, s) in mask.iter_mut().zip(soft) {
+    for (i, m) in mask.iter_mut().enumerate() {
+        let s = soft.get((i / width + top) * w + i % width + left).copied().unwrap_or(0.0);
         *m = m.min((2.0 * s - 1.0).clamp(0.0, 1.0));
     }
 }
@@ -919,28 +930,87 @@ fn source_param(p: &Value) -> Result<Option<SourceRef>> {
 /// layer is transparent) and the selection there as the mask, both at `size`. With `fade` the
 /// mask fades in from the selection's edge ([`MASK_FADE`]).
 fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Rect, size: (u32, u32), strength: f64, fade: bool) -> Result<Source> {
-    let (width, height) = size;
-    let pixels = pixel_count(size)?;
     let image = picture_png(layer, crop, size)?;
-    // Transparent where the model paints: the selection's coverage, inverted, as alpha.
-    let mut coverage: Vec<f32> = resampled(selection, crop, width, height)
+    let mut coverage = coverage(selection, crop, size);
+    if fade {
+        fade_selection(&mut coverage, selected, crop, size, [false; 4]);
+    }
+    let mask = mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the area to inpaint".into()))?;
+    Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new() })
+}
+
+/// The mask an edit by a local model is given, so it composes what it paints inside the
+/// selection instead of anywhere in the picture it is shown: the selection inside `crop` at
+/// `size`, fading in from its edge ([`MASK_FADE`]) but not where the crop meets the canvas's
+/// edge and the selection goes on to it. Empty when it is all of the crop: the edit is the
+/// picture's.
+fn edit_mask(selection: &Surface, crop: Rect, canvas: Rect, size: (u32, u32)) -> Result<Vec<u8>> {
+    pixel_count(size)?;
+    let mut coverage = edge_held_coverage(selection, crop, size);
+    let open = [crop.x0 <= canvas.x0, crop.y0 <= canvas.y0, crop.x1 >= canvas.x1, crop.y1 >= canvas.y1];
+    fade_selection(&mut coverage, selection.content_bounds().intersect(&crop), crop, size, open);
+    if coverage.iter().all(|v| byte(*v) == 255) {
+        return Ok(Vec::new());
+    }
+    mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the selection to edit in".into()))
+}
+
+/// [`coverage`], sampled bilinearly with the crop's edge pixels held beyond it: a selection
+/// that goes on to the crop's edge is whole up to it, not half covered there.
+fn edge_held_coverage(selection: &Surface, crop: Rect, size: (u32, u32)) -> Vec<f32> {
+    let (cw, ch) = (crop.width().max(1) as usize, crop.height().max(1) as usize);
+    let channels = selection.format().channels().max(1);
+    let src: Vec<f32> =
+        selection.read_region(crop).chunks_exact(channels).map(|px| px.first().copied().filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0)).collect();
+    // Where output pixel `i` of `n` falls between source pixels of `m`: the two and the weight of the second.
+    let axis = |i: u32, n: u32, m: usize| {
+        let u = ((f64::from(i) + 0.5) * m as f64 / f64::from(n.max(1)) - 0.5).clamp(0.0, m.saturating_sub(1) as f64);
+        let a = u.floor() as usize;
+        (a, (a + 1).min(m.saturating_sub(1)), (u - a as f64) as f32)
+    };
+    let at = |x: usize, y: usize| src.get(y * cw + x).copied().unwrap_or(0.0);
+    let columns: Vec<_> = (0..size.0).map(|x| axis(x, size.0, cw)).collect();
+    let mut out = Vec::with_capacity(size.0 as usize * size.1 as usize);
+    for y in 0..size.1 {
+        let (y0, y1, fy) = axis(y, size.1, ch);
+        out.extend(columns.iter().map(|&(x0, x1, fx)| {
+            let top = at(x0, y0) + (at(x1, y0) - at(x0, y0)) * fx;
+            let bottom = at(x0, y1) + (at(x1, y1) - at(x0, y1)) * fx;
+            top + (bottom - top) * fy
+        }));
+    }
+    out
+}
+
+/// How much of each pixel of `crop`, rendered at `size`, the selection covers (0..=1).
+fn coverage(selection: &Surface, crop: Rect, size: (u32, u32)) -> Vec<f32> {
+    resampled(selection, crop, size.0, size.1)
         .chunks_exact(selection.format().channels().max(1))
         .map(|px| px.first().copied().filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0))
-        .collect();
-    if fade {
-        // The selection's shorter edge, in rendered pixels.
-        let (sx, sy) = (f64::from(width) / f64::from(crop.width().max(1)), f64::from(height) / f64::from(crop.height().max(1)));
-        let shorter = (f64::from(selected.width()) * sx).min(f64::from(selected.height()) * sy);
-        fade_inwards(&mut coverage, width as usize, height as usize, (shorter * MASK_FADE).round().clamp(0.0, 256.0) as usize);
+        .collect()
+}
+
+/// Fade `coverage` (of `crop` at `size`) in from the selection's edge over [`MASK_FADE`] of
+/// `selected`'s shorter edge; `open` as [`fade_inwards`].
+fn fade_selection(coverage: &mut [f32], selected: Rect, crop: Rect, size: (u32, u32), open: [bool; 4]) {
+    let (width, height) = size;
+    // The selection's shorter edge, in rendered pixels.
+    let (sx, sy) = (f64::from(width) / f64::from(crop.width().max(1)), f64::from(height) / f64::from(crop.height().max(1)));
+    let shorter = (f64::from(selected.width()) * sx).min(f64::from(selected.height()) * sy);
+    fade_inwards(coverage, width as usize, height as usize, (shorter * MASK_FADE).round().clamp(0.0, 256.0) as usize, open);
+}
+
+/// `coverage` at `size` as a mask PNG: transparent where the model paints.
+fn mask_png(coverage: Vec<f32>, size: (u32, u32)) -> Result<Vec<u8>> {
+    let pixels = pixel_count(size)?;
+    if coverage.len() != pixels {
+        return Err(EngineError::Other("the mask is not the picture's size".into()));
     }
     let mut mask = Vec::with_capacity(pixels * 4);
     for v in coverage {
         mask.extend([0, 0, 0, 255 - byte(v)]);
     }
-    if mask.len() != pixels * 4 {
-        return Err(EngineError::Other("could not read the area to inpaint".into()));
-    }
-    Ok(Source { image, mask: png(width, height, ChannelLayout::Rgba, mask)?, width, height, strength, edit: false, references: Vec::new() })
+    png(size.0, size.1, ChannelLayout::Rgba, mask)
 }
 
 /// How many more seeds a model that drew its refusal ([`photocraft_aigen::Family::draws_refusal`])
@@ -1169,6 +1239,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     } else {
         None
     };
+    // An edit of a picture of this document by a local model paints only inside the selection
+    // ([`edit_mask`]). A cloud model is shown the picture and answers with all of it.
+    let here = !matches!(source, Some(SourceRef::Document(id) | SourceRef::DocumentLayer { document: id, .. }) if id != d.doc.id.0);
+    let edit_selection = selection.clone().filter(|_| edit && here && model.provider.is_local());
+    let canvas = d.doc.bounds();
     // The pictures an edit refers to, as they are now.
     let reference_pictures = sent
         .iter()
@@ -1261,6 +1336,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 ctx.check()?;
                 if edit {
                     source.edit = true;
+                    if let Some(selection) = &edit_selection {
+                        source.mask = edit_mask(selection, plan.area, canvas, (source.width, source.height))?;
+                    }
                     for picture in &reference_pictures {
                         source.references.push(match picture {
                             Sent::Read(r) => r.png()?,
@@ -1489,7 +1567,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality}"##,
             enabled: can_generate,
             run: generate,
             journal: true,

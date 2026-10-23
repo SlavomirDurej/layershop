@@ -597,7 +597,7 @@ fn the_mask_fades_in_from_the_edge_of_what_it_covers_and_never_grows() {
     let (w, h) = (40usize, 30usize);
     let hard: Vec<f32> = (0..w * h).map(|i| if (10..30).contains(&(i % w)) { 1.0 } else { 0.0 }).collect();
     let mut soft = hard.clone();
-    fade_inwards(&mut soft, w, h, 8);
+    fade_inwards(&mut soft, w, h, 8, [false; 4]);
     let at = |x: usize, y: usize| soft[y * w + x];
     assert!(soft.iter().zip(&hard).all(|(s, m)| s <= m && (0.0..=1.0).contains(s)), "the fade only takes away");
     assert!(at(10, 15) < 0.2 && at(29, 15) < 0.2, "{} {}", at(10, 15), at(29, 15));
@@ -605,11 +605,21 @@ fn the_mask_fades_in_from_the_edge_of_what_it_covers_and_never_grows() {
     assert!(at(12, 15) < at(14, 15) && at(14, 15) < at(18, 15));
     // The picture's own edge counts as an edge: there is nothing beyond it to join.
     assert!(at(20, 0) < 0.2 && at(20, 29) < 0.2);
+    // Unless the mask goes on past it (the canvas's edge): there it stays whole.
+    let mut open = hard.clone();
+    fade_inwards(&mut open, w, h, 8, [false, true, false, true]);
+    let at = |x: usize, y: usize| open[y * w + x];
+    assert!(at(20, 0) > 0.95 && at(20, 29) > 0.95 && at(10, 15) < 0.2, "{} {} {}", at(20, 0), at(20, 29), at(10, 15));
+    let mut all = vec![1.0; w * h];
+    fade_inwards(&mut all, w, h, 8, [true; 4]);
+    assert!(all.iter().all(|v| *v >= 1.0));
     // No band, an empty picture or a buffer of the wrong size: left alone, not a panic.
     for (len, w, h, band) in [(w * h, w, h, 0), (0, 0, 0, 8), (7, w, h, 8), (w * h, w, h, 100_000)] {
-        let mut m = vec![1.0; len];
-        fade_inwards(&mut m, w, h, band);
-        assert!(m.iter().all(|v| (0.0..=1.0).contains(v)));
+        for open in [[false; 4], [true; 4]] {
+            let mut m = vec![1.0; len];
+            fade_inwards(&mut m, w, h, band, open);
+            assert!(m.iter().all(|v| (0.0..=1.0).contains(v)));
+        }
     }
     assert_eq!(box_blur_rows(&[], 0, 3), Vec::<f32>::new());
 }
@@ -1026,9 +1036,17 @@ fn an_edit_with_a_selection_is_cropped_edited_and_composited() {
     let image = fake.uploaded("photocraft_inpaint_image.png");
     assert_eq!((image.width(), image.height()), (992, 992));
     let uploads = fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/upload/image")).count();
-    assert_eq!(uploads, 1, "the picture, and no mask");
+    assert_eq!(uploads, 2, "the picture and the selection as a mask");
     let queued = fake.queued().to_string();
-    assert!(queued.contains("TextEncodeQwenImage21") && queued.contains("make it green") && !queued.contains("SetLatentNoiseMask"), "{queued}");
+    assert!(queued.contains("TextEncodeQwenImage21") && queued.contains("make it green") && queued.contains("SetLatentNoiseMask"), "{queued}");
+    // The model paints only in the selection (transparent), fading in from its edge, so what it
+    // paints is composed inside it and not cut by the layer mask.
+    let mask = fake.uploaded("photocraft_inpaint_mask.png");
+    assert_eq!((mask.width(), mask.height()), (992, 992));
+    let alpha = |x: usize, y: usize| mask.data()[(y * 992 + x) * 4 + 3];
+    // The selection is x, y = 4..20 of the 24 px area: 165..827 rendered.
+    assert_eq!((alpha(496, 496), alpha(100, 496), alpha(900, 900)), (0, 255, 255));
+    assert!((1..255).contains(&alpha(175, 496)), "{}", alpha(175, 496));
     // A new layer over that area, masked by the selection: green inside it, untouched outside.
     assert_eq!(layer_count(&s), before + 1);
     {
@@ -1056,6 +1074,26 @@ fn an_edit_with_a_selection_is_cropped_edited_and_composited() {
     assert_eq!(r["bounds"], json!([16, 12, 16, 16]));
     let r = s.execute("ai.generate", json!({"prompt": "x", "mode": "imgEdit", "source": {"layer": background}, "rect": [0, 0, 32, 16]})).unwrap();
     assert_eq!((&r["bounds"], &r["renderSize"]), (&json!([0, 0, 32, 16]), &json!([1408, 704])));
+}
+
+#[test]
+fn an_edit_of_all_the_picture_is_not_masked() {
+    // Everything selected: the whole picture is the model's to change, up to the canvas's edge.
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    s.execute("select.all", json!({})).unwrap();
+    s.execute("ai.generate", json!({"prompt": "make it green", "mode": "imgEdit", "seed": 3})).unwrap();
+    let uploads = fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/upload/image")).count();
+    assert_eq!(uploads, 1, "the picture, and no mask");
+    assert!(!fake.queued().to_string().contains("SetLatentNoiseMask"));
+    // A selection at the canvas's edge is whole there: it fades in from its inner edges only.
+    let canvas = Rect::new(0, 0, 64, 48);
+    s.execute("select.rect", json!({"x": 0, "y": 0, "width": 32, "height": 48})).unwrap();
+    let selection = s.active().unwrap().doc.selection.clone().unwrap();
+    let mask = photocraft_codecs::decode(&edit_mask(&selection, canvas, canvas, (640, 480)).unwrap()).unwrap();
+    let alpha = |x: usize, y: usize| mask.data()[(y * 640 + x) * 4 + 3];
+    assert_eq!((alpha(0, 240), alpha(100, 0), alpha(100, 479), alpha(500, 240)), (0, 0, 0, 255));
+    assert!(alpha(318, 240) > 0, "faded at its inner edge");
 }
 
 #[test]
