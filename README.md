@@ -26,6 +26,7 @@
 </p>
 
 https://github.com/user-attachments/assets/476dd370-8cc9-4476-8401-1771848b3de3
+
 ▶ [Watch the 3½-minute walkthrough on YouTube](https://youtu.be/dCBiipZ03dA)
 
 > [!NOTE]
