@@ -6,6 +6,10 @@
   Local models run on your own graphics card. Nothing leaves your PC.
 </p>
 
+
+https://github.com/user-attachments/assets/476dd370-8cc9-4476-8401-1771848b3de3
+▶ [Watch the 3½-minute walkthrough on YouTube](https://youtu.be/dCBiipZ03dA)
+
 <p align="center">
   <a href="https://layershop.aardvarkstudios.net/download/"><b>Download for Windows</b></a> ·
   <a href="https://layershop.aardvarkstudios.net/">Website</a> ·
