@@ -61,7 +61,8 @@ mod native {
         /// Hold every download until this is cleared.
         hold: AtomicBool,
         /// A gated file (by address) and the token whose owner accepted its licence: other tokens
-        /// get 403, no token 401, as Hugging Face answers.
+        /// get 403, no token (or a `revoked…` one) 401, as Hugging Face answers. `moved`: the file
+        /// is not there any more, 404 to anyone signed in.
         gated: std::sync::Mutex<HashMap<String, String>>,
     }
 
@@ -70,6 +71,8 @@ mod native {
             if let Some(accepted) = self.gated.lock().unwrap().get(url) {
                 let status = match token {
                     None => 401,
+                    Some(t) if t.starts_with("revoked") => 401,
+                    Some(_) if accepted == "moved" => 404,
                     Some(t) if t == accepted => 200,
                     Some(_) => 403,
                 };
@@ -640,11 +643,34 @@ mod native {
         assert!(!rig.s.ai.hf().signed_in() && !rig.s.ai.keys_json().contains("hf_oauth_fresh") && rig.s.ai.take_keys_dirty());
         assert_eq!(rig.run("ai.setup.hfAccess", models).unwrap()["models"][0]["access"], "signIn");
         // A sign-in Hugging Face won't renew any more is signed out, and says why.
-        rig.s.ai.set_hf(&Credentials { expires_at: 1, ..renewed });
+        rig.s.ai.set_hf(&Credentials { expires_at: 1, ..renewed.clone() });
         hub.token_answer.lock().unwrap().clear();
         let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})).unwrap();
         assert_eq!(access["models"][0]["access"], "signIn");
         assert!(access["note"].as_str().unwrap().contains("Sign in again") && !rig.s.ai.hf().signed_in(), "{access}");
+        // Run out with no refresh token to renew it: the status says so before anything is asked,
+        // and the check forgets it without sending it.
+        rig.s.ai.set_hf(&Credentials { expires_at: 1, refresh: String::new(), ..renewed.clone() });
+        let status = rig.run("ai.setup.hfStatus", json!({})).unwrap();
+        assert_eq!((status["signedIn"].as_bool(), status["expired"].as_bool()), (Some(false), Some(true)));
+        let asked = hub.seen.lock().unwrap().len();
+        let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})).unwrap();
+        assert!(access["note"].as_str().unwrap().contains("expired") && !rig.s.ai.hf().signed_in(), "{access}");
+        assert_eq!(hub.seen.lock().unwrap().len(), asked, "an expired token is not sent");
+        // A sign-in Hugging Face refuses (the app disconnected in Connected apps, say) is not shown
+        // as signed in any more: forgotten, and the note says why.
+        rig.s.ai.set_hf(&Credentials { access: "revoked-token".into(), expires_at: 0, ..renewed.clone() });
+        let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})).unwrap();
+        assert_eq!((access["models"][0]["access"].as_str(), access["signedIn"].as_bool()), (Some("signIn"), Some(false)));
+        assert!(access["note"].as_str().unwrap().contains("no longer accepts") && !rig.s.ai.hf().signed_in(), "{access}");
+        assert_eq!(rig.run("ai.setup.hfStatus", json!({})).unwrap()["signedIn"], false);
+        // A file its maker moved: that model is unavailable and says why; the sign-in stays.
+        net.gated.lock().unwrap().values_mut().for_each(|t| *t = "moved".into());
+        rig.s.ai.set_hf(&Credentials { expires_at: 0, ..renewed });
+        let access = rig.run("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})).unwrap();
+        assert_eq!((access["models"][0]["access"].as_str(), access["signedIn"].as_bool()), (Some("unavailable"), Some(true)), "{access}");
+        assert!(access["models"][0]["detail"].as_str().unwrap().contains("newer version"), "{access}");
+        assert!(rig.s.ai.hf().signed_in());
     }
 
     #[test]

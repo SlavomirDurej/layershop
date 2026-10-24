@@ -78,7 +78,8 @@ struct DemoFetch {
     /// Bytes a second of a trickle.
     rate: u64,
     /// The gated files, by address, and the token whose owner accepted their licence: no token
-    /// is 401, another one 403, as Hugging Face answers.
+    /// (or a `revoked…` one) is 401, another one 403, as Hugging Face answers. `moved`: the files
+    /// are not there any more, 404 to anyone signed in.
     gated: Vec<String>,
     accepted: Arc<Mutex<String>>,
 }
@@ -89,10 +90,17 @@ impl Fetch for DemoFetch {
             let accepted = self.accepted.lock().unwrap_or_else(PoisonError::into_inner).clone();
             let status = match token {
                 None => 401,
+                Some(t) if t.starts_with("revoked") => 401,
+                Some(_) if accepted == "moved" => 404,
                 Some(t) if !accepted.is_empty() && t == accepted => 200,
                 Some(_) => 403,
             };
-            return Ok(Head { status, error_code: (status != 200).then(|| "GatedRepo".to_string()), ..Head::default() });
+            let code = match status {
+                200 => None,
+                404 => Some("EntryNotFound".to_string()),
+                _ => Some("GatedRepo".to_string()),
+            };
+            return Ok(Head { status, error_code: code, ..Head::default() });
         }
         Ok(Head { status: 200, size: self.files.get(url).map(|f| f.len() as u64), sha256: None, ..Head::default() })
     }
@@ -447,6 +455,7 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// with ComfyUI Desktop; `pc-checking` the first screen while this PC is looked at (for real);
 /// `models-hf`, `models-licence` and `models-ready` the Models screen with
 /// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
+/// `models-moved` and `sign-in-moved` signed in with FLUX.3 Klein's file moved by its maker,
 /// `models-light` the Models screen on an 8 GB card (the Light preset, MOSS Image first),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
 /// asks while a setup runs; `aigen-empty` the AI Gen panel with nothing set up and no ComfyUI
@@ -463,6 +472,8 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         "models-ready" => Some((true, Some(TOKEN), false)),
         "sign-in" => Some((false, None, true)),
         "sign-in-licence" => Some((true, Some("someone-elses"), true)),
+        "models-moved" => Some((true, Some("moved"), false)),
+        "sign-in-moved" => Some((true, Some("moved"), true)),
         _ => None,
     };
     if let Some((signed_in, accepted_by, asked)) = gated {

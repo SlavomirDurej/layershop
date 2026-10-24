@@ -871,10 +871,17 @@ fn needs_sign_in(app: &PhotocraftApp) -> Vec<Value> {
     app.ui.ai_setup.plan.as_ref().map(|p| list(p, "/needsSignIn").to_vec()).unwrap_or_default()
 }
 
-/// Where a gated model stands: `signIn`, `licence`, `ready`, or empty while not known.
+/// Where a gated model stands: `signIn`, `licence`, `ready`, `unavailable`, or empty while not
+/// known.
 fn access_of(app: &PhotocraftApp, id: &str) -> String {
     let Some(access) = &app.ui.ai_setup.access else { return String::new() };
     list(access, "/models").iter().find(|m| text(m, "/id") == id).map(|m| text(m, "/access").to_string()).unwrap_or_default()
+}
+
+/// What Hugging Face said about a gated model, when it says more than its state.
+fn detail_of(app: &PhotocraftApp, id: &str) -> String {
+    let Some(access) = &app.ui.ai_setup.access else { return String::new() };
+    list(access, "/models").iter().find(|m| text(m, "/id") == id).map(|m| text(m, "/detail").to_string()).unwrap_or_default()
 }
 
 /// Can every ticked gated model be downloaded?
@@ -1896,9 +1903,9 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     }
                     _ => {}
                 }
-                // A gated model still to come: where it stands, and the one thing to do next.
+                // A gated model still to come: where it stands (the panel below says what to do).
                 if gated && on && needing.iter().any(|m| text(m, "/id") == id) {
-                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| gated_state(app, ui, &id, text(&model, "/page")));
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| gated_state(app, ui, &id));
                 }
                 if installed && managed {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -1924,7 +1931,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
     });
     let tail_top = ui.cursor().top();
-    // A gated model among the ticked ones: the Hugging Face account, and the token fallback.
+    // A gated model among the ticked ones: signing in, the licence, and the token fallback.
     if any_gated && (!needing.is_empty() || hf_flag(app, "signedIn")) {
         ui.add_space(2.0);
         hf_panel(app, ui);
@@ -1950,15 +1957,12 @@ fn action(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-/// A gated model's row (laid out right to left): where it stands, and the one thing to do next.
-/// Sign in with Hugging Face, then Accept the licence, then it is ready.
-fn gated_state(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: &str, page: &str) {
+/// A gated model's row (laid out right to left): where it stands, in a few words. What to do
+/// about it is in the Hugging Face panel below the list, one place for every gated model.
+fn gated_state(app: &PhotocraftApp, ui: &mut egui::Ui, id: &str) {
     let t = Tokens::get(ui.ctx());
     let small = |s: &str, c: Color32| RichText::new(s).color(c).size(11.5);
     if app.session.ai_setup.signing_in() {
-        if action(ui, tr("Cancel"), t.text_dim).clicked() {
-            cancel_sign_in(app);
-        }
         ui.label(small(tr("Waiting for your browser\u{2026}"), t.text_dim));
         ui.add(egui::Spinner::new().size(12.0));
         return;
@@ -1970,44 +1974,51 @@ fn gated_state(app: &mut PhotocraftApp, ui: &mut egui::Ui, id: &str, page: &str)
             crate::icons::paint(ui, mark, "check", 12.0, t.accent_text);
         }
         "licence" => {
-            if action(ui, tr("Check again"), t.text_dim).clicked() {
-                check_access(app);
-            }
-            if action(ui, tr("Accept the licence"), t.accent).on_hover_text(page).clicked() {
-                crate::links::open(app, ui.ctx(), page);
-            }
-            ui.label(small(tr("Step 2 of 2:"), t.warning));
+            ui.label(small(tr("Licence to accept (below)"), t.warning));
+        }
+        "unavailable" => {
+            ui.label(small(tr("Not available in this version"), t.danger)).on_hover_text(detail_of(app, id));
         }
         _ if app.ui.ai_setup.access_job.is_some() => {
             ui.label(small(tr("Checking access\u{2026}"), t.text_dim));
             ui.add(egui::Spinner::new().size(12.0));
         }
         _ => {
-            let can = hf_flag(app, "canSignIn");
-            if action(ui, if can { tr("Sign in with Hugging Face") } else { tr("Use an access token") }, t.accent).clicked() {
-                if can {
-                    sign_in(app, ui.ctx());
-                } else {
-                    app.ui.ai_setup.token_open = true;
-                }
-            }
-            ui.label(small(tr("Step 1 of 2:"), t.warning));
+            ui.label(small(tr("Needs a Hugging Face sign-in (below)"), t.warning));
         }
     }
 }
 
-/// Below the models, when a gated one is ticked: the Hugging Face account (who is signed in,
-/// Sign out), "How does this work?", and the access token as the fallback.
+/// Names joined for a sentence: "A", "A and B".
+fn names_of(models: &[Value]) -> String {
+    models.iter().map(|m| text(m, "/name")).collect::<Vec<_>>().join(&format!(" {} ", tr("and")))
+}
+
+/// Below the models, when a gated one is ticked: the one place to sign in. The account (Sign in
+/// with Hugging Face, or who is signed in and Sign out), then the licence still to accept, then
+/// the access token as the fallback.
 fn hf_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     use photocraft_aisetup::hf::{CONNECTED_APPS_URL, HELP_URL, TOKENS_URL};
     let t = Tokens::get(ui.ctx());
     let hf = app.ui.ai_setup.hf.clone().unwrap_or(Value::Null);
     let (signed, user, via) = (hf_flag(app, "signedIn"), text(&hf, "/user").to_string(), text(&hf, "/via").to_string());
+    let (signing, checking, can) = (app.session.ai_setup.signing_in(), app.ui.ai_setup.access_job.is_some(), hf_flag(app, "canSignIn"));
     let small = |s: &str, c: Color32| RichText::new(s).color(c).size(11.5);
+    let needs = needs_sign_in(app);
+    let state = |app: &PhotocraftApp, wanted: &str| needs.iter().filter(|m| access_of(app, text(m, "/id")) == wanted).cloned().collect::<Vec<_>>();
+    let (licence, gone) = (state(app, "licence"), state(app, "unavailable"));
+    // Why the last sign-in was forgotten (it expired, or Hugging Face refused it).
+    let forgotten = app.ui.ai_setup.access.as_ref().map(|a| text(a, "/note").to_string()).unwrap_or_default();
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 8.0;
         ui.label(RichText::new(tr("Hugging Face")).font(crate::theme::medium(12.0)).color(t.text));
-        if signed {
+        if signing {
+            ui.add(egui::Spinner::new().size(12.0));
+            ui.label(small(tr("Waiting for your browser: sign in there, then come back"), t.text_dim));
+            if action(ui, tr("Cancel"), t.text_dim).clicked() {
+                cancel_sign_in(app);
+            }
+        } else if signed {
             let mut who = if user.is_empty() { tr("Signed in").to_string() } else { format!("{} {user}", tr("Signed in as")) };
             if via == "token" {
                 who = format!("{who} {}", tr("(access token)"));
@@ -2021,15 +2032,54 @@ fn hf_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             if via == "oauth" {
                 link(app, ui, tr("Connected apps"), CONNECTED_APPS_URL);
             }
-        } else if app.session.ai_setup.signing_in() {
-            ui.label(small(tr("Waiting for your browser\u{2026}"), t.text_dim));
         } else {
-            ui.label(small(tr("Not signed in"), t.text_faint));
+            let waiting: Vec<Value> = needs.iter().filter(|m| access_of(app, text(m, "/id")) != "unavailable").cloned().collect();
+            if waiting.is_empty() {
+                ui.label(small(tr("Not signed in"), t.text_faint));
+            } else {
+                let need = if waiting.len() == 1 { tr("needs a free Hugging Face account.") } else { tr("need a free Hugging Face account.") };
+                ui.label(small(&format!("{} {need}", names_of(&waiting)), t.text_dim));
+            }
         }
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| link(app, ui, tr("How does this work?"), HELP_URL));
     });
+    if !signed && !signing && !forgotten.is_empty() {
+        ui.add(egui::Label::new(small(&forgotten, t.warning)).wrap());
+    }
+    // Signed in: the licences still to accept, each with the button that opens its page.
+    if signed && !signing {
+        for model in &licence {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                let next = format!("{} {} {}", tr("Next: accept the licence of"), text(model, "/name"), tr("on Hugging Face."));
+                ui.label(small(&next, t.text_dim));
+                if checking {
+                    ui.add(egui::Spinner::new().size(12.0));
+                } else {
+                    let page = text(model, "/page").to_string();
+                    if widgets::primary_button(ui, tr("Accept the Licence"), 0.0).on_hover_text(&page).clicked() {
+                        crate::links::open(app, ui.ctx(), &page);
+                    }
+                    if action(ui, tr("Check again"), t.text_dim).clicked() {
+                        check_access(app);
+                    }
+                }
+            });
+        }
+        for model in &gone {
+            ui.add(egui::Label::new(small(&detail_of(app, text(model, "/id")), t.danger)).wrap().selectable(true));
+        }
+    }
+    // The access token: the fallback while not signed in with Hugging Face.
+    if signed && via == "oauth" {
+        return;
+    }
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 12.0;
+        // Not signed in: the one button that does it, first on the line.
+        if !signed && !signing && can && widgets::primary_button(ui, tr("Sign In with Hugging Face"), 0.0).clicked() {
+            sign_in(app, ui.ctx());
+        }
         let toggled = ui
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
@@ -2042,7 +2092,7 @@ fn hf_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             app.ui.ai_setup.token_open = !app.ui.ai_setup.token_open;
         }
         if hf_flag(app, "found") && !signed {
-            let r = action(ui, tr("Use the Hugging Face sign-in found on this PC"), t.accent)
+            let r = action(ui, tr("Use the sign-in found on this PC"), t.accent)
                 .on_hover_text(tr("A Hugging Face token is saved on this PC (by huggingface-cli, or in HF_TOKEN). It is used only if you click here."));
             if r.clicked() {
                 use_found(app);
@@ -2844,36 +2894,56 @@ fn close_answered(app: &mut PhotocraftApp, answer: widgets::ButtonRole) {
 fn sign_in_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
     use widgets::{ButtonRole, DialogButton};
     let needs = needs_sign_in(app);
-    let Some(first) = needs.first().cloned() else {
+    if needs.is_empty() {
         // Unticked, or there already, meanwhile: nothing to ask.
         app.ui.ai_setup.ask = None;
         return;
-    };
+    }
+    let is = |m: &Value, wanted: &str| access_of(app, text(m, "/id")) == wanted;
+    // A model whose file moved can't come at all: no sign-in helps, so it is not one of the steps.
+    let (steps, gone): (Vec<Value>, Vec<Value>) = needs.iter().cloned().partition(|m| !is(m, "unavailable"));
+    let blocked: Vec<Value> = needs.iter().filter(|m| !is(m, "ready")).cloned().collect();
+    let first = steps.first().cloned().unwrap_or(Value::Null);
     let t = Tokens::get(ctx);
-    let names: Vec<&str> = needs.iter().map(|m| text(m, "/name")).collect();
-    let names = names.join(&format!(" {} ", tr("and")));
+    let names = names_of(if steps.is_empty() { &gone } else { &steps });
     let hf = app.ui.ai_setup.hf.clone().unwrap_or(Value::Null);
     let signed = hf_flag(app, "signedIn");
     let signing = app.session.ai_setup.signing_in();
     let checking = app.ui.ai_setup.access_job.is_some();
     let can = hf_flag(app, "canSignIn");
-    let ready = all_ready(app);
-    let licence_left = needs.iter().any(|m| access_of(app, text(m, "/id")) == "licence");
+    let ready = steps.iter().all(|m| is(m, "ready"));
+    let licence_left = steps.iter().any(|m| is(m, "licence"));
     let user = text(&hf, "/user").to_string();
     let (mut answer, mut go_sign_in, mut go_licence, mut recheck, mut use_token, mut cancel) = (None, false, false, false, false, false);
-    let without = format!("{} {}", tr("Install Without"), if needs.len() == 1 { text(&first, "/name") } else { tr("Them") });
+    let without = format!("{} {}", tr("Install Without"), match blocked.as_slice() { [one] => text(one, "/name"), _ => tr("Them") });
     let buttons = [
-        DialogButton::new(ButtonRole::Default, tr("Install"), 96.0).enabled(ready && !checking),
+        DialogButton::new(ButtonRole::Default, tr("Install"), 96.0).enabled(all_ready(app) && !checking),
         DialogButton::new(ButtonRole::Alternate, &without, 120.0),
         DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0),
     ];
     let modal = egui::Modal::new(egui::Id::new("ai-setup-sign-in")).show(ctx, |ui| {
         ui.set_max_width(500.0);
-        let title = if needs.len() == 1 { format!("{names} {}", tr("needs a Hugging Face sign-in")) } else { format!("{names} {}", tr("need a Hugging Face sign-in")) };
+        let title = match steps.len() {
+            0 => format!("{names} {}", tr("can't be downloaded by this version")),
+            1 => format!("{names} {}", tr("needs a Hugging Face sign-in")),
+            _ => format!("{names} {}", tr("need a Hugging Face sign-in")),
+        };
         ui.label(RichText::new(title).font(crate::theme::semibold(15.0)));
         ui.add_space(4.0);
         widgets::hairline(ui);
         ui.add_space(8.0);
+        for model in &gone {
+            ui.add(egui::Label::new(RichText::new(detail_of(app, text(model, "/id"))).color(t.danger)).wrap().selectable(true));
+            ui.add_space(6.0);
+        }
+        if steps.is_empty() {
+            ui.add_space(6.0);
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                answer = widgets::dialog_buttons(ui, &buttons);
+            });
+            return;
+        }
         let licence = text(&first, "/licence");
         let why = format!(
             "{} ({licence}). {}",
@@ -2931,8 +3001,9 @@ fn sign_in_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
             });
         });
         let error = [app.ui.ai_setup.note.as_str(), text(&hf, "/error")].into_iter().find(|e| !e.is_empty()).unwrap_or("").to_string();
-        let detail = list(app.ui.ai_setup.access.as_ref().unwrap_or(&Value::Null), "/models").iter().map(|m| text(m, "/detail")).find(|d| !d.is_empty()).unwrap_or("").to_string();
-        let said = if error.is_empty() { detail } else { error };
+        let forgotten = app.ui.ai_setup.access.as_ref().map(|a| text(a, "/note").to_string()).unwrap_or_default();
+        let detail = steps.iter().map(|m| detail_of(app, text(m, "/id"))).find(|d| !d.is_empty()).unwrap_or_default();
+        let said = [error, forgotten, detail].into_iter().find(|e| !e.is_empty()).unwrap_or_default();
         if !said.is_empty() {
             ui.add_space(6.0);
             ui.add(egui::Label::new(RichText::new(said).color(t.danger).size(12.0)).wrap().selectable(true));

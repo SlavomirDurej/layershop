@@ -329,11 +329,15 @@ dialog: the editor stays usable beside it.
   on a 24 GB card.
 - **Gated models** (FLUX.3 Klein: Black Forest Labs' FLUX Kommunity License) can be
   downloaded only by someone signed in to Hugging Face who accepted the licence on the model's
-  page. Its row says where the user stands and the one thing to do next: **Step 1 of 2: Sign in
-  with Hugging Face** → **Step 2 of 2: Accept the licence** (opens the model's page; **Check
-  again**, and coming back to the app checks by itself) → **Ready to download**. Install with
-  it ticked and not ready asks first (**Install**, **Install Without FLUX.3 Klein**,
-  **Cancel**): it is never silently left out.
+  page. Its row only says where it stands (**Needs a Hugging Face sign-in (below)**, **Licence
+  to accept (below)**, **Ready to download**, **Not available in this version**); what to do is
+  in one place, the Hugging Face panel under the list, which stays in view however far the list
+  is scrolled: **Sign In with Hugging Face** → **Next: accept the licence of …** with **Accept
+  the Licence** (opens the model's page; **Check again**, and coming back to the app checks by
+  itself) → signed in, nothing left to do. Install with it ticked and not ready asks first
+  (**Install**, **Install Without FLUX.3 Klein**, **Cancel**): it is never silently left out.
+  (Until 2026-10-24 the sign-in was a link in the model's row as well as the panel: two places,
+  and the row had to be scrolled to.)
   - **Sign in with Hugging Face** is OAuth 2 with PKCE as a public app (no client secret):
     the browser opens Hugging Face's page and comes back to a one-shot listener on
     `127.0.0.1:<any free port>`; a `state` that is not the one sent is refused, and it gives up
@@ -345,11 +349,20 @@ dialog: the editor stays usable beside it.
     empty, Sign in is unavailable and the token is the way in.
   - Where a model stands is one `HEAD` of its gated file with the token: 2xx (or the redirect
     to the CDN) ready, 401 not signed in (Hugging Face answers a token it doesn't take the same
-    way, `X-Error-Code: GatedRepo`), 403 signed in without the licence. Nothing is downloaded.
+    way, `X-Error-Code: GatedRepo`), 403 signed in without the licence, 404 **unavailable**: the
+    maker renamed the file, and only a newer manifest knows where it went (signed out, Hugging
+    Face answers 401 before it looks for the file, so this shows only to someone signed in; BFL
+    renamed FLUX.3 Klein's files on 2026-10-17 and that is how it showed). Nothing is downloaded.
+  - A sign-in Hugging Face no longer takes is not shown as signed in: one that ran out with no
+    refresh token to renew it (`Credentials::expired`; `hfStatus` says `expired`), or one a
+    `HEAD` answers 401 (it expired, or the app was revoked in Connected apps), is forgotten by
+    the access check, and the panel says why above **Sign In with Hugging Face**. The app's
+    access tokens last as long as its Hugging Face settings say (30 days at most).
   - **Use an access token instead** (collapsed) is the fallback, for organisation token
     policies or a sign-in that fails: a read token, checked with `/api/whoami-v2`. A token
     already on this PC (`HF_TOKEN`, or `huggingface_hub`'s token file) is offered as **Use the
-    Hugging Face sign-in found on this PC**, and used only on that click.
+    sign-in found on this PC**, and used only on that click. Signed in with Hugging Face, the
+    token fallback is hidden.
   - The sign-in (access and refresh token, expiry, username) is kept in `ai-keys.json` with the
     API keys: never in the preferences, never in what a command returns or `ui.inspect`
     reports, never logged. Every request with a token goes to `https://huggingface.co/` only;
@@ -773,7 +786,9 @@ as `ai.generate` names its params, so they can be passed straight back to it. In
   a setup resumable) and `hf.rs` (Hugging Face for the gated models: Sign in with PKCE and its
   loopback listener, refresh, userinfo / whoami, the access check, the token found on this PC). Everything but `UreqFetch` and the probe's system calls is tested without
   a network: the tests run whole setups against a fake network and engine.
-  `cargo xtask ai-manifest` compares the manifest with what GitHub and Hugging Face serve now;
+  `cargo xtask ai-manifest` compares the manifest with what GitHub and Hugging Face serve now
+  (a gated file through Hugging Face's tree API: its path and size, the sha256 being shown only
+  to someone signed in), so a renamed or moved file fails it;
   `cargo run -p photocraft-aisetup --example archive_contents -- <build.7z>` measures a new
   ComfyUI build (unpacked size, longest path) from its header alone.
   `cargo run --release -p photocraft-engine --example ai_setup -- <folder> install [model-id ...]`

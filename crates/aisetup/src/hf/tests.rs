@@ -100,6 +100,13 @@ fn the_code_becomes_tokens_and_a_name_and_they_are_renewed_before_they_expire() 
     // A token without an expiry, or pasted by hand, is never "about to expire".
     assert!(!Credentials { expires_at: 0, ..fresh.clone() }.needs_refresh(u64::MAX));
     assert!(!Credentials { via: Via::Token, ..fresh.clone() }.needs_refresh(u64::MAX));
+    // Run out with a refresh token: renewed, not expired. Without one (Hugging Face sends none, or
+    // a token pasted by hand that was given an end): expired.
+    assert!(!fresh.expired(u64::MAX));
+    assert!(Credentials { refresh: String::new(), ..fresh.clone() }.expired(fresh.expires_at));
+    assert!(!Credentials { refresh: String::new(), ..fresh.clone() }.expired(fresh.expires_at - 1));
+    assert!(!Credentials { refresh: String::new(), expires_at: 0, ..fresh.clone() }.expired(u64::MAX), "no end known: not expired");
+    assert!(!Credentials::default().expired(u64::MAX), "signed out is not expired");
     // A refresh without a new refresh token keeps the old one.
     assert_eq!(parse_tokens(br#"{"access_token":"hf_a","expires_in":10}"#, 5, "keep").unwrap().refresh, "keep");
     for junk in [&b""[..], b"[]", b"{}", br#"{"access_token":""}"#, br#"{"access_token":"has space"}"#, b"<html>"] {
@@ -189,6 +196,11 @@ fn each_gated_model_is_sign_in_then_licence_then_ready() {
     assert_eq!((a, detail.as_str(), asked), (Access::Licence, "", vec![Some("hf_x".to_string())]));
     assert_eq!(state(200, None, Some("hf_x")).0, Access::Ready);
     assert_eq!(state(302, None, Some("hf_x")).0, Access::Ready);
+    // Signed in, a file that is not there any more: that model can't come, and it says why.
+    let (a, detail, _) = state(404, Some("EntryNotFound"), Some("hf_x"));
+    assert_eq!(a, Access::Unavailable);
+    assert!(detail.contains("FLUX.3 Klein") && detail.contains("newer version"), "{detail}");
+    assert_eq!(state(410, None, Some("hf_x")).0, Access::Unavailable);
     // A 403 that is not about the licence says what it is.
     assert_eq!(state(403, Some("TokenPermission"), Some("hf_x")).1, "its own words");
     // Anything else is an error, not a state.

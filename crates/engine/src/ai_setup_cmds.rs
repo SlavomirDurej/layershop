@@ -764,9 +764,11 @@ mod native {
         let client = s.ai_setup.env.as_ref().map(|env| env.hf_client_id.clone()).unwrap_or_default();
         // A token on this PC is offered only when it is not the one in use already.
         let found = s.ai_setup.env.is_some() && hf::found_on_this_pc().is_some_and(|t| t != c.access);
+        // Run out and not renewable: not a sign-in any more (the next access check forgets it).
+        let expired = c.expired(hf::unix_now());
         Ok(json!({
             "available": s.ai_setup.env.is_some(),
-            "signedIn": c.signed_in(), "via": c.via, "user": c.user, "expiresAt": (c.expires_at != 0).then_some(c.expires_at),
+            "signedIn": c.signed_in() && !expired, "expired": expired, "via": c.via, "user": c.user, "expiresAt": (c.expires_at != 0).then_some(c.expires_at),
             "canSignIn": !client.trim().is_empty() && s.ai.transport.is_some(),
             "signingIn": s.ai_setup.signing_in(), "error": s.ai_setup.sign_in_error, "found": found, "seq": s.ai_setup.hf_seq,
             "links": {"help": hf::HELP_URL, "connectedApps": hf::CONNECTED_APPS_URL, "tokens": hf::TOKENS_URL},
@@ -813,6 +815,10 @@ mod native {
                         Err(e) => return Err(setup_error(e)),
                     }
                 }
+                if c.expired(now) {
+                    c = Credentials::default();
+                    note = "Your Hugging Face sign-in has expired. Sign in again.".into();
+                }
                 ctx.check()?;
                 if c.signed_in() && c.user.is_empty() {
                     let who = if c.via == hf::Via::OAuth { hf::userinfo(transport.as_ref(), &c.access) } else { hf::whoami(transport.as_ref(), &c.access) };
@@ -823,8 +829,14 @@ mod native {
                     }
                 }
                 ctx.check()?;
-                let token = c.signed_in().then_some(c.access.as_str());
-                let found = hf::access(&m, &models, token, env.fetch.as_ref()).map_err(setup_error)?;
+                let token = c.signed_in().then(|| c.access.clone());
+                let found = hf::access(&m, &models, token.as_deref(), env.fetch.as_ref()).map_err(setup_error)?;
+                // With a token, "sign in" means Hugging Face refused it (401): it is no sign-in
+                // any more, and the wizard says so instead of "Signed in as".
+                if token.is_some() && found.iter().any(|f| f.access == hf::Access::SignIn) {
+                    c = Credentials::default();
+                    note = "Hugging Face no longer accepts your sign-in (it expired, or the app was disconnected in Connected apps). Sign in again.".into();
+                }
                 Ok((c, found, note))
             },
             move |s, (c, found, note)| {
@@ -1090,7 +1102,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Hugging Face Sign-In",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {available,signedIn,via:oauth|token|none,user,expiresAt?,canSignIn (Sign in with Hugging Face is set up in this build),signingIn,error (why the last sign-in failed),found (a Hugging Face token is on this PC, for the user to choose to use),seq,links:{help,connectedApps,tokens}}: never a token"##,
+            params: r##"{} → {available,signedIn,expired (the sign-in ran out and can't be renewed: sign in again),via:oauth|token|none,user,expiresAt?,canSignIn (Sign in with Hugging Face is set up in this build),signingIn,error (why the last sign-in failed),found (a Hugging Face token is on this PC, for the user to choose to use),seq,links:{help,connectedApps,tokens}}: never a token"##,
             enabled: always,
             run: imp::hf_status,
             journal: false,
@@ -1100,7 +1112,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Check Hugging Face Access",
             menu: &[],
             shortcut: None,
-            params: r##"{"models":[id,…]?=every gated model} → {models:[{id,name,page,licence,access:signIn|licence|ready,detail}],signedIn,user,via,note}: where each gated model stands (one HEAD of its gated file: 401 sign in, 403 accept the licence, 2xx ready). Renews a sign-in about to expire. Downloads nothing"##,
+            params: r##"{"models":[id,…]?=every gated model} → {models:[{id,name,page,licence,access:signIn|licence|ready|unavailable,detail}],signedIn,user,via,note}: where each gated model stands (one HEAD of its gated file: 401 sign in, 403 accept the licence, 2xx ready, 404 unavailable: moved by its maker, a newer app version knows where). Renews a sign-in about to expire; one that expired or that Hugging Face refuses is forgotten, and `note` says so. Downloads nothing"##,
             enabled: can_install,
             run: imp::hf_access,
             journal: false,

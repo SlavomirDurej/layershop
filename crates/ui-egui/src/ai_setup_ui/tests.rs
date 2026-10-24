@@ -648,6 +648,45 @@ fn a_gated_model_is_sign_in_then_licence_then_ready_and_installs_only_then() {
 }
 
 #[test]
+fn a_moved_file_or_a_refused_sign_in_is_said_as_it_is() {
+    let (mut app, _dir, accepted, saved) = gated_app();
+    let c = ctx();
+    draw(&mut app, &c);
+    // Signed in, and the maker moved the file: that model can't come. The sign-in stays signed in,
+    // nothing reads as a sign-in error, and the question offers to install without it.
+    *accepted.lock().unwrap() = "moved".into();
+    demo::sign_in(&mut app);
+    refresh_hf(&mut app);
+    check_access(&mut app);
+    draw(&mut app, &c);
+    assert_eq!(access_of(&app, "flux-3-klein"), "unavailable");
+    assert!(hf_flag(&app, "signedIn") && app.ui.ai_setup.note.is_empty(), "{}", app.ui.ai_setup.note);
+    assert!(detail_of(&app, "flux-3-klein").contains("newer version"));
+    install_clicked(&mut app);
+    assert_eq!(app.ui.ai_setup.ask, Some(Ask::SignIn));
+    draw(&mut app, &c);
+    sign_in_answered(&mut app, widgets::ButtonRole::Default);
+    assert!(app.ui.ai_setup.ask.is_some() && !running(&app), "Install stays off");
+    sign_in_answered(&mut app, widgets::ButtonRole::Alternate);
+    assert_eq!(app.ui.ai_setup.models, ["qwen-image-2-1"]);
+    // A sign-in Hugging Face refuses (disconnected in Connected apps): not "Signed in as" any
+    // more. Forgotten, saved so, and the panel says why.
+    let (mut app, _dir, _accepted, saved2) = gated_app();
+    draw(&mut app, &c);
+    demo::sign_in(&mut app);
+    app.session.ai.set_hf(&photocraft_aisetup::hf::Credentials { access: "revoked-token".into(), ..app.session.ai.hf() });
+    refresh_hf(&mut app);
+    assert!(hf_flag(&app, "signedIn"));
+    check_access(&mut app);
+    draw(&mut app, &c);
+    assert!(!hf_flag(&app, "signedIn"));
+    assert_eq!(access_of(&app, "flux-3-klein"), "signIn");
+    assert!(text(app.ui.ai_setup.access.as_ref().unwrap(), "/note").contains("no longer accepts"));
+    assert!(!saved2.lock().unwrap().contains("revoked-token"), "the keys file forgets it");
+    assert!(!saved.lock().unwrap().contains("revoked-token"));
+}
+
+#[test]
 fn install_without_leaves_the_gated_model_out() {
     let (mut app, dir, _accepted, _saved) = gated_app();
     let c = ctx();

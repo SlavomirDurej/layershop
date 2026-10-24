@@ -4,7 +4,9 @@
 //! move and are replaced upstream, so this asks each host what it has now (a `HEAD` per file,
 //! nothing is downloaded) and fails on any difference. Hugging Face reports a file's size and
 //! sha256 in its headers; GitHub reports a release asset's in its API. A gated file answers 401
-//! without a sign-in and can't be compared: it is listed, not failed.
+//! without a sign-in, whether or not it is still there, so it is compared through Hugging Face's
+//! tree API instead, which lists a gated repository's files and sizes to anyone (the sha256 only
+//! to someone signed in).
 //!
 //! Run it before a release and whenever the pinned ComfyUI version changes. The unpacked size
 //! and longest path of a new ComfyUI build are measured with
@@ -57,6 +59,43 @@ impl Headers {
             key.trim().eq_ignore_ascii_case(name).then(|| value.trim().trim_matches('"').to_string())
         })
     }
+}
+
+/// A Hugging Face file address, `https://huggingface.co/<owner>/<repo>/resolve/<revision>/<path>`,
+/// as the tree API's address for the file's folder, and the file's path in the repository.
+fn tree_of(url: &str) -> Option<(String, String)> {
+    let rest = url.strip_prefix("https://huggingface.co/")?;
+    let mut parts = rest.splitn(5, '/');
+    let (owner, repo, resolve, revision, path) = (parts.next()?, parts.next()?, parts.next()?, parts.next()?, parts.next()?);
+    if resolve != "resolve" || path.is_empty() {
+        return None;
+    }
+    let folder = path.rsplit_once('/').map_or("", |(dir, _)| dir);
+    Some((format!("https://huggingface.co/api/models/{owner}/{repo}/tree/{revision}/{folder}"), path.to_string()))
+}
+
+/// A gated file compared through the tree API: `None` when the folder could not be listed.
+fn gated_line(key: &str, url: &str, size: u64, sha256: &str) -> Option<(String, bool)> {
+    let (api, path) = tree_of(url)?;
+    let listed: Value = serde_json::from_slice(&get(&api).ok()?).ok()?;
+    let entries = listed.as_array()?;
+    let Some(found) = entries.iter().find(|e| e.get("path").and_then(Value::as_str) == Some(path.as_str())) else {
+        let others: Vec<&str> = entries.iter().filter_map(|e| e.get("path").and_then(Value::as_str)).filter(|p| p.ends_with(".safetensors")).collect();
+        return Some((format!("MISSING  {key}: the repository has no {path} (it has {})", others.join(", ")), true));
+    };
+    let found_size = found.get("size").and_then(Value::as_u64);
+    // Hugging Face shows a gated file's sha256 only to someone signed in (`****` otherwise): then
+    // the size is what can be compared, and a rename or removal is still caught above.
+    let found_sha = found.pointer("/lfs/oid").and_then(Value::as_str).filter(|h| h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit()));
+    if found_sha.is_none() {
+        return Some(match found_size {
+            Some(s) if s == size => (format!("ok       {key} (gated: the size, through the tree API; its sha256 shows only signed in)"), false),
+            Some(s) => (format!("DIFFERS  {key}: size {s}, the manifest says {size}"), true),
+            None => (format!("UNKNOWN  {key}: the tree API did not report its size"), true),
+        });
+    }
+    let (line, differs) = compare(key, size, sha256, found_size, found_sha);
+    Some((format!("{line} (gated: compared through the tree API)"), differs))
 }
 
 /// One line of the report, and whether it is a difference.
@@ -113,9 +152,15 @@ pub fn run(root: &Path) -> Result<(), String> {
         let headers = Headers(head(url)?);
         let (line, differs) = match headers.status() {
             401 | 403 => {
-                gated += 1;
                 let marked = file.get("gated").and_then(Value::as_bool).unwrap_or(false);
-                (format!("gated    {key}: not compared (needs a sign-in){}", if marked { "" } else { "; the manifest does not mark it gated" }), !marked)
+                match gated_line(key, url, size, sha) {
+                    Some((line, differs)) if marked => (line, differs),
+                    Some((line, _)) => (format!("{line}; the manifest does not mark it gated"), true),
+                    None => {
+                        gated += 1;
+                        (format!("gated    {key}: not compared (its folder could not be listed){}", if marked { "" } else { "; the manifest does not mark it gated" }), !marked)
+                    }
+                }
             }
             // A renamed repository: the manifest should name where the file is now.
             301 | 307 | 308 if headers.get("x-linked-size").is_none() => {
@@ -155,6 +200,16 @@ mod tests {
         assert_eq!(h.get("etag"), None);
         assert_eq!(Headers(String::new()).status(), 0);
         assert_eq!(Headers("garbage".into()).status(), 0);
+    }
+
+    #[test]
+    fn a_hugging_face_address_names_its_folder_in_the_tree_api() {
+        let (api, path) = tree_of("https://huggingface.co/bfl/klein/resolve/main/diffusion_models/a.safetensors").unwrap();
+        assert_eq!(api, "https://huggingface.co/api/models/bfl/klein/tree/main/diffusion_models");
+        assert_eq!(path, "diffusion_models/a.safetensors");
+        assert_eq!(tree_of("https://huggingface.co/bfl/klein/resolve/main/a.safetensors").unwrap().0, "https://huggingface.co/api/models/bfl/klein/tree/main/");
+        assert_eq!(tree_of("https://huggingface.co/bfl/klein/blob/main/a.safetensors"), None);
+        assert_eq!(tree_of("https://github.com/bfl/klein/resolve/main/a"), None);
     }
 
     #[test]

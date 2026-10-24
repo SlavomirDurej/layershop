@@ -14,8 +14,9 @@
 //! `installed-models` show a setup that is there already; `pc-comfy` and `location-comfy` a
 //! machine with ComfyUI Desktop; `pc-no-card` and `pc-no-card-cpu` a virtual machine without a
 //! graphics card the engine can use (installing on the processor ticked); `models-light` the
-//! Models screen on an 8 GB card; `models-hf`, `models-licence`, `models-ready`, `sign-in` and
-//! `sign-in-licence` a gated model ticked; `close` the question Close asks while a setup runs;
+//! Models screen on an 8 GB card; `models-hf`, `models-licence`, `models-ready`, `models-moved`,
+//! `sign-in`, `sign-in-licence` and `sign-in-moved` a gated model ticked; `close` the question
+//! Close asks while a setup runs;
 //! `not-running` the popup Connect shows when no ComfyUI answers; `aigen-empty` the AI Gen panel
 //! with nothing set up; `install-error` and
 //! `install-failed` a setup stopped at its last step, its error window open and closed;
@@ -111,7 +112,7 @@ fn main() {
                 && !photocraft_ui_egui::ai_setup_ui::demo::show(&mut app, &demo_dir_in, page)
             {
                 eprintln!(
-                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-checking, pc-comfy, location-comfy, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, sign-in, sign-in-licence, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full or env"
+                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, pc-checking, pc-comfy, location-comfy, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, models-moved, sign-in, sign-in-licence, sign-in-moved, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full or env"
                 );
                 std::process::exit(2);
             }

@@ -13,7 +13,10 @@
 //!
 //! Where a model stands is asked with one `HEAD` of its gated file ([`access`]): `2xx` (or the
 //! redirect to the CDN) is ready, `401` is not signed in (or a token Hugging Face doesn't take),
-//! `403` is signed in without the licence accepted. Nothing is downloaded.
+//! `403` is signed in without the licence accepted, `404` is a file that is not there any more (the
+//! maker renamed it: only a newer manifest knows where it went). Nothing is downloaded. Signed
+//! out, Hugging Face answers 401 before it looks for the file, so a moved file shows only to
+//! someone signed in.
 //!
 //! An access token pasted by hand is the fallback (organisation token policies, or a sign-in
 //! that fails), checked with [`whoami`]. A token found on this PC (`HF_TOKEN`, or the
@@ -126,6 +129,13 @@ impl Credentials {
         !self.access.trim().is_empty()
     }
 
+    /// Has the access token run out at `now` (Unix seconds), with no refresh token to renew it?
+    /// Hugging Face would refuse it: it is a sign-in no more.
+    pub fn expired(&self, now: u64) -> bool {
+        let renewable = self.via == Via::OAuth && !self.refresh.is_empty();
+        self.signed_in() && self.expires_at != 0 && now >= self.expires_at && !renewable
+    }
+
     /// Should the access token be renewed before it is used, at `now` (Unix seconds)?
     pub fn needs_refresh(&self, now: u64) -> bool {
         self.via == Via::OAuth && !self.refresh.is_empty() && self.expires_at != 0 && now.saturating_add(REFRESH_MARGIN) >= self.expires_at
@@ -148,6 +158,9 @@ pub enum Access {
     Licence,
     /// It can be downloaded.
     Ready,
+    /// Its file is not on Hugging Face where this version of the app looks for it (renamed or
+    /// removed by its maker): signing in can't help, a newer version of the app can.
+    Unavailable,
 }
 
 /// A gated model and where it stands.
@@ -420,6 +433,13 @@ mod native {
                             if head.error_code.as_deref().is_some_and(|c| c != "GatedRepo") {
                                 entry.detail = said;
                             }
+                        }
+                        404 | 410 => {
+                            entry.access = Access::Unavailable;
+                            entry.detail = format!(
+                                "{} can't be downloaded by this version of the app: its maker moved its file on Hugging Face. Check for a newer version of the app, or leave the model out.",
+                                model.name
+                            );
                         }
                         status => return Err(crate::fetch::status_error(status, &file.url)),
                     }

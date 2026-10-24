@@ -209,10 +209,13 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::ZImage if !turbo => (m.steps, m.cfg, m.sampler) = (30, 4.0, "euler".into()),
             // Two megapixels: what the turbo model was judged at (2026-10-13).
             Family::Ernie if turbo => (m.steps, m.cfg, m.megapixels) = (8, 1.0, 2.0),
-            // The step-distilled Klein (`…_klein_sd_…`): its templates' 16 steps without guidance.
-            // `flux3_image_klein_…` without "base" is the base model under another name (the
-            // same file in BFL's repository).
-            Family::Flux3 if n.contains("klein_sd") || n.contains("klein-sd") => (m.steps, m.cfg) = (16, 1.0),
+            // The step-distilled Klein: its templates' 16 steps without guidance. BFL's first names
+            // marked it `…_klein_sd_…`, and `flux3_image_klein_…` without "base" was the base model
+            // under another name; since 2026-10-17 its repository names files with hyphens, and
+            // there every `flux3-image-klein-…` without "-base-" is the distilled one.
+            Family::Flux3 if n.contains("klein_sd") || n.contains("klein-sd") || (n.contains("flux3-image-klein-") && !n.contains("-base-")) => {
+                (m.steps, m.cfg) = (16, 1.0);
+            }
             Family::Flux2 if n.contains("klein") => {
                 // The "base" Klein is the undistilled one; the other renders in four steps.
                 if !n.contains("base") {
@@ -525,6 +528,12 @@ mod tests {
         let found = detect(&f);
         let plain = found.iter().find(|m| m.unet == "flux3_image_klein_nvfp4.safetensors").unwrap();
         assert_eq!((plain.family, plain.steps, plain.cfg), (Family::Flux3, 50, 3.5));
+        // BFL's names since 2026-10-17: hyphens, and only "-base-" is the base model.
+        f.get_mut("diffusion_models").unwrap().extend(["flux3-image-klein-int8-convrot.safetensors".into(), "flux3-image-klein-base-int8-convrot.safetensors".into()]);
+        let found = detect(&f);
+        let named = |unet: &str| found.iter().find(|m| m.unet == unet).map(|m| (m.family, m.steps, m.cfg)).unwrap();
+        assert_eq!(named("flux3-image-klein-int8-convrot.safetensors"), (Family::Flux3, 16, 1.0));
+        assert_eq!(named("flux3-image-klein-base-int8-convrot.safetensors"), (Family::Flux3, 50, 3.5));
         let ernie = by("ernie-image-turbo.safetensors");
         assert_eq!((ernie.steps, ernie.cfg, ernie.megapixels), (8, 1.0, 2.0));
         assert_eq!(by("ideogram4_fp8_scaled.safetensors").cfg, 5.0);
