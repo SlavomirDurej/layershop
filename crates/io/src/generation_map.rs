@@ -33,7 +33,7 @@ fn remap(mut g: Generation, layer: impl Fn(u64) -> Option<u64>) -> Generation {
 
 /// The item data for `l`'s generation, naming layers by the PSD ids in `ids`.
 fn encode(l: &Layer, ids: &HashMap<LayerId, u32>) -> Option<Vec<u8>> {
-    let g = remap(l.generation.clone()?, |id| ids.get(&LayerId(id)).map(|p| u64::from(*p)));
+    let g = remap(*l.generation.clone()?, |id| ids.get(&LayerId(id)).map(|p| u64::from(*p)));
     let mut data = serde_json::to_vec(&g).ok()?;
     if data.len() % 2 == 1 {
         data.push(b' ');
@@ -106,7 +106,7 @@ pub(crate) fn import(doc: &mut Document) {
     let found: Vec<(LayerId, Generation)> = walk.iter().filter_map(|(_, _, l)| Some((l.id, stored(l)?))).collect();
     for (id, g) in found {
         if let Some(l) = doc.layer_mut(id) {
-            l.generation = Some(remap(g, |psd| by_psd_id.get(&psd).copied()));
+            l.generation = Some(Box::new(remap(g, |psd| by_psd_id.get(&psd).copied())));
         }
     }
 }
@@ -118,7 +118,7 @@ mod tests {
 
     fn layer(g: Option<Generation>) -> Layer {
         let mut l = Layer::raster("L", PixelFormat::RGBA8);
-        l.generation = g;
+        l.generation = g.map(Box::new);
         l
     }
 

@@ -409,7 +409,8 @@ fn enhanced(g: &mut Graph, model: &Model, job: &Job, prompt: &str) -> Link {
 fn refined(g: &mut Graph, model: &Model, job: &Job, image: &Link, text: &Value) -> Result<Link> {
     let unet = g.node("UNETLoader", json!({"unet_name": model.refiner.trim(), "weight_dtype": "default"}));
     let unet = g.node("ModelSamplingAuraFlow", json!({"model": unet, "shift": 3.0}));
-    let clip = g.node("CLIPLoader", json!({"clip_name": file(&model.refiner_clip, "the refiner's text encoder file", model)?, "type": "lumina2", "device": "default"}));
+    let clip = g
+        .node("CLIPLoader", json!({"clip_name": file(&model.refiner_clip, "the refiner's text encoder file", model)?, "type": "lumina2", "device": "default"}));
     let vae = g.node("VAELoader", json!({"vae_name": file(&model.refiner_vae, "the refiner's VAE file", model)?}));
     let positive = g.node("CLIPTextEncode", json!({"text": text, "clip": clip}));
     let negative = g.node("ConditioningZeroOut", json!({"conditioning": positive}));
@@ -467,10 +468,8 @@ fn loaders(g: &mut Graph, model: &Model) -> Result<(Link, Link, Link)> {
     // ComfyUI's MOSS Image templates: the negative side of the guidance skips layer 22 over the
     // first half of the schedule (its authors' setting), which keeps detail with CFG.
     if f == Family::MossImage {
-        unet = g.node(
-            "SkipLayerGuidanceDiTSimple",
-            json!({"model": unet, "double_layers": "", "single_layers": "22", "start_percent": 0.0, "end_percent": 0.5}),
-        );
+        unet =
+            g.node("SkipLayerGuidanceDiTSimple", json!({"model": unet, "double_layers": "", "single_layers": "22", "start_percent": 0.0, "end_percent": 0.5}));
     }
     // ComfyUI's HiDream O1 template: the model works on pixels in patches, and this blends
     // shifted passes over the last fifth of the schedule so their edges don't show. Its Dev
@@ -1170,7 +1169,10 @@ mod tests {
         );
         // Skip layer guidance on layer 22 over the first half, sampled by KSampler at the template's settings.
         let slg = &node(&w, "SkipLayerGuidanceDiTSimple")["inputs"];
-        assert_eq!((&slg["double_layers"], &slg["single_layers"], &slg["start_percent"], &slg["end_percent"]), (&json!(""), &json!("22"), &json!(0.0), &json!(0.5)));
+        assert_eq!(
+            (&slg["double_layers"], &slg["single_layers"], &slg["start_percent"], &slg["end_percent"]),
+            (&json!(""), &json!("22"), &json!(0.0), &json!(0.5))
+        );
         let k = &node(&w, "KSampler")["inputs"];
         assert_eq!((&k["steps"], &k["cfg"], &k["sampler_name"], &k["scheduler"]), (&json!(25), &json!(2.5), &json!("er_sde"), &json!("simple")));
         assert_eq!(w[k["model"][0].as_str().unwrap()]["class_type"], "SkipLayerGuidanceDiTSimple");
@@ -1186,8 +1188,17 @@ mod tests {
         assert_eq!((&layout["bbox_coord_space"], &layout["bbox_format"]), (&json!("abs_centralized"), &json!("yxyx")));
         // A layout typed as the prompt goes as written; an odd size still gives a box inside it.
         let own = r#"{"summary":{"caption":"poster"},"items":[{"label":"text","caption":"title","text":"EXPLORE","bbox":[-300,-200,-200,200]}]}"#;
-        assert_eq!(moss_layout(&format!("  {own}
-"), 1024, 768), own);
+        assert_eq!(
+            moss_layout(
+                &format!(
+                    "  {own}
+"
+                ),
+                1024,
+                768
+            ),
+            own
+        );
         let odd: Value = serde_json::from_str(&moss_layout("x", 17, 3)).unwrap();
         assert_eq!(odd["items"][0]["bbox"], json!([-1, -7, 2, 8]));
         // JSON that is not a layout, and text that only starts like it, are a prompt like any other.
@@ -1225,7 +1236,6 @@ mod tests {
     fn ming_image_follows_its_templates() {
         let ming = Family::MingImage.preset();
         let has = |w: &Value, class: &str| classes(w).iter().any(|x| x == class);
-        let count = |w: &Value, class: &str| classes(w).iter().filter(|x| *x == class).count();
 
         // Text to image: FLUX's shift at the size asked for, a guider with the prompt alone, euler.
         let w = workflow(&ming, &job()).unwrap();
@@ -1275,6 +1285,16 @@ mod tests {
         let guider = &node(&w, "CFGGuider")["inputs"];
         assert_eq!((&guider["cfg"], &w[guider["negative"][0].as_str().unwrap()]["inputs"]["text"]), (&json!(3.0), &json!("blurry")));
         assert!(!has(&w, "BasicGuider"));
+    }
+
+    #[test]
+    fn ming_image_follows_its_edit_templates() {
+        let ming = Family::MingImage.preset();
+        let has = |w: &Value, class: &str| classes(w).iter().any(|x| x == class);
+        let count = |w: &Value, class: &str| classes(w).iter().filter(|x| *x == class).count();
+        let shown = |w: &Value| w[node(w, "PreviewImage")["inputs"]["images"][0].as_str().unwrap()]["class_type"].as_str().unwrap().to_string();
+        let alpha = Job { alpha: true, ..job() };
+        let guided = Model { cfg: 3.0, negative_prompt: "blurry".into(), ..ming.clone() };
 
         // Given a picture it is sampled with the LCM sampler of its edit template, and answers
         // opaque: the phrase is for text to image.
@@ -1629,9 +1649,17 @@ mod tests {
             let masked = linked(&sampler["inputs"]["latent_image"]);
             assert_eq!(masked["class_type"], "SetLatentNoiseMask", "{f:?}");
             let encoded = linked(&masked["inputs"]["samples"]);
-            assert_eq!((encoded["class_type"].as_str(), linked(&encoded["inputs"]["pixels"])["inputs"]["image"].as_str()), (Some("VAEEncode"), Some("src.png")), "{f:?}");
+            assert_eq!(
+                (encoded["class_type"].as_str(), linked(&encoded["inputs"]["pixels"])["inputs"]["image"].as_str()),
+                (Some("VAEEncode"), Some("src.png")),
+                "{f:?}"
+            );
             // The mask is the second output of its Load Image (where the file is transparent).
-            assert_eq!((masked["inputs"]["mask"][1].as_u64(), linked(&masked["inputs"]["mask"])["inputs"]["image"].as_str()), (Some(1), Some("mask.png")), "{f:?}");
+            assert_eq!(
+                (masked["inputs"]["mask"][1].as_u64(), linked(&masked["inputs"]["mask"])["inputs"]["image"].as_str()),
+                (Some(1), Some("mask.png")),
+                "{f:?}"
+            );
             // A soft mask is honoured, and the model still sees the picture and its reference.
             let c = classes(&w);
             assert!(c.iter().any(|x| x == "DifferentialDiffusion"), "{f:?}: {c:?}");

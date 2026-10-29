@@ -158,7 +158,13 @@ pub fn run(root: &Path) -> Result<(), String> {
                     Some((line, _)) => (format!("{line}; the manifest does not mark it gated"), true),
                     None => {
                         gated += 1;
-                        (format!("gated    {key}: not compared (its folder could not be listed){}", if marked { "" } else { "; the manifest does not mark it gated" }), !marked)
+                        (
+                            format!(
+                                "gated    {key}: not compared (its folder could not be listed){}",
+                                if marked { "" } else { "; the manifest does not mark it gated" }
+                            ),
+                            !marked,
+                        )
                     }
                 }
             }

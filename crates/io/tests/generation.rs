@@ -14,7 +14,7 @@ fn document(depth: SampleType) -> Document {
     let other = Layer::raster("Other", fmt);
     let (photo_id, other_id) = (photo.id.0, other.id.0);
     let mut txt = Layer::raster("[z] a green field", fmt);
-    txt.generation = Some(Generation {
+    txt.generation = Some(Box::new(Generation {
         mode: GenerationMode::Txt2img,
         model: "z-image-turbo".into(),
         model_name: "Z Image Turbo".into(),
@@ -24,9 +24,9 @@ fn document(depth: SampleType) -> Document {
         alpha: true,
         seed: 0xFFFF_FFFF_FFFF,
         ..Default::default()
-    });
+    }));
     let mut edit = Layer::raster("[q] make it night", fmt);
-    edit.generation = Some(Generation {
+    edit.generation = Some(Box::new(Generation {
         mode: GenerationMode::ImgEdit,
         model: "qwen-edit".into(),
         model_name: "Qwen Edit".into(),
@@ -43,7 +43,7 @@ fn document(depth: SampleType) -> Document {
             GenerationSource::Layer(u64::MAX).into(),
         ],
         quality: GenerationQuality::Draft,
-    });
+    }));
     // In a group: the walk reaches it.
     doc.layers = vec![photo, other, txt, Layer::group("Group", vec![edit])];
     doc
@@ -56,12 +56,12 @@ fn layer<'a>(doc: &'a Document, name: &str) -> &'a Layer {
 /// What `doc`'s generations should read as once it has been through a file.
 fn check(back: &Document, original: &Document) {
     assert_eq!(layer(back, "[z] a green field").generation, layer(original, "[z] a green field").generation);
-    let edit = layer(back, "[q] make it night").generation.clone().unwrap();
+    let edit = *layer(back, "[q] make it night").generation.clone().unwrap();
     // The source and the reference name the layers the file gave new ids.
     assert_eq!(edit.source, Some(GenerationSource::Layer(layer(back, "Photo").id.0)));
     // A reference keeps its name in the file.
     assert_eq!(edit.references, vec![GenerationReference { source: GenerationSource::Layer(layer(back, "Other").id.0), name: "Luna".into() }]);
-    let was = layer(original, "[q] make it night").generation.clone().unwrap();
+    let was = *layer(original, "[q] make it night").generation.clone().unwrap();
     assert_eq!(Generation { source: None, references: vec![], ..edit }, Generation { source: None, references: vec![], ..was });
     assert_eq!((&layer(back, "Photo").generation, &layer(back, "Group").generation), (&None, &None));
 }

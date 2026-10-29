@@ -452,7 +452,7 @@ impl Stage {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::*;
+    use super::{Drive, Gpu, Host, Os, Probe, SYSTEM_SCRIPT, Stage, VcRuntime, merge_gpus, parse_nvidia_smi, parse_system};
     use crate::fetch::Fetch;
     use crate::manifest::Manifest;
     use photocraft_aigen::Transport;
@@ -484,7 +484,11 @@ mod native {
             "linux" => "Linux",
             other => other,
         };
-        (Os { name: name.to_string(), version: String::new(), sixty_four_bit: cfg!(target_pointer_width = "64"), windows: false, ..Os::default() }, Vec::new(), Vec::new())
+        (
+            Os { name: name.to_string(), version: String::new(), sixty_four_bit: cfg!(target_pointer_width = "64"), windows: false, ..Os::default() },
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     /// Look at this machine. `urls` are the addresses a ComfyUI is looked for at (the one in the

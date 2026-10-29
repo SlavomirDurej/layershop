@@ -338,10 +338,7 @@ pub fn sign_in(app: &mut PhotocraftApp) {
 /// The models folders of the stand-in's own ComfyUI, in `dir`: ComfyUI Desktop's shared one,
 /// where it saves new models, and the one in its base folder.
 pub fn comfy_folders(dir: &Path) -> Vec<String> {
-    [dir.join("ComfyUI-Shared").join("models"), dir.join("Documents").join("ComfyUI").join("models")]
-        .iter()
-        .map(|p| p.to_string_lossy().into_owned())
-        .collect()
+    [dir.join("ComfyUI-Shared").join("models"), dir.join("Documents").join("ComfyUI").join("models")].iter().map(|p| p.to_string_lossy().into_owned()).collect()
 }
 
 /// The machine of the website's walkthrough, as `ai.setup.probe` would describe it, with the

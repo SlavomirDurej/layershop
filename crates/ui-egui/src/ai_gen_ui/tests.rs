@@ -816,46 +816,26 @@ fn the_inpainting_box_follows_the_architecture_until_it_is_used() {
     assert_eq!(models.iter().map(|m| (m.inpaint, m.can_inpaint())).collect::<Vec<_>>(), [(None, true), (None, false)]);
 }
 
+/// The height the docked panel asks for (`panel_docking`'s `dock_heights`) grows with the rows it
+/// shows, so its Generate button stays in view.
 #[test]
-fn the_dock_gives_the_panel_room_for_its_generate_button() {
-    use crate::dock::{DockLayout, Group};
-    let shown = [Group::Color, Group::Properties, Group::Layers];
-    let layout = DockLayout::default();
-    // A 900-point window: Properties is squeezed to its compact height, less than the panel needs.
-    let plain = layout.heights_for(&shown, 800.0, 28.0);
+fn the_panel_asks_for_room_for_its_generate_button() {
     let mut app = app();
-    let want = 28.0 + wanted_height(&app);
-    assert!(plain[1].1 < want, "{plain:?}");
-    let roomy = layout.with_room(plain.clone(), Group::Properties, want);
-    assert_eq!(roomy[1].1, want);
-    // The room comes from Layers, which keeps its compact height; the column is as tall as before.
-    assert!(roomy[2].1 >= Group::Layers.compact_height());
-    assert_eq!(roomy.iter().map(|(_, h)| h).sum::<f32>(), plain.iter().map(|(_, h)| h).sum::<f32>());
+    let base = wanted_height(&app);
+    assert!(base.is_finite() && base > crate::dock::Group::Properties.compact_height(), "{base}");
     // A change has rows more: Edit's tasks and the mask tools. Advanced, open, adds its own.
     add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
     app.ui.ai_gen.mode = Mode::Edit;
-    assert_eq!(wanted_height(&app), want - 28.0 + 2.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 2.0 * ROW);
     app.ui.ai_gen.advanced = true;
-    assert_eq!(wanted_height(&app), want - 28.0 + 4.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 4.0 * ROW);
     // A model that changes a picture both ways has the method to choose as well.
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     app.ui.ai_gen.edit_model = "flux".into();
     app.ui.ai_gen.method = Method::Fill;
-    assert_eq!(wanted_height(&app), want - 28.0 + 5.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 5.0 * ROW);
     app.ui.ai_gen.mode = Mode::Create;
-    assert_eq!(wanted_height(&app), want - 28.0 + ROW);
-    app.ui.ai_gen.advanced = false;
-    // A column with nothing to spare gives nothing; a height the user dragged is theirs.
-    let tight = layout.heights_for(&shown, 420.0, 28.0);
-    assert_eq!(layout.with_room(tight.clone(), Group::Properties, want), tight);
-    let mut mine = DockLayout::default();
-    mine.heights.insert(Group::Properties, 120.0);
-    let dragged = mine.heights_for(&shown, 800.0, 28.0);
-    assert_eq!(mine.with_room(dragged.clone(), Group::Properties, want), dragged);
-    for hostile in [f32::NAN, f32::INFINITY, -5.0] {
-        assert_eq!(layout.with_room(plain.clone(), Group::Properties, hostile), plain);
-    }
-    assert!(layout.with_room(Vec::new(), Group::Properties, want).is_empty());
+    assert_eq!(wanted_height(&app), base + ROW);
 }
 
 #[test]
@@ -1214,30 +1194,6 @@ fn references_are_named_chips_the_document_keeps() {
     assert!(matches!(kept[0].picture, AiPicture::Image { .. }) && kept[1].picture == AiPicture::Layer(max), "{kept:?}");
     draw_panel(&mut app);
     assert_eq!(refs::kept(&app.session).len(), 3);
-    // What the prompt sends: all of them while it mentions none, then those it mentions.
-    let names = ["Luna", "Max", ""];
-    use refs::Sent::{All, Mentioned, No};
-    assert_eq!(refs::sent("put image 4 behind them", &names), [(All, Some(2)), (All, Some(3)), (All, Some(4))]);
-    assert_eq!(refs::sent("@max hugs @Luna", &names), [(Mentioned, Some(2)), (Mentioned, Some(3)), (No, None)]);
-    assert_eq!(refs::sent("@Max waves", &names), [(No, None), (Mentioned, Some(2)), (No, None)]);
-    // The prompt shows a mention in the accent colour, on a tint; other @words stay plain.
-    let job = refs::prompt_job("@Luna meets @Bob", &["Luna", "Max"], egui::FontId::proportional(12.0), egui::Color32::WHITE, egui::Color32::BLUE, 100.0);
-    let colored: Vec<(&str, egui::Color32)> =
-        job.sections.iter().map(|s| (&job.text[s.byte_range.start.0..s.byte_range.end.0], s.format.color)).filter(|(t, _)| !t.is_empty()).collect();
-    assert_eq!(colored, [("@Luna", egui::Color32::BLUE), (" meets @Bob", egui::Color32::WHITE)]);
-    // Typing @ offers the names; Tab or a click puts the one taken in, and a space after it.
-    let names = ["Luna", "Max", "Lucas"];
-    assert_eq!(refs::completion_at("hug @", 5, &names), Some((4..5, vec![0, 1, 2])));
-    assert_eq!(refs::completion_at("hug @lu", 7, &names), Some((4..7, vec![0, 2])));
-    assert_eq!(refs::completion_at("hug @Luna", 9, &names), None, "typed out already");
-    assert_eq!(refs::completion_at("me@lu", 5, &names), None, "inside a word");
-    assert_eq!(refs::completion_at("@lu x", 3, &names), Some((0..3, vec![0, 2])));
-    assert_eq!(refs::completion_at("@lux", 3, &names), None, "the word goes on past the cursor");
-    assert_eq!(refs::completion_at("hug @zz", 7, &names), None);
-    assert_eq!(refs::completion_at("🦆 @L", 4, &names), Some(("🦆 ".len().."🦆 @L".len(), vec![0, 2])));
-    assert_eq!(refs::completion_at("x", 99, &names), None);
-    assert_eq!(refs::complete("hug @lu now", 4..7, "Luna"), ("hug @Luna now".into(), 9));
-    assert_eq!(refs::complete("hug @lu", 4..7, "Luna"), ("hug @Luna ".into(), 10));
     // Generating sends the document's references; the engine sends the mentioned ones, the copy
     // as it was kept.
     app.ui.ai_gen.prompt = "@Luna sits beside @Max".into();
@@ -1271,6 +1227,35 @@ fn references_are_named_chips_the_document_keeps() {
     }
     app.run("edit.undo", json!({})).unwrap();
     assert_eq!(refs::kept(&app.session)[1].name, "Max");
+}
+
+/// The prompt names references with @: what it sends, how it shows them, and the names it offers.
+#[test]
+fn the_prompt_mentions_references_by_name_and_offers_them_after_an_at() {
+    // What the prompt sends: all of them while it mentions none, then those it mentions.
+    let names = ["Luna", "Max", ""];
+    use refs::Sent::{All, Mentioned, No};
+    assert_eq!(refs::sent("put image 4 behind them", &names), [(All, Some(2)), (All, Some(3)), (All, Some(4))]);
+    assert_eq!(refs::sent("@max hugs @Luna", &names), [(Mentioned, Some(2)), (Mentioned, Some(3)), (No, None)]);
+    assert_eq!(refs::sent("@Max waves", &names), [(No, None), (Mentioned, Some(2)), (No, None)]);
+    // The prompt shows a mention in the accent colour, on a tint; other @words stay plain.
+    let job = refs::prompt_job("@Luna meets @Bob", &["Luna", "Max"], egui::FontId::proportional(12.0), egui::Color32::WHITE, egui::Color32::BLUE, 100.0);
+    let colored: Vec<(&str, egui::Color32)> =
+        job.sections.iter().map(|s| (&job.text[s.byte_range.start.0..s.byte_range.end.0], s.format.color)).filter(|(t, _)| !t.is_empty()).collect();
+    assert_eq!(colored, [("@Luna", egui::Color32::BLUE), (" meets @Bob", egui::Color32::WHITE)]);
+    // Typing @ offers the names; Tab or a click puts the one taken in, and a space after it.
+    let names = ["Luna", "Max", "Lucas"];
+    assert_eq!(refs::completion_at("hug @", 5, &names), Some((4..5, vec![0, 1, 2])));
+    assert_eq!(refs::completion_at("hug @lu", 7, &names), Some((4..7, vec![0, 2])));
+    assert_eq!(refs::completion_at("hug @Luna", 9, &names), None, "typed out already");
+    assert_eq!(refs::completion_at("me@lu", 5, &names), None, "inside a word");
+    assert_eq!(refs::completion_at("@lu x", 3, &names), Some((0..3, vec![0, 2])));
+    assert_eq!(refs::completion_at("@lux", 3, &names), None, "the word goes on past the cursor");
+    assert_eq!(refs::completion_at("hug @zz", 7, &names), None);
+    assert_eq!(refs::completion_at("🦆 @L", 4, &names), Some(("🦆 ".len().."🦆 @L".len(), vec![0, 2])));
+    assert_eq!(refs::completion_at("x", 99, &names), None);
+    assert_eq!(refs::complete("hug @lu now", 4..7, "Luna"), ("hug @Luna now".into(), 9));
+    assert_eq!(refs::complete("hug @lu", 4..7, "Luna"), ("hug @Luna ".into(), 10));
 }
 
 #[test]

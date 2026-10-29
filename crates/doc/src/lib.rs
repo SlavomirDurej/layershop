@@ -320,6 +320,10 @@ pub struct Group {
     pub expanded: bool,
     /// Set when this (top-level) group is an artboard: children are clipped to its rect.
     pub artboard: Option<Artboard>,
+    /// A Photoshop Frame's stroke (Properties › Stroke; PSD `vstk` on the frame group): drawn
+    /// along the group's enabled vector mask (the frame outline), above the framed content and
+    /// not clipped by the frame. Ignored without a vector mask.
+    pub frame_stroke: Option<ShapeStroke>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -663,7 +667,13 @@ pub struct Layer {
     pub video: Option<VideoData>,
     /// The generative-AI generation this layer came from (model, prompt, settings); `None` for
     /// every other layer. Kept through edits and duplication, so the AI Gen panel can load it back.
-    pub generation: Option<Generation>,
+    /// Boxed: every layer carries the field, and deep imports (nested SVG groups) hold a layer
+    /// per level on the stack.
+    pub generation: Option<Box<Generation>>,
+    /// The layer's own XMP packet (Photoshop's `layer.xmpMetadata.rawData`), where scripts and
+    /// embedding apps keep data about the layer under their own namespaces. Copied by
+    /// [`Layer::duplicate`], as in Photoshop. PSD `shmd` › `cust` › `layerXMP`.
+    pub xmp: Option<Arc<str>>,
 }
 
 impl Layer {
@@ -689,6 +699,7 @@ impl Layer {
             effects: Effects { enabled: true, ..Default::default() },
             label: LabelColor::None,
             content,
+            generation: None,
             psd_blocks: Vec::new(),
             psd_id: None,
             fill_cache: None,
@@ -697,14 +708,14 @@ impl Layer {
             blend_if: BlendIf::default(),
             advanced: AdvancedBlending::default(),
             video: None,
-            generation: None,
+            xmp: None,
         }
     }
     pub fn raster(name: impl Into<String>, format: PixelFormat) -> Self {
         Self::new(name, LayerContent::Raster(Surface::new(format)))
     }
     pub fn group(name: impl Into<String>, children: Vec<Layer>) -> Self {
-        let mut l = Self::new(name, LayerContent::Group(Group { children, expanded: true, artboard: None }));
+        let mut l = Self::new(name, LayerContent::Group(Group { children, expanded: true, artboard: None, frame_stroke: None }));
         l.blend = BlendMode::PassThrough;
         l
     }
@@ -847,7 +858,10 @@ pub type PsdGlobalBlock = ([u8; 4], [u8; 4], Arc<Vec<u8>>);
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Metadata {
-    pub xmp: Option<String>,
+    /// The XMP packet as stored, kept as text so properties PhotoCraft doesn't model survive.
+    /// Shared like the other payloads here: cloning a document or a history state never copies
+    /// it (#4535).
+    pub xmp: Option<Arc<str>>,
     pub exif: Option<Arc<Vec<u8>>>,
     /// Free-form image text (PNG tEXt/zTXt/iTXt, TIFF ASCII tags), including duplicate keys.
     pub text: Vec<(String, String)>,
@@ -941,7 +955,8 @@ pub struct FileEncoding {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub webp_quality: Option<u8>,
     /// PNG stereo pairing (the `sTER` chunk's mode byte, PNG Extensions 1.4.0 §3.6): `Some(0)`
-    /// side by side, `Some(1)` stacked, so saving a stereo PNG keeps the mark (#6063).
+    /// cross-fuse (right eye first), `Some(1)` diverging-fuse (left eye first). Both are
+    /// side by side; saving a stereo PNG keeps this eye-order mark (#6063).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub png_stereo: Option<u8>,
 }
@@ -1509,7 +1524,7 @@ mod tests {
         assert_eq!(LayerContent::Adjustment(Adjustment::Invert).article(), "an");
         assert_eq!(LayerContent::Adjustment(Adjustment::Invert).kind_name(), "Adjustment");
         assert_eq!(LayerContent::Raster(Surface::new(PixelFormat::RGBA8)).article(), "a");
-        assert_eq!(LayerContent::Group(Group { children: Vec::new(), expanded: true, artboard: None }).article(), "a");
+        assert_eq!(LayerContent::Group(Group { children: Vec::new(), expanded: true, artboard: None, frame_stroke: None }).article(), "a");
     }
 }
 

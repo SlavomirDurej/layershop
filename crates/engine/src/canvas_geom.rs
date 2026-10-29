@@ -77,6 +77,41 @@ fn retag_text(dpi: f32, t: &mut TextLayer) {
     t.psd_raw = Some(Arc::new(photocraft_text::psd::build_tysh(t, dpi, layout.bounds())));
 }
 
+/// Sets the document resolution keeping every type layer's size in pixels, as Photoshop does (its
+/// point size changes instead). Text space is in pixels at `pt x dpi / 72`, so it grows by
+/// new / old: box and path scale with it, and the layer transform undoes that.
+pub(crate) fn set_resolution(doc: &mut Document, dpi: f32) {
+    let old = std::mem::replace(&mut doc.resolution_dpi, dpi);
+    if !(old.is_finite() && old > 0.0 && dpi.is_finite() && dpi > 0.0) || old == dpi {
+        return;
+    }
+    let k = f64::from(dpi) / f64::from(old);
+    let grow = Affine::scale(k);
+    crate::image_cmds::for_each_layer(&mut doc.layers, &mut |l| {
+        let LayerContent::Text(t) = &mut l.content else { return };
+        t.transform = t.transform.mul(&Affine::scale(1.0 / k));
+        match &mut t.shape {
+            photocraft_doc::text::TextShape::Box { x, y, width, height } => {
+                for v in [x, y, width, height] {
+                    *v = grown(*v, k);
+                }
+            }
+            photocraft_doc::text::TextShape::Path { path, start, .. } => {
+                path.knots.iter_mut().for_each(|kn| *kn = kn.transform(&grow));
+                *start = grown(*start, k);
+            }
+            photocraft_doc::text::TextShape::Area { path } => *path = path.transform(&grow),
+            photocraft_doc::text::TextShape::Point => {}
+        }
+        retag_text(dpi, t);
+    });
+}
+
+/// `v x k` kept finite (a huge box from a file must not become infinite).
+fn grown(v: f32, k: f64) -> f32 {
+    (f64::from(v) * k).clamp(-f64::from(f32::MAX), f64::from(f32::MAX)) as f32
+}
+
 /// Applies `a` to one layer's (and its children's) non-pixel geometry. With `content` false only
 /// the parts Free Transform (`transform_layer`) doesn't move are touched: unlinked vector masks,
 /// gradient fill angles, effect reference points and artboards.
@@ -101,6 +136,9 @@ pub(crate) fn transform_layer_geometry(l: &mut Layer, a: &Affine, content: bool,
         LayerContent::Shape(sh) => {
             if let Some(f) = &mut sh.fill {
                 map_fill(a, f);
+            }
+            if let Some(st) = &mut sh.stroke {
+                map_fill(a, &mut st.paint);
             }
             if content {
                 crate::vector_cmds::transform_shape(sh, a);
@@ -253,7 +291,8 @@ impl Turn {
 }
 
 /// Every pixel surface a canvas turn moves: content, rendered caches (type, shape, smart object,
-/// fill), masks (layer, smart filter), alpha channels, Quick Mask and the selection.
+/// fill), stored video frames (current and original), masks (layer, smart filter), alpha
+/// channels, Quick Mask and the selection.
 fn remap_pixels(doc: &mut Document, map: &dyn Fn(i32, i32) -> (i32, i32)) {
     fn rec(layers: &mut [Layer], map: &dyn Fn(i32, i32) -> (i32, i32)) {
         let re = |s: &mut Surface| *s = remap_surface(s, map);
@@ -263,6 +302,10 @@ fn remap_pixels(doc: &mut Document, map: &dyn Fn(i32, i32) -> (i32, i32)) {
             }
             if let Some(fc) = &mut l.fill_cache {
                 re(&mut fc.surface);
+            }
+            // Frames away from the playhead come back on scrubbing; they turn with the canvas (#4956).
+            if let Some(v) = &mut l.video {
+                v.frames.iter_mut().chain(v.original_frames.iter_mut().flatten()).for_each(re);
             }
             match &mut l.content {
                 LayerContent::Raster(s) => re(s),

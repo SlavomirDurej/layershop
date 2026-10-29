@@ -547,9 +547,44 @@ mod native {
         }
     }
 
-    #[test]
-    fn signing_in_with_hugging_face_unlocks_the_gated_model_and_signing_out_forgets_it() {
-        use photocraft_aisetup::hf::{self, Credentials};
+    /// Sign in as the browser does: Sign In, then Hugging Face sending the browser back to the
+    /// app's callback with a code; returns once the sign-in has ended.
+    fn sign_in_through_the_browser(rig: &mut Rig) {
+        let started = rig.run("ai.setup.hfSignIn", json!({"product": "LayerShop"})).unwrap();
+        let url = started["url"].as_str().unwrap().to_string();
+        assert!(rig.s.ai_setup.signing_in());
+        assert_eq!(rig.run("ai.setup.hfSignIn", json!({})).unwrap()["started"], false, "one at a time");
+        let port: u16 = url.split("127.0.0.1%3A").nth(1).and_then(|r| r.split("%2F").next()).unwrap().parse().unwrap();
+        let state = url.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
+        let mut browser = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+        std::io::Write::write_all(&mut browser, format!("GET /callback?code=c0de&state={state} HTTP/1.1\r\n\r\n").as_bytes()).unwrap();
+        let seq = rig.s.ai_setup.hf_seq();
+        let began = Instant::now();
+        while rig.s.ai_setup.hf_seq() == seq {
+            poll(&mut rig.s);
+            assert!(began.elapsed() < Duration::from_secs(10), "the sign-in did not end");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    /// No command answer, preference or debug line shows any of `secrets`.
+    fn assert_no_token_shown(rig: &mut Rig, models: &Value, secrets: &[&str]) {
+        for readable in [
+            rig.s.prefs_to_json(),
+            rig.run("ai.setup.status", json!({})).unwrap().to_string(),
+            rig.run("ai.setup.hfStatus", json!({})).unwrap().to_string(),
+            rig.run("ai.setup.hfAccess", models.clone()).unwrap().to_string(),
+            format!("{:?}", rig.s.ai),
+        ] {
+            for secret in secrets {
+                assert!(!readable.contains(secret), "{secret} in {readable}");
+            }
+        }
+    }
+
+    /// A setup whose FLUX.3 Klein is gated (open to `hf_oauth_first`), with Hugging Face answering
+    /// a sign-in with that token; not yet able to sign in (no app id).
+    fn gated_rig() -> (Rig, Arc<FakeNet>, Arc<HubAndComfy>) {
         let mut rig = Rig::new();
         let manifest = Arc::new(gated_manifest());
         let klein_url = manifest.files["diffusion_models/flux3_image_klein_base_int8_convrot.safetensors"].url.clone();
@@ -562,8 +597,15 @@ mod native {
         });
         rig.s.ai.transport = Some(hub.clone());
         if let Some(env) = rig.s.ai_setup.env.as_mut() {
-            (env.manifest, env.fetch) = (Some(manifest.clone()), net.clone());
+            (env.manifest, env.fetch) = (Some(manifest), net.clone());
         }
+        (rig, net, hub)
+    }
+
+    #[test]
+    fn signing_in_with_hugging_face_unlocks_the_gated_model_and_signing_out_forgets_it() {
+        use photocraft_aisetup::hf;
+        let (mut rig, net, hub) = gated_rig();
         // Without an app to sign in as, Sign in is unavailable and says what to do instead.
         let e = rig.run("ai.setup.hfSignIn", json!({"product": "LayerShop"})).unwrap_err().to_string();
         assert!(e.contains("access token"), "{e}");
@@ -582,23 +624,7 @@ mod native {
         assert_eq!((status["signedIn"].as_bool(), status["signingIn"].as_bool()), (Some(false), Some(false)));
         assert_eq!(status["links"]["help"], "https://layershop.aardvarkstudios.net/hugging-face/");
         assert_eq!(rig.run("ai.setup.hfStatus", json!({})).unwrap()["canSignIn"], true);
-        {
-            let started = rig.run("ai.setup.hfSignIn", json!({"product": "LayerShop"})).unwrap();
-            let url = started["url"].as_str().unwrap().to_string();
-            assert!(rig.s.ai_setup.signing_in());
-            assert_eq!(rig.run("ai.setup.hfSignIn", json!({})).unwrap()["started"], false, "one at a time");
-            let port: u16 = url.split("127.0.0.1%3A").nth(1).and_then(|r| r.split("%2F").next()).unwrap().parse().unwrap();
-            let state = url.split("state=").nth(1).unwrap().split('&').next().unwrap().to_string();
-            let mut browser = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
-            std::io::Write::write_all(&mut browser, format!("GET /callback?code=c0de&state={state} HTTP/1.1\r\n\r\n").as_bytes()).unwrap();
-            let seq = rig.s.ai_setup.hf_seq();
-            let began = Instant::now();
-            while rig.s.ai_setup.hf_seq() == seq {
-                poll(&mut rig.s);
-                assert!(began.elapsed() < Duration::from_secs(10), "the sign-in did not end");
-                std::thread::sleep(Duration::from_millis(5));
-            }
-        }
+        sign_in_through_the_browser(&mut rig);
         assert!(rig.s.ai.take_keys_dirty(), "the app is told to save the keys");
         let status = rig.run("ai.setup.hfStatus", json!({})).unwrap();
         assert_eq!((status["signedIn"].as_bool(), status["user"].as_str(), status["via"].as_str()), (Some(true), Some("pixel-painter"), Some("oauth")));
@@ -621,17 +647,7 @@ mod native {
         assert_eq!((renewed.access.as_str(), renewed.refresh.as_str(), renewed.user.as_str()), ("hf_oauth_fresh", "hf_refresh_2", "pixel-painter"));
         assert!(rig.s.ai.take_keys_dirty());
         // No command, preference or debug line carries a token; only Hugging Face was sent one.
-        for readable in [
-            rig.s.prefs_to_json(),
-            rig.run("ai.setup.status", json!({})).unwrap().to_string(),
-            rig.run("ai.setup.hfStatus", json!({})).unwrap().to_string(),
-            rig.run("ai.setup.hfAccess", models.clone()).unwrap().to_string(),
-            format!("{:?}", rig.s.ai),
-        ] {
-            for secret in ["hf_oauth_fresh", "hf_refresh_2", "hf_oauth_first", "hf_refresh_1"] {
-                assert!(!readable.contains(secret), "{secret} in {readable}");
-            }
-        }
+        assert_no_token_shown(&mut rig, &models, &["hf_oauth_fresh", "hf_refresh_2", "hf_oauth_first", "hf_refresh_1"]);
         assert!(hub.seen.lock().unwrap().iter().all(|u| u.starts_with("https://huggingface.co/")));
         // The keys file keeps all of it, and loads back.
         let mut other = Session::new();
@@ -642,6 +658,18 @@ mod native {
         assert_eq!(out["connectedApps"], "https://huggingface.co/settings/connected-applications");
         assert!(!rig.s.ai.hf().signed_in() && !rig.s.ai.keys_json().contains("hf_oauth_fresh") && rig.s.ai.take_keys_dirty());
         assert_eq!(rig.run("ai.setup.hfAccess", models).unwrap()["models"][0]["access"], "signIn");
+    }
+
+    #[test]
+    fn a_sign_in_that_runs_out_or_is_refused_is_forgotten_and_says_why() {
+        use photocraft_aisetup::hf::Credentials;
+        let (mut rig, net, hub) = gated_rig();
+        if let Some(env) = rig.s.ai_setup.env.as_mut() {
+            env.hf_client_id = "test-client-id".into();
+        }
+        sign_in_through_the_browser(&mut rig);
+        let renewed = rig.s.ai.hf();
+        assert!(renewed.signed_in());
         // A sign-in Hugging Face won't renew any more is signed out, and says why.
         rig.s.ai.set_hf(&Credentials { expires_at: 1, ..renewed.clone() });
         hub.token_answer.lock().unwrap().clear();

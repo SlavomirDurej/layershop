@@ -35,7 +35,9 @@ impl Transport for FakeHub {
             return answer(status, &body);
         }
         match (r.url.as_str(), auth.as_deref()) {
-            (USERINFO_URL, Some("Bearer hf_oauth_fresh" | "Bearer hf_oauth_first")) => answer(200, r#"{"sub":"123","preferred_username":"pixel-painter","name":"P"}"#),
+            (USERINFO_URL, Some("Bearer hf_oauth_fresh" | "Bearer hf_oauth_first")) => {
+                answer(200, r#"{"sub":"123","preferred_username":"pixel-painter","name":"P"}"#)
+            }
             (WHOAMI_URL, Some("Bearer hf_pasted_good")) => answer(200, r#"{"name":"token-owner","type":"user"}"#),
             (USERINFO_URL | WHOAMI_URL, _) => answer(401, r#"{"error":"Invalid username or password."}"#),
             _ => answer(404, ""),
@@ -66,10 +68,7 @@ fn pkce_and_the_sign_in_address_are_as_the_specs_write_them() {
         assert!(url.contains(part), "{part} in {url}");
     }
     let pairs = parse_query("code=a%2Bb+c&state=x%3D1&odd=%zz&empty&&");
-    assert_eq!(
-        pairs,
-        [("code".into(), "a+b c".into()), ("state".into(), "x=1".into()), ("odd".into(), "%zz".into()), ("empty".into(), String::new())]
-    );
+    assert_eq!(pairs, [("code".into(), "a+b c".into()), ("state".into(), "x=1".into()), ("odd".into(), "%zz".into()), ("empty".into(), String::new())]);
     assert_eq!(decode("%E2%80%A6%FF"), "\u{2026}\u{fffd}");
     assert_eq!(decode(&encode("a b/ü&=")), "a b/ü&=");
 }
@@ -81,7 +80,13 @@ fn the_code_becomes_tokens_and_a_name_and_they_are_renewed_before_they_expire() 
     let mut c = exchange(&hub, "my-app-id", "the-code", "the-verifier", "http://127.0.0.1:5/callback", now).unwrap();
     assert_eq!((c.access.as_str(), c.refresh.as_str(), c.expires_at, c.via), ("hf_oauth_first", "hf_refresh_1", now + 28_800, Via::OAuth));
     let body = &hub.seen()[0].2;
-    for part in ["grant_type=authorization_code", "code=the-code", "code_verifier=the-verifier", "client_id=my-app-id", "redirect_uri=http%3A%2F%2F127.0.0.1%3A5%2Fcallback"] {
+    for part in [
+        "grant_type=authorization_code",
+        "code=the-code",
+        "code_verifier=the-verifier",
+        "client_id=my-app-id",
+        "redirect_uri=http%3A%2F%2F127.0.0.1%3A5%2Fcallback",
+    ] {
         assert!(body.contains(part), "{part} in {body}");
     }
     assert!(!body.contains("client_secret"), "a public app has none");
@@ -131,7 +136,12 @@ fn a_pasted_token_is_checked_with_whoami() {
 #[test]
 fn a_token_goes_to_hugging_face_and_nowhere_else() {
     let hub = FakeHub::with_tokens(&[(200, FIRST)]);
-    for url in ["https://huggingface.co.evil.example/oauth/token", "http://huggingface.co/oauth/token", "https://evil.example/?https://huggingface.co/", "https://cdn-lfs.hf.co/x"] {
+    for url in [
+        "https://huggingface.co.evil.example/oauth/token",
+        "http://huggingface.co/oauth/token",
+        "https://evil.example/?https://huggingface.co/",
+        "https://cdn-lfs.hf.co/x",
+    ] {
         let r = Request::get(url).header("Authorization", "Bearer hf_secret");
         assert!(matches!(send(&hub, &r), Err(Error::Config(_))), "{url}");
     }

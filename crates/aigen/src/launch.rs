@@ -348,7 +348,13 @@ pub fn pick_folder(
 
 /// `0.42.1` as numbers, for ordering versions (a part's leading digits; `0.42.1+9` is `0.42.1`).
 fn version_parts(v: &str) -> Vec<u64> {
-    v.split(['+', '-']).next().unwrap_or("").split('.').take(8).map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0)).collect()
+    v.split(['+', '-'])
+        .next()
+        .unwrap_or("")
+        .split('.')
+        .take(8)
+        .map(|p| p.chars().take_while(char::is_ascii_digit).collect::<String>().parse().unwrap_or(0))
+        .collect()
 }
 
 /// A newer copy of the ComfyUI in `folder` to start instead: the first of `installed`
@@ -365,11 +371,7 @@ pub fn newer_copy(
 ) -> Option<std::path::PathBuf> {
     let version = |d: &std::path::Path| d.join(script).parent().and_then(|p| read(&p.join("comfyui_version.py"))).and_then(|t| version_in(&t));
     let own = version_parts(&version(folder)?);
-    installed
-        .iter()
-        .filter(|d| d.as_path() != folder && is_file(&d.join(script)))
-        .find(|d| version(d).is_some_and(|v| version_parts(&v) > own))
-        .cloned()
+    installed.iter().filter(|d| d.as_path() != folder && is_file(&d.join(script))).find(|d| version(d).is_some_and(|v| version_parts(&v) > own)).cloned()
 }
 
 /// The folders a model file can go in for the ComfyUI `launch` starts to see it, in ComfyUI's
@@ -601,7 +603,11 @@ pub use native::ComfyProcess;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::*;
+    use super::{
+        Control, Error, Launch, LocalServer, Result, ServerState, Settings, Transport, WHERE, comfy, desktop_folders, desktop_install, is_running, join_args,
+        local_base, models_folders, newer_copy, not_running_message, pick_folder, port_of, server_argv, server_version, split_args, startup_cause,
+        without_port,
+    };
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::{Mutex, PoisonError};
@@ -748,7 +754,8 @@ mod native {
             }
             // An older copy than the one ComfyUI Desktop runs would quit on its database.
             let script = args.iter().find(|a| a.to_ascii_lowercase().ends_with(".py")).cloned().unwrap_or_else(|| "main.py".into());
-            let installed = desktop_config_dir().map(|d| d.join("installations.json")).and_then(|f| small_text(&f)).map(|r| desktop_folders(&r)).unwrap_or_default();
+            let installed =
+                desktop_config_dir().map(|d| d.join("installations.json")).and_then(|f| small_text(&f)).map(|r| desktop_folders(&r)).unwrap_or_default();
             let folder = newer_copy(Path::new(folder), &script, &installed, &small_text, &|p| p.is_file()).unwrap_or_else(|| PathBuf::from(folder));
             args.push("--port".into());
             args.push(port.to_string());
@@ -1206,7 +1213,9 @@ mod tests {
             ("/desktop/resources/ComfyUI/comfyui_version.py", "0.22.3"),
         ];
         let read = |p: &Path| versions.iter().find(|(f, _)| Path::new(f) == p).map(|(_, v)| format!("__version__ = \"{v}\"\n"));
-        let is_file = |p: &Path| ["/installs/ComfyUI/ComfyUI/main.py", "/installs/Older/ComfyUI/main.py", "/desktop/resources/ComfyUI/main.py"].iter().any(|f| Path::new(f) == p);
+        let is_file = |p: &Path| {
+            ["/installs/ComfyUI/ComfyUI/main.py", "/installs/Older/ComfyUI/main.py", "/desktop/resources/ComfyUI/main.py"].iter().any(|f| Path::new(f) == p)
+        };
         let stale = Path::new("/desktop/resources");
         let installed = [PathBuf::from("/installs/Older"), "/installs/ComfyUI".into()];
         assert_eq!(newer_copy(stale, script, &installed, &read, &is_file), Some("/installs/ComfyUI".into()));
@@ -1232,7 +1241,9 @@ mod tests {
         let lines: Vec<&str> = log.lines().collect();
         let cause = startup_cause(&lines).unwrap();
         assert!(
-            cause.starts_with("Failed to initialize database: Can't locate revision identified by '0009_created_at_from_mtime' | The --enable-assets flag requires"),
+            cause.starts_with(
+                "Failed to initialize database: Can't locate revision identified by '0009_created_at_from_mtime' | The --enable-assets flag requires"
+            ),
             "{cause}"
         );
         assert!(cause.contains("older than one that has used the same user folder") && cause.contains("Find Installation"), "{cause}");
@@ -1246,7 +1257,8 @@ mod tests {
     #[test]
     fn the_models_folders_are_found_as_comfyui_finds_them() {
         use std::path::Path;
-        let files = |list: &'static [(&'static str, &'static str)]| move |p: &Path| list.iter().find(|(f, _)| Path::new(f) == p).map(|(_, text)| text.to_string());
+        let files =
+            |list: &'static [(&'static str, &'static str)]| move |p: &Path| list.iter().find(|(f, _)| Path::new(f) == p).map(|(_, text)| text.to_string());
         let dirs = |list: &'static [&'static str]| move |p: &Path| list.iter().any(|d| Path::new(d) == p);
         let slashes = |v: Vec<String>| v.into_iter().map(|p| p.replace('\\', "/")).collect::<Vec<_>>();
         // ComfyUI Desktop: the shared folder it saves new models to, then its own base folder's.
@@ -1266,20 +1278,31 @@ mod tests {
         const BESIDE: &str = "comfyui:\n    base_path: /other/ComfyUI\n    checkpoints: models/checkpoints/\n    diffusion_models: |\n      models/diffusion_models\n      models/unet\n    is_default: false # not this one\ncustom:\n    diffusion_models: /loose/unets\n";
         let portable = Launch { python: "/p/python_embeded/python.exe".into(), folder: "/p".into(), args: "ComfyUI/main.py --windows-standalone-build".into() };
         let read = files(&[("/p/ComfyUI/extra_model_paths.yaml", BESIDE)]);
-        assert_eq!(slashes(models_folders(&portable, &read, &dirs(&["/p/ComfyUI/models", "/other/ComfyUI/models", "/loose"]))), [
-            "/p/ComfyUI/models",
-            "/other/ComfyUI/models"
-        ]);
+        assert_eq!(
+            slashes(models_folders(&portable, &read, &dirs(&["/p/ComfyUI/models", "/other/ComfyUI/models", "/loose"]))),
+            ["/p/ComfyUI/models", "/other/ComfyUI/models"]
+        );
         // `--models-directory`; files relative to where it starts, two after one flag; `is_default`
         // puts a folder first, and moves one already listed there.
         const ONE: &str = "a:\n  base_path: shared\n  diffusion_models: diffusion_models\nb:\n  base_path: \"/x/models\"\n  is_default: \"true\"\n  diffusion_models: diffusion_models/ # the big ones\n";
         const TWO: &str = "again:\n  base_path: /e/shared\n  is_default: yes\n  vae: vae\n";
-        let own = Launch { folder: "/e".into(), args: "main.py --models-directory /m --extra-model-paths-config one.yaml two.yaml".into(), ..Launch::default() };
+        let own =
+            Launch { folder: "/e".into(), args: "main.py --models-directory /m --extra-model-paths-config one.yaml two.yaml".into(), ..Launch::default() };
         let read = files(&[("/e/one.yaml", ONE), ("/e/two.yaml", TWO)]);
         assert_eq!(slashes(models_folders(&own, &read, &dirs(&["/m", "/e/shared", "/x/models"]))), ["/e/shared", "/x/models", "/m"]);
         // Nothing to go on.
         assert!(models_folders(&Launch::default(), &read, &|_| true).is_empty());
-        for junk in ["", ":", "a:\n  b", "x:\n  diffusion_models: |", "'unterminated: x", "\"", "  base_path: /x", "a:\n  'k\n", "a:\n  diffusion_models: '/x/diffusion_models"] {
+        for junk in [
+            "",
+            ":",
+            "a:\n  b",
+            "x:\n  diffusion_models: |",
+            "'unterminated: x",
+            "\"",
+            "  base_path: /x",
+            "a:\n  'k\n",
+            "a:\n  diffusion_models: '/x/diffusion_models",
+        ] {
             let _ = extra_model_roots(junk, Path::new("/"));
         }
         // Values as YAML writes them.
@@ -1350,7 +1373,9 @@ mod tests {
             let found = find_running(&transport, &url).unwrap();
             println!("python: {}\nfolder: {}\nargs:   {}", found.python, found.folder, found.args);
             let script = split_args(&found.args).into_iter().next().unwrap_or_default();
-            let version = std::fs::read_to_string(std::path::Path::new(&found.folder).join(&script).with_file_name("comfyui_version.py")).ok().and_then(|t| version_in(&t));
+            let version = std::fs::read_to_string(std::path::Path::new(&found.folder).join(&script).with_file_name("comfyui_version.py"))
+                .ok()
+                .and_then(|t| version_in(&t));
             println!("its copy's version: {version:?}");
             assert!(!found.folder.is_empty() && version == server_version(&transport, &url), "{found:?}");
         }
@@ -1441,7 +1466,8 @@ mod tests {
             let log = std::env::temp_dir().join(format!("photocraft-comfy-output-{}.log", std::process::id()));
             let server = ComfyProcess::new(Some(log.clone()));
             assert!(server.output(10).is_empty(), "no log yet");
-            std::fs::write(&log, "\u{1b}[32m[INFO]\u{1b}[0m Total VRAM 0 MB\nChecking\r  5%|5    | 1/20 [00:05<01:40]\r 10%|#    | 2/20 [00:10<01:30]\n\n").unwrap();
+            std::fs::write(&log, "\u{1b}[32m[INFO]\u{1b}[0m Total VRAM 0 MB\nChecking\r  5%|5    | 1/20 [00:05<01:40]\r 10%|#    | 2/20 [00:10<01:30]\n\n")
+                .unwrap();
             assert_eq!(server.output(10), ["[INFO] Total VRAM 0 MB", " 10%|#    | 2/20 [00:10<01:30]"]);
             assert_eq!(server.output(1), [" 10%|#    | 2/20 [00:10<01:30]"]);
             assert_eq!(server.log_file(), Some(log.display().to_string()));

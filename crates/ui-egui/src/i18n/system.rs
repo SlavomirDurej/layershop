@@ -91,7 +91,8 @@ mod tests {
             (vec!["zh-Hant-HK", "zh-CN"], "zh-hant"),
             (vec!["zh-Hans-CN", "zh-TW"], "zh-hans"),
             (vec!["en-US", "ru-RU"], "en"),
-            (vec!["sv-SE", "ar-SA"], "en"),
+            (vec!["sv-SE", "ar-SA"], "ar"),
+            (vec!["sv-SE", "sw-KE"], "en"),
             (vec!["de-AT", "en-US"], "de"),
             (vec!["pt-PT"], "pt-br"),
             (vec!["it-IT", "en-US"], "it"),
@@ -100,6 +101,7 @@ mod tests {
             (vec!["tr-TR", "en-US"], "tr"),
             (vec!["sr-Latn-RS", "en-US"], "sr"),
             (vec!["sv-SE", "sr_RS@latin", "ru-RU"], "sr"),
+            (vec!["hi-IN", "en-US"], "hi"),
             (vec![], "en"),
         ] {
             with_system_tags(&tags, || assert_eq!(system_lang().code(), expected));

@@ -104,9 +104,7 @@ impl Live {
             (Phase::LoadVae, _) => (0.14, format!("Loading {label}'s VAE\u{2026}")),
             (Phase::Picture, _) => (0.15, "Reading the picture\u{2026}".to_string()),
             (Phase::Render, None) => (0.18, format!("Loading {label} into memory\u{2026}")),
-            (Phase::Render, Some((done, total))) => {
-                (0.2 + 0.7 * done as f32 / total.max(1) as f32, format!("Rendering with {label}: step {done} of {total}"))
-            }
+            (Phase::Render, Some((done, total))) => (0.2 + 0.7 * done as f32 / total.max(1) as f32, format!("Rendering with {label}: step {done} of {total}")),
             (Phase::Decode, _) => (0.92, "Finishing the image\u{2026}".to_string()),
             (Phase::Save, _) => (0.95, "Finishing the image\u{2026}".to_string()),
         })
@@ -167,7 +165,14 @@ mod tests {
     #[test]
     fn what_it_does_not_know_changes_nothing() {
         let mut live = Live::new(&workflow());
-        for junk in ["", "not json", "[]", r#"{"type":"executing"}"#, r#"{"type":"executing","data":{"node":"404"}}"#, r#"{"type":"progress","data":{"value":3,"max":0}}"#] {
+        for junk in [
+            "",
+            "not json",
+            "[]",
+            r#"{"type":"executing"}"#,
+            r#"{"type":"executing","data":{"node":"404"}}"#,
+            r#"{"type":"progress","data":{"value":3,"max":0}}"#,
+        ] {
             live.take(junk);
         }
         assert_eq!(said(&live), None);

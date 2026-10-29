@@ -341,7 +341,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let width = 300.0;
     let mut close = false;
     egui::Window::new(tr("AI Gen"))
-        .id(egui::Id::new("ai-gen"))
+        .id(egui::Id::unique("ai-gen"))
         .title_bar(false)
         .resizable(false)
         .movable(!app.session.prefs().workspace_locked)
@@ -651,7 +651,7 @@ fn nothing_ready(app: &mut PhotocraftApp, ui: &mut egui::Ui, changing: bool, roo
         Lead::Again => tr("Run Setup Wizard Again…"),
     };
     // Centred: as tall as it was last frame, so the space above it is known before it is drawn.
-    let height_id = ui.id().with("ai-gen-nothing-ready-height");
+    let height_id = ui.scope_id().with("ai-gen-nothing-ready-height");
     let height = ui.ctx().data(|d| d.get_temp::<f32>(height_id)).unwrap_or(0.0);
     let above = room.map_or(16.0, |room| ((room - height) * 0.45).max(16.0));
     ui.add_space(above);
@@ -867,7 +867,7 @@ fn rows_below(ui: &AiGenUi, model: Option<&Model>, kind: GenerationMode) -> usiz
     usize::from(ui.changing()) + 1 + if ui.advanced { advanced_rows(model, kind) } else { 0 }
 }
 
-/// The height the panel's content wants in its dock group (see `DockLayout::with_room`): the
+/// The height the panel's content wants in the dock (`panel_docking`'s `dock_heights`): the
 /// tabs, the model, a prompt box of three lines, Generate and two lines of notes, and the rows
 /// the task in front adds.
 pub fn wanted_height(app: &PhotocraftApp) -> f32 {
@@ -1057,7 +1057,7 @@ fn seed_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model, enabled
             let width = (ui.available_width() - 30.0).max(60.0);
             // As tall as the row's other fields, whatever the font: the rows have a set height.
             let edit = egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(width);
-            let field = ui.add(edit.margin(egui::Margin::symmetric(4, 0)).min_size(vec2(0.0, 24.0)).vertical_align(egui::Align::Center));
+            let field = ui.add(edit.margin(egui::Margin::symmetric(4, 0)).min_size(vec2(0.0, 24.0)).align(egui::Align2::LEFT_CENTER));
             if field.changed() {
                 app.ui.ai_gen.seed = typed_seed(&text, kept);
             }
@@ -1080,7 +1080,7 @@ fn method_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
             edit_label(ui, tr("Method"));
             let options = [(Method::Instruct, tr("By instruction")), (Method::Fill, tr("Fill the selection"))];
             let mut method = app.ui.ai_gen.method;
-            widgets::dropdown(ui, "ai-gen-method", &mut method, &options, (ui.available_width() - 2.0).max(80.0));
+            widgets::dropdown(ui, "ai-gen-method", tr("Method"), &mut method, &options, (ui.available_width() - 2.0).max(80.0));
             app.ui.ai_gen.method = method;
         })
         .response
@@ -1116,7 +1116,7 @@ fn change_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model, fill:
                     ui.label(RichText::new(tr("Quality")).color(t.text_dim));
                     let mut quality = app.ui.ai_gen.edit_quality;
                     let options = [(GenerationQuality::Draft, "Draft"), (GenerationQuality::Standard, "Standard"), (GenerationQuality::Detail, "Detail")];
-                    ui.horizontal(|ui| widgets::dropdown(ui, "ai-gen-quality", &mut quality, &options, 96.0))
+                    ui.horizontal(|ui| widgets::dropdown(ui, "ai-gen-quality", tr("Quality"), &mut quality, &options, 96.0))
                         .response
                         .on_hover_text(format!(
                             "{} {} · {} {} · {} {}",
@@ -1203,7 +1203,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         let headings = model_headings(&models);
         ui.add_enabled_ui(!busy, |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            widgets::dropdown_sectioned(ui, "ai-gen-model", &mut chosen, &options, &headings, (width - 34.0).max(80.0));
+            widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), &mut chosen, &options, &headings, (width - 34.0).max(80.0));
         });
         settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
     });
@@ -1229,7 +1229,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 match if edit { edit_source(app) } else { img_source(app) } {
                     Some(mut source) => {
                         let options: Vec<(SourceRef, &str)> = offered.iter().map(|(s, name)| (*s, name.as_str())).collect();
-                        widgets::dropdown(ui, "ai-gen-source", &mut source, &options, left);
+                        widgets::dropdown(ui, "ai-gen-source", tr("Source"), &mut source, &options, left);
                         if edit {
                             app.ui.ai_gen.edit_source = Some(source);
                         } else {
@@ -1851,7 +1851,7 @@ fn file_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &
                 options.push((String::new(), none.as_str()));
             }
             options.extend(names.iter().map(|n| (n.clone(), n.as_str())));
-            widgets::dropdown(ui, &format!("ai-file-{key}"), &mut cur, &options, field_width(ui));
+            widgets::dropdown(ui, &format!("ai-file-{key}"), tr(title), &mut cur, &options, field_width(ui));
         }
         None => {
             ui.add(egui::TextEdit::singleline(&mut cur).desired_width(field_width(ui)).hint_text(tr("Not set")));
@@ -1870,7 +1870,7 @@ fn choice_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title:
     if !choices.contains(&cur.as_str()) {
         options.insert(0, (extra.clone(), extra.as_str()));
     }
-    widgets::dropdown(ui, &format!("ai-choice-{key}"), &mut cur, &options, field_width(ui));
+    widgets::dropdown(ui, &format!("ai-choice-{key}"), tr(title), &mut cur, &options, field_width(ui));
     obj.insert(key.into(), json!(cur));
     ui.end_row();
 }
@@ -2001,7 +2001,7 @@ fn page_widths(page: f32) -> (f32, f32) {
 }
 
 fn widths_id() -> egui::Id {
-    egui::Id::new("ai-settings-widths")
+    egui::Id::unique("ai-settings-widths")
 }
 
 /// The field width of the page being drawn (see [`page_widths`]).
@@ -2835,7 +2835,7 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
             label(ui, "Architecture");
             let mut family = Family::from_key(&text_of(m, "family")).unwrap_or_default();
             let options: Vec<(Family, &str)> = Family::ALL.into_iter().map(|x| (x, x.label())).collect();
-            widgets::dropdown(ui, "ai-family", &mut family, &options, field_width(ui));
+            widgets::dropdown(ui, "ai-family", tr("Architecture"), &mut family, &options, field_width(ui));
             m.insert("family".into(), json!(family.key()));
             ui.end_row();
 

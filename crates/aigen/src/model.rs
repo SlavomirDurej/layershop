@@ -723,13 +723,7 @@ impl Model {
                 refiner_vae: "ae.safetensors".into(),
                 ..local(Family::HidreamO1, "HiDream O1")
             }),
-            Some(Model {
-                unet: "ernie-image-turbo.safetensors".into(),
-                steps: 8,
-                cfg: 1.0,
-                megapixels: 2.0,
-                ..local(Family::Ernie, "Ernie Image Turbo")
-            }),
+            Some(Model { unet: "ernie-image-turbo.safetensors".into(), steps: 8, cfg: 1.0, megapixels: 2.0, ..local(Family::Ernie, "Ernie Image Turbo") }),
             Some(local(Family::MingImage, "Ming Image 0.1 Design")),
         ];
         let mut settings = Settings::default_without_models();
@@ -1027,6 +1021,11 @@ mod tests {
         without.models.retain(|m| m.provider.is_local() && !m.can_edit());
         assert_eq!(without.edit_model("").map(|m| m.id.as_str()), without.model("").map(|m| m.id.as_str()));
         assert!(without.edit_model("").is_some());
+    }
+
+    #[test]
+    fn the_listed_models_keep_the_settings_they_were_compared_at() {
+        let s = Settings::default();
         // The settings the comparison was judged at.
         let by = |id: &str| s.model(id).unwrap();
         assert_eq!((by("z-image-turbo").steps, by("z-image-turbo").cfg, by("z-image-turbo").sampler.as_str()), (8, 2.0, "res_multistep"));
@@ -1084,7 +1083,10 @@ mod tests {
         (s.show_cloud, s.show_local) = (true, true);
         s.sort_recommended();
         assert_eq!(s.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["sunburst", "off", "pro", "mine", "qwen", "ernie"]);
-        assert!(cloud("x", "").rank() > cloud("x", "grok-imagine-image").rank() && cloud("x", "gemini-3.1-flash-image").rank() == cloud("x", "gemini-3.1-flash-image-preview").rank());
+        assert!(
+            cloud("x", "").rank() > cloud("x", "grok-imagine-image").rank()
+                && cloud("x", "gemini-3.1-flash-image").rank() == cloud("x", "gemini-3.1-flash-image-preview").rank()
+        );
         // Settings saved before these switches existed show both kinds.
         let old: Settings = serde_json::from_str(r#"{"models":[]}"#).unwrap();
         assert!(old.show_cloud && old.show_local);

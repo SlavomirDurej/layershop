@@ -893,7 +893,7 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
     let background = s.active().unwrap().active_layer.unwrap().0;
     fn made(s: &Session) -> Option<Generation> {
         let d = s.active().unwrap();
-        d.doc.layer(d.active_layer.unwrap()).unwrap().generation.clone()
+        d.doc.layer(d.active_layer.unwrap()).unwrap().generation.as_deref().cloned()
     }
     assert_eq!(made(&s), None, "a layer that was not generated has none");
     let name = Family::ZImage.preset().name;
@@ -923,7 +923,7 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
     );
     assert!(crate::inspect::layer(d.doc.layer(LayerId(background)).unwrap()).get("generation").is_none());
     // A copy of the layer is as much that generation as the layer is.
-    assert_eq!(layer.duplicate().generation, Some(txt.clone()));
+    assert_eq!(layer.duplicate().generation.as_deref(), Some(&txt));
     // Image to image: the picture it was redrawn from and how closely.
     s.execute("ai.generate", json!({"prompt": "x", "mode": "img2img", "source": {"layer": background}, "strength": 0.3, "seed": 6})).unwrap();
     let img = Generation {

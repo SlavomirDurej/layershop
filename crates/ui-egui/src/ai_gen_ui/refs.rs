@@ -336,7 +336,7 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, i: usize, offered: &[(Sour
         ui.horizontal(|ui| {
             edit_label(ui, tr("Name"));
             let mut text = r.name.clone();
-            let id = egui::Id::new(("ai-gen-ref-name", i));
+            let id = egui::Id::unique(("ai-gen-ref-name", i));
             let width = (ui.available_width() - 30.0).max(60.0);
             let field = widgets::text_field_ex(ui, id, &mut text, tr("e.g. Luna"), width, false, Some(MAX_NAME + 4))
                 .on_hover_text(tr("The name the prompt calls it by: type @ and the name. Letters, digits, _ and -"));
@@ -363,7 +363,7 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, i: usize, offered: &[(Sour
             let mut options: Vec<(Option<SourceRef>, &str)> = copy.iter().map(|label| (None, label.as_str())).collect();
             options.extend(offered.iter().map(|(s, label)| (Some(*s), label.as_str())));
             let mut chosen = current;
-            if widgets::dropdown_literal(ui, &format!("ai-gen-ref-picture-{i}"), &mut chosen, &options, (ui.available_width() - 2.0).max(80.0))
+            if widgets::dropdown_literal(ui, &format!("ai-gen-ref-picture-{i}"), crate::i18n::t("Picture"), &mut chosen, &options, (ui.available_width() - 2.0).max(80.0))
                 && chosen != current
                 && let Some(source) = chosen
             {
@@ -402,7 +402,7 @@ type ThumbCache = HashMap<String, (u64, f64, TextureHandle)>;
 /// A thumbnail for each of `refs` (`None`: none to show).
 fn thumbs(s: &Session, ctx: &egui::Context, refs: &[AiReference]) -> Vec<Option<egui::TextureId>> {
     const SIDE: usize = 32;
-    let id = egui::Id::new("ai-gen-ref-thumbs");
+    let id = egui::Id::unique("ai-gen-ref-thumbs");
     let now = ctx.input(|i| i.time);
     let mut cache: ThumbCache = ctx.data(|d| d.get_temp(id)).unwrap_or_default();
     let keys: Vec<String> = refs.iter().map(|r| thumb_key(&r.picture)).collect();
@@ -474,7 +474,7 @@ impl Thumb<'_> {
             Thumb::Layer(px, frame) => {
                 let mut v = [0.0f32; 8];
                 let n = px.channels().min(v.len());
-                Some(crate::thumb_image(*frame, side, |x, y| {
+                Some(crate::app::thumb_image(*frame, side, |x, y| {
                     let Some(buf) = v.get_mut(..n) else { return [0.0; 4] };
                     px.read_pixel(x, y, buf);
                     photocraft_raster::to_rgba(&px.format(), buf)
@@ -572,7 +572,7 @@ pub(super) fn complete(text: &str, range: Range<usize>, name: &str) -> (String, 
 
 /// The prompt's id, so a completion can put the cursor after the name it typed.
 pub(super) fn prompt_id() -> egui::Id {
-    egui::Id::new("ai-gen-prompt-text")
+    egui::Id::unique("ai-gen-prompt-text")
 }
 
 /// A completion to apply to the prompt: from Tab on the frame it was offered, or a click on it.

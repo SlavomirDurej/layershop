@@ -220,7 +220,8 @@ fn generate_bfl(transport: &dyn Transport, model: &Model, key: &str, job: &Job, 
             }
             cloud::BflJob::Ready(sample) => {
                 (control.progress)(0.97, "Downloading the image…");
-                let r = transport.send(&Request::get(sample).timeout(120)).map_err(|e| Error::Network(format!("Could not download the image from {who}: {e}")))?;
+                let r =
+                    transport.send(&Request::get(sample).timeout(120)).map_err(|e| Error::Network(format!("Could not download the image from {who}: {e}")))?;
                 if !r.ok() || r.body.is_empty() {
                     return Err(Error::Server(format!("{who} could not serve the generated image (HTTP {})", r.status)));
                 }
@@ -371,7 +372,15 @@ struct Queued<'a> {
 }
 
 /// Queue the workflow, and follow it until its image is downloaded.
-fn poll_comfy(transport: &dyn Transport, model: &Model, job: &Job, control: &Control<'_>, timeout: u64, q: &Queued<'_>, listening: &Listening) -> Result<Generated> {
+fn poll_comfy(
+    transport: &dyn Transport,
+    model: &Model,
+    job: &Job,
+    control: &Control<'_>,
+    timeout: u64,
+    q: &Queued<'_>,
+    listening: &Listening,
+) -> Result<Generated> {
     let (base, (width, height)) = (q.base, q.size);
     let unreachable = |e: Error| Error::Network(format!("Could not reach ComfyUI at {base}. Is it running? ({e})"));
     let queued = transport.send(&Request::post_json(format!("{base}/prompt"), comfy::queue_body(q.workflow, q.client))).map_err(unreachable)?;
@@ -426,9 +435,9 @@ fn poll_comfy(transport: &dyn Transport, model: &Model, job: &Job, control: &Con
 /// its text encoder type.
 fn too_old(model: &Model, e: Error) -> Error {
     match e {
-        Error::Server(msg) if model.family == crate::model::Family::MossImage && msg.contains("moss_image") => Error::Server(format!(
-            "{msg}. This ComfyUI predates MOSS Image, which it supports since 2026-10-16 (after its 0.41.0 release): update ComfyUI"
-        )),
+        Error::Server(msg) if model.family == crate::model::Family::MossImage && msg.contains("moss_image") => {
+            Error::Server(format!("{msg}. This ComfyUI predates MOSS Image, which it supports since 2026-10-16 (after its 0.41.0 release): update ComfyUI"))
+        }
         e => e,
     }
 }
@@ -869,7 +878,9 @@ mod tests {
         let fake = Fake::new(|r, _| match r.url.as_str() {
             u if u.ends_with("/prompt") => {
                 let w = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].clone();
-                let text = w.as_object().unwrap().values().find(|n| n["inputs"]["text"].as_str().is_some_and(|t| t.starts_with('{'))).unwrap()["inputs"]["text"].clone();
+                let text =
+                    w.as_object().unwrap().values().find(|n| n["inputs"]["text"].as_str().is_some_and(|t| t.starts_with('{'))).unwrap()["inputs"]["text"]
+                        .clone();
                 let sent: serde_json::Value = serde_json::from_str(text.as_str().unwrap()).unwrap();
                 let latent = w.as_object().unwrap().values().find(|n| n["class_type"] == "EmptyFlux2LatentImage").unwrap()["inputs"].clone();
                 let (lw, lh) = (latent["width"].as_f64().unwrap(), latent["height"].as_f64().unwrap());
@@ -888,7 +899,9 @@ mod tests {
         // A server older than the model says so, and what to do.
         let old = Fake::new(|r, _| {
             assert!(r.url.ends_with("/prompt"));
-            ok(r#"{"error":{"message":"Prompt outputs failed validation"},"node_errors":{"2":{"class_type":"CLIPLoader","errors":[{"message":"Value not in list","details":"type: 'moss_image' not in ['stable_diffusion']"}]}}}"#)
+            ok(
+                r#"{"error":{"message":"Prompt outputs failed validation"},"node_errors":{"2":{"class_type":"CLIPLoader","errors":[{"message":"Value not in list","details":"type: 'moss_image' not in ['stable_diffusion']"}]}}}"#,
+            )
         });
         let e = generate(&old, &settings(), &moss, "", &job, &control(&|| false)).unwrap_err().to_string();
         assert!(e.contains("Value not in list") && e.contains("update ComfyUI"), "{e}");
@@ -1087,7 +1100,8 @@ mod tests {
         assert!(matches!(e, Error::BadResponse(_)), "{e}");
         assert_eq!(hijack.urls().len(), 1);
         // A moderated job, one that never finishes, and a cancel each end the wait.
-        let moderated = Fake::new(|_, n| if n == 0 { ok(&format!(r#"{{"id":"t","polling_url":"{POLL_URL}"}}"#)) } else { ok(r#"{"status":"Request Moderated"}"#) });
+        let moderated =
+            Fake::new(|_, n| if n == 0 { ok(&format!(r#"{{"id":"t","polling_url":"{POLL_URL}"}}"#)) } else { ok(r#"{"status":"Request Moderated"}"#) });
         assert!(generate(&moderated, &settings(), &m, "k", &job(), &control(&|| false)).unwrap_err().to_string().contains("refused the prompt"));
         let stuck = || Fake::new(|_, n| if n == 0 { ok(&format!(r#"{{"id":"t","polling_url":"{POLL_URL}"}}"#)) } else { ok(r#"{"status":"Pending"}"#) });
         let (slow, quick) = (stuck(), Settings { timeout_seconds: 10, ..settings() });

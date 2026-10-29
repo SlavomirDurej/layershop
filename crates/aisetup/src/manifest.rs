@@ -486,7 +486,9 @@ mod tests {
     fn a_small_card_is_offered_the_light_preset_first() {
         let m = bundled();
         assert_eq!(m.preset("light"), ["moss-image"]);
-        for (vram, preset) in [(Some(4), "light"), (Some(8), "light"), (Some(15), "light"), (Some(16), "recommended"), (Some(24), "recommended"), (None, "recommended")] {
+        for (vram, preset) in
+            [(Some(4), "light"), (Some(8), "light"), (Some(15), "light"), (Some(16), "recommended"), (Some(24), "recommended"), (None, "recommended")]
+        {
             assert_eq!(m.suggested_preset(vram), preset, "{vram:?}");
         }
         let order = |vram| m.offered(vram).iter().map(|x| x.id.as_str()).collect::<Vec<_>>();

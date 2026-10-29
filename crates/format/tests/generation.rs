@@ -24,13 +24,14 @@ fn a_layers_generation_survives_a_pcraft_round_trip() {
     let source = Layer::raster("Source", doc.pixel_format());
     let source_id = source.id.0;
     let mut plain = Layer::raster("From a prompt", doc.pixel_format());
-    plain.generation = Some(Generation { mode: GenerationMode::Inpaint, ..generated(None) });
+    plain.generation = Some(Box::new(Generation { mode: GenerationMode::Inpaint, ..generated(None) }));
     let mut child = Layer::raster("Redrawn", doc.pixel_format());
-    child.generation = Some(generated(Some(GenerationSource::Layer(source_id))));
+    child.generation = Some(Box::new(generated(Some(GenerationSource::Layer(source_id)))));
     // An edit's named reference keeps its name.
     let mut edited = Layer::raster("Edited", doc.pixel_format());
     let reference = GenerationReference { source: GenerationSource::Layer(source_id), name: "Luna".into() };
-    edited.generation = Some(Generation { mode: GenerationMode::ImgEdit, references: vec![reference], ..generated(Some(GenerationSource::Layer(source_id))) });
+    edited.generation =
+        Some(Box::new(Generation { mode: GenerationMode::ImgEdit, references: vec![reference], ..generated(Some(GenerationSource::Layer(source_id))) }));
     doc.layers.extend([source, plain, Layer::group("Group", vec![child]), edited]);
     let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
     assert_eq!(photocraft_format::load_from_bytes(&bytes).unwrap(), doc);
@@ -45,27 +46,27 @@ fn a_generations_source_follows_its_layer_through_fresh_ids() {
     let mut doc = Document::new("Generated", Size::new(2, 2), ColorMode::Rgb, SampleType::U8);
     let source = Layer::raster("Source", doc.pixel_format());
     let mut redrawn = Layer::raster("Redrawn", doc.pixel_format());
-    redrawn.generation = Some(generated(Some(GenerationSource::Layer(source.id.0))));
+    redrawn.generation = Some(Box::new(generated(Some(GenerationSource::Layer(source.id.0)))));
     let mut gone = Layer::raster("Its source is gone", doc.pixel_format());
-    gone.generation = Some(generated(Some(GenerationSource::Layer(u64::MAX))));
+    gone.generation = Some(Box::new(generated(Some(GenerationSource::Layer(u64::MAX)))));
     let mut other = Layer::raster("From another document", doc.pixel_format());
-    other.generation = Some(generated(Some(GenerationSource::Document(7))));
+    other.generation = Some(Box::new(generated(Some(GenerationSource::Document(7)))));
     // References follow their layers too, keeping their names; another document's layer is
     // forgotten like the document.
     let mut edited = Layer::raster("Edited", doc.pixel_format());
-    edited.generation = Some(Generation {
+    edited.generation = Some(Box::new(Generation {
         references: vec![
             GenerationReference { source: GenerationSource::DocumentLayer { document: 7, layer: source.id.0 }, name: "Max".into() },
             GenerationReference { source: GenerationSource::Layer(source.id.0), name: "Luna".into() },
         ],
         ..generated(None)
-    });
+    }));
     doc.layers.extend([source, Layer::group("Group", vec![redrawn]), gone, other, edited]);
     let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
     let loaded = photocraft_format::load_from_bytes_with(&bytes, &LoadOptions { preserve_ids: false, ..Default::default() }).unwrap();
     let source_id = loaded.layers[0].id.0;
     assert_ne!(source_id, doc.layers[0].id.0, "the ids are fresh");
-    let of = |l: &Layer| l.generation.clone().unwrap();
+    let of = |l: &Layer| *l.generation.clone().unwrap();
     assert_eq!(of(&loaded.layers[1].children().unwrap()[0]), generated(Some(GenerationSource::Layer(source_id))));
     // A layer that is not in the file, and a document id (which only lasted for its session), are
     // forgotten; the rest of the generation stays.
@@ -80,7 +81,7 @@ fn an_edits_references_follow_their_layers_too() {
     let shirt = Layer::raster("Shirt", doc.pixel_format());
     let mut edited = Layer::raster("Edited", doc.pixel_format());
     let references = vec![GenerationSource::Document(7).into(), GenerationSource::Layer(shirt.id.0).into(), GenerationSource::Layer(u64::MAX).into()];
-    edited.generation = Some(Generation { mode: GenerationMode::ImgEdit, references, ..generated(None) });
+    edited.generation = Some(Box::new(Generation { mode: GenerationMode::ImgEdit, references, ..generated(None) }));
     doc.layers.extend([shirt, edited]);
     let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
     // A document id only lasted for its session and a layer that is not in the file is gone:

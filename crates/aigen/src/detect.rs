@@ -529,7 +529,9 @@ mod tests {
         let plain = found.iter().find(|m| m.unet == "flux3_image_klein_nvfp4.safetensors").unwrap();
         assert_eq!((plain.family, plain.steps, plain.cfg), (Family::Flux3, 50, 3.5));
         // BFL's names since 2026-10-17: hyphens, and only "-base-" is the base model.
-        f.get_mut("diffusion_models").unwrap().extend(["flux3-image-klein-int8-convrot.safetensors".into(), "flux3-image-klein-base-int8-convrot.safetensors".into()]);
+        f.get_mut("diffusion_models")
+            .unwrap()
+            .extend(["flux3-image-klein-int8-convrot.safetensors".into(), "flux3-image-klein-base-int8-convrot.safetensors".into()]);
         let found = detect(&f);
         let named = |unet: &str| found.iter().find(|m| m.unet == unet).map(|m| (m.family, m.steps, m.cfg)).unwrap();
         assert_eq!(named("flux3-image-klein-int8-convrot.safetensors"), (Family::Flux3, 16, 1.0));

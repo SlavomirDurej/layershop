@@ -383,7 +383,9 @@ pub fn parse_bfl_job(status: u16, body: &[u8]) -> Result<BflJob> {
             let sample = v.get("result").and_then(|r| r.get("sample")).and_then(Value::as_str).filter(|u| u.starts_with("https://") && u.len() <= 4096);
             sample.map(|u| BflJob::Ready(u.to_string())).ok_or_else(|| Error::BadResponse("Black Forest Labs returned no image".into()))
         }
-        "Request Moderated" => Err(Error::Server("Black Forest Labs refused the prompt or a picture sent with it (moderated). Sending it again unchanged will be refused again.".into())),
+        "Request Moderated" => Err(Error::Server(
+            "Black Forest Labs refused the prompt or a picture sent with it (moderated). Sending it again unchanged will be refused again.".into(),
+        )),
         "Content Moderated" => Err(Error::Server("Black Forest Labs withheld the image it generated (moderated). Change the prompt and try again.".into())),
         "Error" | "Failed" => {
             let why = v.get("details").or_else(|| v.get("result")).filter(|d| !d.is_null()).map(|d| format!(": {}", clip(&d.to_string(), 300)));
@@ -764,7 +766,10 @@ mod tests {
         let r = meta_request(&m, &edit_job(b"", &[b"SHIRT"]), "k", 60).unwrap();
         let b = body(&r);
         assert_eq!(r.url, META_EDIT_URL);
-        assert_eq!(b["images"], json!([{"image_url": format!("data:image/png;base64,{}", b64(b"PICTURE"))}, {"image_url": format!("data:image/png;base64,{}", b64(b"SHIRT"))}]));
+        assert_eq!(
+            b["images"],
+            json!([{"image_url": format!("data:image/png;base64,{}", b64(b"PICTURE"))}, {"image_url": format!("data:image/png;base64,{}", b64(b"SHIRT"))}])
+        );
         assert!(b.get("size").is_none() && b.get("mask").is_none());
         // `mask` is an unsupported parameter: the mask is a second picture.
         let b = body(&meta_request(&m, &edit_job(b"MASK", &[]), "k", 60).unwrap());
@@ -818,8 +823,12 @@ mod tests {
             m.api_model = id.into();
             assert!(bfl_request(&m, &job(64, 64, false), "k", 60).is_err(), "{id}");
         }
+    }
 
-        let (url, cost) = parse_bfl_submitted(200, br#"{"id":"t1","polling_url":"https://api.eu2.bfl.ai/v1/get_result?id=t1","cost":4.8,"output_mp":1.0}"#).unwrap();
+    #[test]
+    fn black_forest_labs_answers_are_read_and_polled_at_its_own_hosts_only() {
+        let (url, cost) =
+            parse_bfl_submitted(200, br#"{"id":"t1","polling_url":"https://api.eu2.bfl.ai/v1/get_result?id=t1","cost":4.8,"output_mp":1.0}"#).unwrap();
         assert_eq!(url, "https://api.eu2.bfl.ai/v1/get_result?id=t1");
         assert!((cost.unwrap() - 0.048).abs() < 1e-12);
         assert_eq!(parse_bfl_submitted(200, br#"{"id":"t1","polling_url":"https://api.bfl.ai/x","cost":null}"#).unwrap().1, None);
@@ -843,7 +852,9 @@ mod tests {
         // Errors say what the user can do about them.
         let e = parse_bfl_submitted(402, br#"{"detail":"Insufficient credits"}"#).unwrap_err().to_string();
         assert!(e.contains("Insufficient credits") && e.contains("out of credits"), "{e}");
-        let e = parse_bfl_submitted(422, br#"{"detail":[{"loc":["body","seed"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}]}"#).unwrap_err().to_string();
+        let e = parse_bfl_submitted(422, br#"{"detail":[{"loc":["body","seed"],"msg":"Extra inputs are not permitted","type":"extra_forbidden"}]}"#)
+            .unwrap_err()
+            .to_string();
         assert!(e.contains("Extra inputs are not permitted"), "{e}");
         assert!(parse_bfl_submitted(404, b"<html>").unwrap_err().to_string().contains("name of the endpoint"));
         assert!(parse_bfl_submitted(200, br#"{"id":"t1"}"#).is_err() && parse_bfl_submitted(200, b"").is_err());

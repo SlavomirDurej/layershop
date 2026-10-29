@@ -292,7 +292,10 @@ pub use native::*;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::*;
+    use super::{
+        Access, Credentials, Error, HOST, Manifest, ModelAccess, Result, TOKEN_URL, USERINFO_URL, Value, WHOAMI_URL, authorize_url, base64url, clip, encode,
+        error_of, gated, parse_query, parse_tokens, plausible,
+    };
     use crate::fetch::Fetch;
     use photocraft_aigen::{Request, Response, Transport};
     use sha2::{Digest, Sha256};
@@ -345,7 +348,11 @@ mod native {
         let r = send(transport, &request)?;
         if !r.ok() {
             let (error, description) = error_of(&r.body);
-            return Err(Error::Access(format!("Hugging Face did not complete the sign-in ({} {error}{}). Press Sign in with Hugging Face to try again.", r.status, if description.is_empty() { String::new() } else { format!(": {description}") })));
+            return Err(Error::Access(format!(
+                "Hugging Face did not complete the sign-in ({} {error}{}). Press Sign in with Hugging Face to try again.",
+                r.status,
+                if description.is_empty() { String::new() } else { format!(": {description}") }
+            )));
         }
         parse_tokens(&r.body, now, "")
     }
@@ -458,9 +465,7 @@ mod native {
         if let Some(t) = env("HF_TOKEN").filter(|t| plausible(t)) {
             return Some(t);
         }
-        let cache = || {
-            env("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| env("USERPROFILE").or_else(|| env("HOME")).map(|h| PathBuf::from(h).join(".cache")))
-        };
+        let cache = || env("XDG_CACHE_HOME").map(PathBuf::from).or_else(|| env("USERPROFILE").or_else(|| env("HOME")).map(|h| PathBuf::from(h).join(".cache")));
         let file = env("HF_TOKEN_PATH")
             .map(PathBuf::from)
             .or_else(|| env("HF_HOME").map(|h| PathBuf::from(h).join("token")))
@@ -483,7 +488,10 @@ mod native {
     }
 
     fn respond(mut stream: TcpStream, status: &str, body: &str) {
-        let head = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n", body.len());
+        let head = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n",
+            body.len()
+        );
         let _ = stream.write_all(head.as_bytes()).and_then(|()| stream.write_all(body.as_bytes())).and_then(|()| stream.flush());
     }
 
@@ -549,9 +557,7 @@ mod native {
                 return Err(Error::Cancelled);
             }
             if Instant::now() >= deadline {
-                return Err(Error::Access(
-                    "The sign-in timed out: nothing came back from the browser. Press Sign in with Hugging Face to try again.".into(),
-                ));
+                return Err(Error::Access("The sign-in timed out: nothing came back from the browser. Press Sign in with Hugging Face to try again.".into()));
             }
             match listener.accept() {
                 Ok((stream, _)) => {
@@ -623,7 +629,9 @@ mod native {
             match self.rx.try_recv() {
                 Ok(r) => Some(r),
                 Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(Error::Access("The sign-in stopped unexpectedly. Press Sign in with Hugging Face to try again.".into()))),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err(Error::Access("The sign-in stopped unexpectedly. Press Sign in with Hugging Face to try again.".into())))
+                }
             }
         }
     }

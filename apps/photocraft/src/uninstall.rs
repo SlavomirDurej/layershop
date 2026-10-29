@@ -143,7 +143,8 @@ pub fn survey(local: Option<&Path>, roaming: Option<&Path>, name: &str) -> Surve
         }
     }
     let choices = &out.record.choices;
-    let elsewhere = |dir: &str| Some(PathBuf::from(dir.trim())).filter(|d| !d.as_os_str().is_empty() && d.is_dir() && home.as_ref().is_none_or(|h| !inside(d, h)));
+    let elsewhere =
+        |dir: &str| Some(PathBuf::from(dir.trim())).filter(|d| !d.as_os_str().is_empty() && d.is_dir() && home.as_ref().is_none_or(|h| !inside(d, h)));
     match choices.route {
         Route::Managed => {
             if let Some(engine) = elsewhere(&choices.engine_dir) {
@@ -389,11 +390,12 @@ impl Dialog {
     /// Remove what is selected, and keep what came of it for the window to say.
     pub fn remove_selected(&mut self) {
         let c = self.choice;
-        self.freed = [(c.engine, self.found.engine_bytes()), (c.models, self.found.models_bytes()), (c.settings, self.found.settings.as_ref().map_or(0, |s| s.bytes))]
-            .into_iter()
-            .filter(|(on, _)| *on)
-            .map(|(_, bytes)| bytes)
-            .sum();
+        self.freed =
+            [(c.engine, self.found.engine_bytes()), (c.models, self.found.models_bytes()), (c.settings, self.found.settings.as_ref().map_or(0, |s| s.bytes))]
+                .into_iter()
+                .filter(|(on, _)| *on)
+                .map(|(_, bytes)| bytes)
+                .sum();
         self.done = Some(remove(&self.found, c));
     }
 
@@ -458,10 +460,8 @@ impl Dialog {
         ui.add_space(6.0);
         ui.add(
             egui::Label::new(
-                egui::RichText::new(format!(
-                    "{name} is being uninstalled. The following items will be kept on this PC unless they are selected for removal:"
-                ))
-                .color(t.text_dim),
+                egui::RichText::new(format!("{name} is being uninstalled. The following items will be kept on this PC unless they are selected for removal:"))
+                    .color(t.text_dim),
             )
             .wrap(),
         );
@@ -633,8 +633,11 @@ mod tests {
         // beside a file of the user's own.
         let root = engine.join("0.39.0");
         write(&root.join("python_embeded/python.exe"), 4000);
-        photocraft_aisetup::runtime::write_marker(&root, &photocraft_aisetup::runtime::Marker { version: "0.39.0".into(), variant: "nvidia".into(), sha256: "ab".into() })
-            .unwrap();
+        photocraft_aisetup::runtime::write_marker(
+            &root,
+            &photocraft_aisetup::runtime::Marker { version: "0.39.0".into(), variant: "nvidia".into(), sha256: "ab".into() },
+        )
+        .unwrap();
         let manifest = Manifest::bundled().unwrap();
         let qwen = manifest.model("qwen-image-2-1").unwrap();
         for key in manifest.file_keys([qwen]) {

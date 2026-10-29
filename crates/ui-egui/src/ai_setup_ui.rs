@@ -1032,7 +1032,11 @@ fn same_folder(a: &str, b: &str) -> bool {
 
 /// Did the probe find a ComfyUI on this PC (running, or installed by ComfyUI Desktop)?
 fn detected(app: &PhotocraftApp) -> bool {
-    app.ui.ai_setup.probe.as_ref().is_some_and(|p| !list(p, "/probe/comfy/running").is_empty() || p.pointer("/probe/comfy/installed").is_some_and(Value::is_object))
+    app.ui
+        .ai_setup
+        .probe
+        .as_ref()
+        .is_some_and(|p| !list(p, "/probe/comfy/running").is_empty() || p.pointer("/probe/comfy/installed").is_some_and(Value::is_object))
 }
 
 /// The probe found a graphics card the engine can use (an older probe that doesn't say: yes).
@@ -1185,7 +1189,7 @@ fn name_preset(app: &mut PhotocraftApp) {
 // ---------- the test image ----------
 
 fn test_image_id() -> egui::Id {
-    egui::Id::new("ai-setup-test-image")
+    egui::Id::unique("ai-setup-test-image")
 }
 
 fn forget_test_image(ctx: &egui::Context) {
@@ -1236,8 +1240,9 @@ pub fn status_progress(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if r.hovered() {
         ui.painter().rect_stroke(r.rect.expand2(vec2(4.0, 3.0)), t.radius_sm, Stroke::new(1.0, t.field_border), StrokeKind::Outside);
     }
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, tr("Show the Local AI setup")));
-    if r.on_hover_text(tr("Local AI is being set up in the background. Click to show its progress.")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tr("Show the Local AI setup")));
+    if r.on_hover_text(tr("Local AI is being set up in the background. Click to show its progress.")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked()
+    {
         show_progress(app);
     }
 }
@@ -1507,7 +1512,7 @@ fn page_checking(app: &PhotocraftApp, ui: &mut egui::Ui) {
 fn choice_button(ui: &mut egui::Ui, rect: Rect, title: &str, sub: &str, badge: &str, primary: bool) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     let resp = ui.allocate_rect(rect, Sense::click());
-    resp.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, ui.is_enabled(), title));
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), title));
     let enabled = ui.is_enabled();
     let down = resp.is_pointer_button_down_on();
     let (fill, fg, dim) = if primary {
@@ -1585,14 +1590,7 @@ fn choice(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if !can_install {
         right.disable();
     }
-    let r = choice_button(
-        &mut right,
-        new,
-        new_title,
-        new_sub,
-        tr("Recommended"),
-        true,
-    );
+    let r = choice_button(&mut right, new, new_title, new_sub, tr("Recommended"), true);
     if r.on_hover_cursor(egui::CursorIcon::PointingHand).on_disabled_hover_text(why).clicked() {
         use_managed(app);
     }
@@ -1617,7 +1615,8 @@ fn folder_choices(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.add_space(12.0);
         return;
     }
-    let heading = if folders.len() == 1 { tr("Found in your ComfyUI's settings:") } else { tr("Your ComfyUI reads models from these folders. Any of them will do:") };
+    let heading =
+        if folders.len() == 1 { tr("Found in your ComfyUI's settings:") } else { tr("Your ComfyUI reads models from these folders. Any of them will do:") };
     ui.label(RichText::new(heading).color(t.text_dim).size(11.5));
     ui.add_space(4.0);
     for (i, folder) in folders.iter().enumerate() {
@@ -1665,7 +1664,9 @@ fn folder_choices(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         ui.add_space(2.0);
         ui.add(
             egui::Label::new(
-                RichText::new(tr("Your ComfyUI doesn't read models from the folder above, so files downloaded there won't show up in it.")).color(t.warning).size(11.5),
+                RichText::new(tr("Your ComfyUI doesn't read models from the folder above, so files downloaded there won't show up in it."))
+                    .color(t.warning)
+                    .size(11.5),
             )
             .wrap(),
         );
@@ -1689,7 +1690,7 @@ fn folder_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, engine: bool) {
     ui.horizontal(|ui| {
         let s = &mut app.ui.ai_setup;
         let value = if engine { &mut s.engine_dir } else { &mut s.models_dir };
-        widgets::text_field(ui, egui::Id::new(("ai-setup-folder", engine)), value, tr("Choose a folder"), ui.available_width() - 96.0, false);
+        widgets::text_field(ui, egui::Id::unique(("ai-setup-folder", engine)), value, tr("Choose a folder"), ui.available_width() - 96.0, false);
         pick = widgets::secondary_button(ui, tr("Browse…"), 84.0).clicked();
     });
     ui.add_space(3.0);
@@ -1754,7 +1755,7 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let busy = app.ui.ai_setup.server_job.is_some();
         let mut go = false;
         ui.horizontal(|ui| {
-            widgets::text_field(ui, egui::Id::new("ai-setup-url"), &mut app.ui.ai_setup.url, "http://127.0.0.1:8188", ui.available_width() - 96.0, true);
+            widgets::text_field(ui, egui::Id::unique("ai-setup-url"), &mut app.ui.ai_setup.url, "http://127.0.0.1:8188", ui.available_width() - 96.0, true);
             go = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Connect"), 84.0)).inner.clicked();
         });
         if go {
@@ -1773,7 +1774,9 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             (None, false) if detected(app) && app.ui.ai_setup.probe.as_ref().is_some_and(|p| list(p, "/probe/comfy/running").is_empty()) => {
                 tr("Your ComfyUI Desktop is not running. Open it, then press Connect.").to_string()
             }
-            (None, false) => tr("Start ComfyUI, then press Connect. It is found on either port: 8000 for ComfyUI Desktop, 8188 for the portable build.").to_string(),
+            (None, false) => {
+                tr("Start ComfyUI, then press Connect. It is found on either port: 8000 for ComfyUI Desktop, 8188 for the portable build.").to_string()
+            }
         };
         ui.add(egui::Label::new(RichText::new(line).color(t.text_faint).size(11.5)).wrap());
         ui.add_space(12.0);
@@ -1863,7 +1866,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let mut any_gated = false;
     // The list takes the page down to the footer, less what follows it (the Hugging Face panel,
     // a problem), as tall as that was last frame.
-    let tail_id = egui::Id::new("ai-setup-models-tail");
+    let tail_id = egui::Id::unique("ai-setup-models-tail");
     let tail = ui.ctx().data(|d| d.get_temp::<f32>(tail_id)).unwrap_or(0.0);
     let height = (ui.available_height() - tail).max(110.0);
     egui::ScrollArea::vertical().id_salt("ai-setup-models").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
@@ -1953,7 +1956,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
 /// An underlined word that does something: the small actions in a model's row.
 fn action(ui: &mut egui::Ui, label: &str, color: Color32) -> egui::Response {
     let r = ui.add(egui::Label::new(RichText::new(label).color(color).size(11.5).underline()).selectable(false).sense(Sense::click()));
-    r.widget_info(|| egui::WidgetInfo::labeled(egui::WidgetType::Button, true, label));
+    r.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
     r.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
@@ -2222,10 +2225,8 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             if engine_step {
                 ui.add_space(8.0);
                 let r = ui.add(egui::Label::new(RichText::new(tr("What's happening?")).color(t.accent).size(12.0)).sense(Sense::click()));
-                details = r
-                    .on_hover_text(tr("What the engine is doing, and its own last lines, live"))
-                    .on_hover_cursor(egui::CursorIcon::PointingHand)
-                    .clicked();
+                details =
+                    r.on_hover_text(tr("What the engine is doing, and its own last lines, live")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
             }
         });
         if details {
@@ -2247,7 +2248,7 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             // A failed row opens the whole error, as its Show error link does.
             let failed = state == "failed" && !busy;
             if failed {
-                let row = ui.interact(rect, ui.id().with(("ai-setup-failed-row", text(step, "/key"))), Sense::click());
+                let row = ui.interact(rect, ui.scope_id().with(("ai-setup-failed-row", text(step, "/key"))), Sense::click());
                 if row.hovered() {
                     ui.painter().rect_stroke(rect, t.radius, Stroke::new(1.0, t.danger), StrokeKind::Inside);
                 }
@@ -2383,7 +2384,8 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let mut right = ui.new_child(UiBuilder::new().max_rect(row).layout(Layout::right_to_left(Align::Center)));
     footer_buttons(app, &mut right, &plan, can_install, choosing);
     let left_edge = (right.min_rect().left() - 16.0).max(row.left());
-    let mut left = ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(row.min, pos2(left_edge, row.bottom()))).layout(Layout::left_to_right(Align::Center)));
+    let mut left =
+        ui.new_child(UiBuilder::new().max_rect(Rect::from_min_max(row.min, pos2(left_edge, row.bottom()))).layout(Layout::left_to_right(Align::Center)));
     ui.advance_cursor_after_rect(row);
     {
         let ui = &mut left;
@@ -2485,8 +2487,7 @@ fn footer_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, plan: &Value, can_
                 } else {
                     cant_install_why(app)
                 };
-                if next.on_disabled_hover_text(why).clicked()
-                {
+                if next.on_disabled_hover_text(why).clicked() {
                     use_managed(app);
                 }
             }
@@ -2569,7 +2570,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let (w, h) = (WIDTH.min(screen.width() - 24.0).max(520.0), HEIGHT.min(screen.height() - 24.0).max(360.0));
     let mut close = false;
     egui::Window::new(tr("PhotoCraft Setup: Local AI"))
-        .id(egui::Id::new("ai-setup"))
+        .id(egui::Id::unique("ai-setup"))
         .title_bar(false)
         .resizable(false)
         .collapsible(false)
@@ -2665,13 +2666,13 @@ fn error_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
         return;
     }
     let t = Tokens::get(ctx);
-    let copied = ctx.data(|d| d.get_temp::<bool>(egui::Id::new(ERROR_COPIED))).unwrap_or(false);
+    let copied = ctx.data(|d| d.get_temp::<bool>(egui::Id::unique(ERROR_COPIED))).unwrap_or(false);
     let mut answer = None;
     let buttons =
         [DialogButton::new(ButtonRole::Default, tr("Close"), 84.0), DialogButton::new(ButtonRole::Apply, if copied { tr("Copied") } else { tr("Copy") }, 84.0)];
     let screen = ctx.content_rect();
     let width = 600.0f32.min(screen.width() - 64.0).max(320.0);
-    let modal = egui::Modal::new(egui::Id::new("ai-setup-error")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("ai-setup-error")).show(ctx, |ui| {
         ui.set_width(width);
         ui.label(RichText::new(tr("The setup stopped with an error")).font(crate::theme::semibold(15.0)));
         ui.add_space(4.0);
@@ -2723,7 +2724,7 @@ fn activity_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let buttons = [DialogButton::new(ButtonRole::Default, tr("Close"), 84.0), DialogButton::new(ButtonRole::Apply, tr("Copy"), 84.0)];
     let screen = ctx.content_rect();
     let width = 640.0f32.min(screen.width() - 64.0).max(320.0);
-    let modal = egui::Modal::new(egui::Id::new("ai-setup-activity")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("ai-setup-activity")).show(ctx, |ui| {
         ui.set_width(width);
         ui.label(RichText::new(tr("What the engine is doing")).font(crate::theme::semibold(15.0)));
         ui.add_space(4.0);
@@ -2781,7 +2782,7 @@ fn activity_window(app: &mut PhotocraftApp, ctx: &egui::Context) {
 /// The error window answered: Copy puts the whole message on the clipboard and keeps the window
 /// open (its button says Copied); Close closes it, and Show error opens it again.
 fn error_answered(app: &mut PhotocraftApp, ctx: &egui::Context, answer: widgets::ButtonRole) {
-    let copied_id = egui::Id::new(ERROR_COPIED);
+    let copied_id = egui::Id::unique(ERROR_COPIED);
     if answer == widgets::ButtonRole::Apply {
         ctx.copy_text(failure(app));
         ctx.data_mut(|d| d.insert_temp(copied_id, true));
@@ -2797,7 +2798,7 @@ fn not_running_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let tried = photocraft_aigen::launch::addresses(&app.ui.ai_setup.url);
     let mut answer = None;
     let buttons = [DialogButton::new(ButtonRole::Default, tr("Try Again"), 104.0), DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0)];
-    let modal = egui::Modal::new(egui::Id::new("ai-setup-not-running")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("ai-setup-not-running")).show(ctx, |ui| {
         ui.set_max_width(440.0);
         ui.label(RichText::new(tr("Couldn't connect to ComfyUI")).font(crate::theme::semibold(15.0)));
         ui.add_space(4.0);
@@ -2846,7 +2847,7 @@ fn close_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
         DialogButton::new(ButtonRole::Alternate, tr("Stop Download"), 120.0),
         DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0),
     ];
-    let modal = egui::Modal::new(egui::Id::new("ai-setup-close")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("ai-setup-close")).show(ctx, |ui| {
         ui.set_max_width(440.0);
         ui.label(RichText::new(tr("Keep downloading in the background?")).font(crate::theme::semibold(15.0)));
         ui.add_space(4.0);
@@ -2915,13 +2916,20 @@ fn sign_in_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
     let licence_left = steps.iter().any(|m| is(m, "licence"));
     let user = text(&hf, "/user").to_string();
     let (mut answer, mut go_sign_in, mut go_licence, mut recheck, mut use_token, mut cancel) = (None, false, false, false, false, false);
-    let without = format!("{} {}", tr("Install Without"), match blocked.as_slice() { [one] => text(one, "/name"), _ => tr("Them") });
+    let without = format!(
+        "{} {}",
+        tr("Install Without"),
+        match blocked.as_slice() {
+            [one] => text(one, "/name"),
+            _ => tr("Them"),
+        }
+    );
     let buttons = [
         DialogButton::new(ButtonRole::Default, tr("Install"), 96.0).enabled(all_ready(app) && !checking),
         DialogButton::new(ButtonRole::Alternate, &without, 120.0),
         DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0),
     ];
-    let modal = egui::Modal::new(egui::Id::new("ai-setup-sign-in")).show(ctx, |ui| {
+    let modal = egui::Modal::new(egui::Id::unique("ai-setup-sign-in")).show(ctx, |ui| {
         ui.set_max_width(500.0);
         let title = match steps.len() {
             0 => format!("{names} {}", tr("can't be downloaded by this version")),
@@ -2994,7 +3002,11 @@ fn sign_in_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 } else {
                     recheck = signed && action(ui, tr("Check again"), t.text_dim).clicked();
                     let r = ui.add_enabled_ui(signed, |ui| {
-                        if licence_left { widgets::primary_button(ui, tr("Accept the Licence"), 0.0) } else { widgets::secondary_button(ui, tr("Accept the Licence"), 0.0) }
+                        if licence_left {
+                            widgets::primary_button(ui, tr("Accept the Licence"), 0.0)
+                        } else {
+                            widgets::secondary_button(ui, tr("Accept the Licence"), 0.0)
+                        }
                     });
                     go_licence = r.inner.on_disabled_hover_text(tr("Sign in first: the licence is accepted with your Hugging Face account")).clicked();
                 }

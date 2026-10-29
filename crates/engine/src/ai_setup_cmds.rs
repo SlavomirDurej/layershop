@@ -104,15 +104,15 @@ pub use web::AiSetup;
 
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
-    use super::*;
+    use super::{EngineError, Manifest, NEEDS_DESKTOP, Result, Session, Value, bad, bundled, json, manifest_value, vram_param};
     use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use photocraft_aigen::Launch;
     use photocraft_aisetup::fetch::Fetch;
-    use photocraft_aisetup::install::{self, Handle, Job, Progress, TestImage};
     use photocraft_aisetup::hf::{self, Credentials};
+    use photocraft_aisetup::install::{self, Handle, Job, Progress, TestImage};
     use photocraft_aisetup::plan::{self, Choices, Layout, PlannedModel, RealDisk, Route, Step};
     use photocraft_aisetup::state::{self, Phase, SetupState};
     use photocraft_aisetup::{configure, download, probe, runtime};
@@ -575,9 +575,11 @@ mod native {
         };
         // What the engine the app started last printed, while a setup runs or after it failed:
         // what the wizard shows of a step that takes long (starting it, rendering on the processor).
-        let engine = s.ai.server.as_ref().filter(|_| matches!(state, "running" | "failed")).map(|server| {
-            json!({"output": server.output(ENGINE_LINES), "log": server.log_file()})
-        });
+        let engine =
+            s.ai.server
+                .as_ref()
+                .filter(|_| matches!(state, "running" | "failed"))
+                .map(|server| json!({"output": server.output(ENGINE_LINES), "log": server.log_file()}));
         Ok(json!({
             "available": s.ai_setup.env.is_some(), "state": state, "running": running, "seq": s.ai_setup.seq, "modelFiles": model_files,
             "engine": engine,

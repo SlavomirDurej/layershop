@@ -506,7 +506,11 @@ mod tests {
         let skipped: Vec<String> = p.steps.iter().filter(|s| s.skipped.is_some()).map(|s| s.step.key()).collect();
         assert_eq!(
             skipped,
-            ["file:diffusion_models/flux3_image_klein_base_int8_convrot.safetensors", "file:text_encoders/qwen3vl_4b_int8_convrot.safetensors", "file:vae/flux2-vae.safetensors"]
+            [
+                "file:diffusion_models/flux3_image_klein_base_int8_convrot.safetensors",
+                "file:text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+                "file:vae/flux2-vae.safetensors"
+            ]
         );
         assert_eq!(p.models_bytes, m.download_bytes(&p.installable()));
         // With Ideogram 4 chosen too, the VAE they share is wanted after all.

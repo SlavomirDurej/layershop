@@ -1386,7 +1386,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 *crate::pixels_mut(&mut l)? = surface;
                 // The seed the image was rendered with (a random one is only known now).
                 generation.seed = image.seed;
-                l.generation = Some(generation);
+                l.generation = Some(Box::new(generation));
                 // Like Generative Fill: the selection becomes the new layer's mask, so a lasso or
                 // feathered selection shapes the result and stays editable.
                 if masked && let Some(sel) = selection {

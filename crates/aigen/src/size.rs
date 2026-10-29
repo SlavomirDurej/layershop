@@ -30,19 +30,8 @@ pub fn render_size(width: u32, height: u32, megapixels: f64, multiple: u32) -> (
 /// The sizes HiDream O1 was trained at, about four megapixels each (ComfyUI's Empty HiDream-O1
 /// Latent Image node lists them). Away from them its quality drops: at one and two megapixels
 /// a photographic scene came out smeared and waxy (2026-10-12).
-pub const HIDREAM_O1_SIZES: [(u32, u32); 11] = [
-    (2048, 2048),
-    (2304, 1728),
-    (1728, 2304),
-    (2560, 1440),
-    (1440, 2560),
-    (2496, 1664),
-    (1664, 2496),
-    (3104, 1312),
-    (1312, 3104),
-    (2304, 1792),
-    (1792, 2304),
-];
+pub const HIDREAM_O1_SIZES: [(u32, u32); 11] =
+    [(2048, 2048), (2304, 1728), (1728, 2304), (2560, 1440), (1440, 2560), (2496, 1664), (1664, 2496), (3104, 1312), (1312, 3104), (2304, 1792), (1792, 2304)];
 
 /// The entry of `ratios` (width, height) closest to `width`:`height`, compared on a log scale so
 /// 2:1 and 1:2 are equally far from square.
