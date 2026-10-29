@@ -3211,3 +3211,14 @@ curves	Smooth	Сгладить
 	Use	Использовать
 	In Front	Спереди
 	Behind	Сзади
+# Help › Check for Updates…
+	Check for Updates…	Проверить обновления…
+	Check for Updates	Проверить обновления
+	Check for Updates at Launch	Проверять обновления при запуске
+	Checking for updates…	Проверка обновлений…
+	Couldn't check for updates: {error}	Не удалось проверить обновления: {error}
+	Download	Скачать
+	Not Now	Не сейчас
+	Skip This Version	Пропустить эту версию
+	You have the latest version, {name} {current}.	У вас последняя версия: {name} {current}.
+	{name} {version} is available. You have {current}.	Доступна версия {name} {version}. У вас {current}.

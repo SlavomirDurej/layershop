@@ -3997,3 +3997,13 @@ curves	Smooth	Vloeiend maken
 	Use	Gebruiken
 	In Front	Voor
 	Behind	Achter
+# Help › Check for Updates…
+	Check for Updates…	Controleren op updates…
+	Check for Updates at Launch	Bij opstarten controleren op updates
+	Checking for updates…	Zoeken naar updates…
+	Couldn't check for updates: {error}	Kan niet controleren op updates: {error}
+	Download	Downloaden
+	Not Now	Niet nu
+	Skip This Version	Deze versie overslaan
+	You have the latest version, {name} {current}.	U hebt de nieuwste versie, {name} {current}.
+	{name} {version} is available. You have {current}.	{name} {version} is beschikbaar. U hebt {current}.

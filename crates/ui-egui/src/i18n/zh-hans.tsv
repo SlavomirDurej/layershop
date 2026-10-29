@@ -2861,3 +2861,14 @@ curves	Smooth	平滑
 	In Front	前面
 	Behind	后面
 	Blend	混合
+# Help › Check for Updates…
+	Check for Updates…	检查更新…
+	Check for Updates	检查更新
+	Check for Updates at Launch	启动时检查更新
+	Checking for updates…	正在检查更新…
+	Couldn't check for updates: {error}	无法检查更新：{error}
+	Download	下载
+	Not Now	以后再说
+	Skip This Version	跳过此版本
+	You have the latest version, {name} {current}.	你使用的是最新版本 {name} {current}。
+	{name} {version} is available. You have {current}.	{name} {version} 已推出。你的版本是 {current}。

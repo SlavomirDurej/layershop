@@ -3845,3 +3845,14 @@ navigator	Zoom	Zvětšení
 	Use	Použít
 	In Front	Vpředu
 	Behind	Vzadu
+# Help › Check for Updates…
+	Check for Updates…	Zkontrolovat aktualizace…
+	Check for Updates	Zkontrolovat aktualizace
+	Check for Updates at Launch	Kontrolovat aktualizace při spuštění
+	Checking for updates…	Kontrola aktualizací…
+	Couldn't check for updates: {error}	Aktualizace nelze zkontrolovat: {error}
+	Download	Stáhnout
+	Not Now	Teď ne
+	Skip This Version	Přeskočit tuto verzi
+	You have the latest version, {name} {current}.	Máte nejnovější verzi, {name} {current}.
+	{name} {version} is available. You have {current}.	Je k dispozici {name} {version}. Máte {current}.

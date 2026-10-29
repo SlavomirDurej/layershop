@@ -229,6 +229,7 @@ mod type_font_preview;
 pub mod type_panels_ui;
 pub mod type_tool;
 mod type_transform;
+pub mod update_check;
 mod variables_ui;
 pub mod vector_ui;
 pub mod view_cmds;
@@ -400,6 +401,8 @@ pub type AutomationOpenPcraftFn = Box<dyn FnMut(&str) -> Result<Option<(String, 
 pub type AutomationCommandFn = Box<dyn Fn(&str, &Value) -> Result<(), String>>;
 /// Open a URL in the system browser (native) — reliable cross-platform, unlike `ctx.open_url`.
 pub type OpenUrlFn = Box<dyn Fn(&str) -> Result<(), String>>;
+/// Fetches [`update_check::FEED`] and returns its body. Runs on a worker thread.
+pub type ReleaseFeedFn = std::sync::Arc<dyn Fn() -> Result<String, String> + Send + Sync>;
 pub type EncodePngFn = Box<dyn Fn(u32, u32, &[u8]) -> Result<Vec<u8>, String>>;
 /// Put an RGBA8 image (width, height, pixels) on the OS clipboard.
 pub type ClipboardSetFn = Box<dyn FnMut(u32, u32, &[u8]) -> Result<(), String>>;
@@ -496,6 +499,9 @@ pub struct Services {
     pub encode_png: Option<EncodePngFn>,
     /// Open a URL in the system browser (native). Falls back to `ctx.open_url` (web) when unset.
     pub open_url: Option<OpenUrlFn>,
+    /// The release list for Help › Check for Updates… and the launch check (see
+    /// [`update_check`]), fetched off the UI thread. `None` (web, tests) opens the releases page.
+    pub release_feed: Option<ReleaseFeedFn>,
     /// Preferences ▸ General ▸ Beep When Done: the platform's default beep, played when a
     /// background job finishes successfully. `None` in the web build (and in tests).
     pub beep: Option<fn()>,
@@ -827,6 +833,8 @@ pub struct PhotocraftApp {
     pub stroke_trace: stroke_trace::StrokeTrace,
     /// Preferences, autosave and snapping runtime state (see `prefs_ui`, `snap_ui`).
     pub(crate) prefs_rt: prefs_ui::Runtime,
+    /// Help › Check for Updates… and the launch check (see `update_check`).
+    pub(crate) updates: update_check::Checker,
     /// Close, Revert or Exit parked behind the unsaved-changes prompt (see `discard_ui`).
     pub(crate) discard: Option<discard_ui::Prompt>,
     /// The Open or Save dialog in progress, and the action waiting on it (see `file_dialog`).
@@ -986,6 +994,7 @@ impl PhotocraftApp {
             perf: Default::default(),
             stroke_trace: stroke_trace::StrokeTrace::from_env(),
             prefs_rt: Default::default(),
+            updates: Default::default(),
             discard: None,
             file_dialog: None,
             tiff_options: None,
@@ -1927,6 +1936,7 @@ impl eframe::App for PhotocraftApp {
         self.collect_screenshots(ctx);
         self.issue_screenshots(ctx);
         prefs_ui::tick(self, ctx);
+        update_check::tick(self, ctx);
         monitor_status::poll_frame(self, ctx, frame);
         // Control requests and persisted preferences can change the language in this frame.
         i18n::sync_context(ctx, &self.session.prefs().interface.language);

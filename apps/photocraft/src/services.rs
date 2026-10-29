@@ -558,6 +558,7 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         })),
         inbox: None,
         open_url: Some(Box::new(|url: &str| open::that(url).map_err(|e| e.to_string()))),
+        release_feed: Some(Arc::new(release_feed)),
         beep: Some(platform_beep),
         clipboard_set_image: Some({
             let clip = clip.clone();
@@ -610,6 +611,17 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         is_wayland: false,
         ..recovery_services(recovery_dir())
     }
+}
+
+/// Help › Check for Updates…: GitHub's list of this fork's releases (`update_check::FEED`).
+fn release_feed() -> Result<String, String> {
+    use photocraft_aigen::Transport;
+    let request = photocraft_aigen::Request::get(photocraft_ui_egui::update_check::FEED).header("Accept", "application/vnd.github+json").timeout(20);
+    let response = photocraft_aigen::UreqTransport::new().send(&request).map_err(|e| e.to_string())?;
+    if !response.ok() {
+        return Err(format!("GitHub answered with status {}", response.status));
+    }
+    String::from_utf8(response.body).map_err(|e| e.to_string())
 }
 
 /// Preferences ▸ General ▸ Beep When Done: the platform's default information beep.

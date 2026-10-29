@@ -3245,3 +3245,14 @@ curves	Smooth	Lisser
 	Use	Utiliser
 	In Front	Devant
 	Behind	Derrière
+# Help › Check for Updates…
+	Check for Updates…	Rechercher des mises à jour…
+	Check for Updates	Rechercher des mises à jour
+	Check for Updates at Launch	Rechercher des mises à jour au démarrage
+	Checking for updates…	Recherche de mises à jour…
+	Couldn't check for updates: {error}	Impossible de rechercher des mises à jour : {error}
+	Download	Télécharger
+	Not Now	Plus tard
+	Skip This Version	Ignorer cette version
+	You have the latest version, {name} {current}.	Vous avez la dernière version, {name} {current}.
+	{name} {version} is available. You have {current}.	{name} {version} est disponible. Vous avez la {current}.

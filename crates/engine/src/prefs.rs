@@ -221,6 +221,9 @@ pub struct General {
     pub zoom_resizes_windows: bool,
     pub use_legacy_free_transform: bool,
     pub auto_show_home_screen: bool,
+    /// Look for a newer release once at launch and say when there is one (Help › Check for
+    /// Updates… asks any time).
+    pub check_for_updates: bool,
 }
 
 impl Default for General {
@@ -237,6 +240,7 @@ impl Default for General {
             zoom_resizes_windows: false,
             use_legacy_free_transform: false,
             auto_show_home_screen: true,
+            check_for_updates: true,
         }
     }
 }
@@ -999,6 +1003,9 @@ pub struct Preferences {
     pub view_extras: Value,
     /// File › Scripts › Script Events Manager: event → script bindings.
     pub script_events: crate::automate_cmds::ScriptEvents,
+    /// The release version (`0.11.0`) the launch update notice was told to skip ("Skip This
+    /// Version"); empty when none was. Help › Check for Updates… still reports it.
+    pub skipped_update: String,
 }
 
 /// Preferences dialog sections in Photoshop's order: (id, title).

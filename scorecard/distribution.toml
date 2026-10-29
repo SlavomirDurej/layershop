@@ -43,9 +43,9 @@ note = "release.yml:242-283 (freebsd job) + packaging/freebsd/package.sh; layout
 [[item]]
 id = "DIST-220-1"
 target = "Help > Check for Updates plus an opt-out periodic release-feed check on all desktops"
-status = "missing"
+status = "done"
 issue = 220
-note = "No update check in crates"
+note = "ui-egui update_check.rs: Help > Check for Updates... and a launch check (Preferences > General > Check for Updates at Launch, on by default) read the fork's GitHub release list through the desktop's release_feed service; a newer version offers Download / Not Now / Skip This Version. The web build opens the releases page"
 
 [[item]]
 id = "DIST-220-2"

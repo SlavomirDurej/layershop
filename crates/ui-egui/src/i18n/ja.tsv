@@ -2106,6 +2106,16 @@
 # Strings added to the UI after this catalog was first written (rebase onto main, 2026-10).
 	System Info…	システム情報…
 	System Info	システム情報
+	Check for Updates…	アップデートを確認…
+	Check for Updates	アップデートを確認
+	Check for Updates at Launch	起動時にアップデートを確認
+	Checking for updates…	アップデートを確認しています…
+	Couldn't check for updates: {error}	アップデートを確認できませんでした: {error}
+	Download	ダウンロード
+	Not Now	後で
+	Skip This Version	このバージョンをスキップ
+	You have the latest version, {name} {current}.	最新バージョンの {name} {current} をお使いです。
+	{name} {version} is available. You have {current}.	{name} {version} が利用可能です。お使いのバージョンは {current} です。
 	More panels	その他のパネル
 	More documents	その他のドキュメント
 	These settings aren't available in PhotoCraft yet.	これらの設定は PhotoCraft ではまだ使用できません。

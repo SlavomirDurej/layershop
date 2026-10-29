@@ -1108,6 +1108,7 @@ fn gpu_memory_lines(app: &PhotocraftApp) -> Vec<String> {
 fn humanize(key: &str) -> String {
     match key {
         "appearanceMode" => return "Appearance Mode".into(),
+        "checkForUpdates" => return "Check for Updates at Launch".into(),
         "exrAcesCg" => return "Open color-less EXR as ACEScg".into(),
         "darkTheme" => return "Dark Theme".into(),
         "lightTheme" => return "Light Theme".into(),

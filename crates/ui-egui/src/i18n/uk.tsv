@@ -3945,3 +3945,14 @@ curves	Smooth	Згладити
 	Use	Використати
 	In Front	Спереду
 	Behind	Ззаду
+# Help › Check for Updates…
+	Check for Updates…	Перевірити оновлення…
+	Check for Updates	Перевірити оновлення
+	Check for Updates at Launch	Перевіряти оновлення під час запуску
+	Checking for updates…	Перевірка оновлень…
+	Couldn't check for updates: {error}	Не вдалося перевірити оновлення: {error}
+	Download	Завантажити
+	Not Now	Не зараз
+	Skip This Version	Пропустити цю версію
+	You have the latest version, {name} {current}.	У вас остання версія: {name} {current}.
+	{name} {version} is available. You have {current}.	Доступна версія {name} {version}. У вас {current}.

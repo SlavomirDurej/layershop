@@ -4156,3 +4156,13 @@ cameraRaw	Yellow	Sárga
 	Use	Használat
 	In Front	Elöl
 	Behind	Mögött
+# Help › Check for Updates…
+	Check for Updates…	Frissítések keresése…
+	Check for Updates at Launch	Frissítések keresése indításkor
+	Checking for updates…	Frissítések keresése folyamatban…
+	Couldn't check for updates: {error}	Nem sikerült frissítéseket keresni: {error}
+	Download	Letöltés
+	Not Now	Most nem
+	Skip This Version	Verzió kihagyása
+	You have the latest version, {name} {current}.	A legújabb verziót használja: {name} {current}.
+	{name} {version} is available. You have {current}.	Elérhető: {name} {version}. Az Ön verziója: {current}.

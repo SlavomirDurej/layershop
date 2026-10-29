@@ -327,6 +327,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 DialogKind::Command if crate::shape_dialog::owns(&fields) => crate::shape_dialog::body(app, ui, &mut fields),
                 DialogKind::Command if crate::delete_layer_prompt::owns(&fields) => crate::delete_layer_prompt::body(ui, &mut fields),
                 DialogKind::Command if crate::disk_change_prompt::owns(&fields) => crate::disk_change_prompt::body(ui, &fields),
+                DialogKind::Command if crate::update_check::owns(&fields) => crate::update_check::body(ui, &fields),
                 DialogKind::Command if crate::actions::owns_insert_stop(&fields) => crate::actions::insert_stop_body(ui, &mut fields),
                 DialogKind::Command if crate::new_layer_ui::owns(&fields) => crate::new_layer_ui::body(ui, &mut fields),
                 DialogKind::Command if crate::mask_trash_prompt::owns(&fields) => crate::mask_trash_prompt::body(ui, &fields),
@@ -445,6 +446,21 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                                 fields.insert("choice".into(), json!("apply"));
                             }
                             hit
+                        } else if crate::update_check::owns(&fields) {
+                            // A newer release: Download / Not Now / Skip This Version. Otherwise
+                            // (up to date, or the check failed) just OK.
+                            if crate::update_check::offers_download(&fields) {
+                                let download = DialogButton::new(ButtonRole::Default, tl!("Download"), 84.0);
+                                let later = DialogButton::new(ButtonRole::Cancel, tl!("Not Now"), 84.0);
+                                let skip = DialogButton::new(ButtonRole::Alternate, tl!("Skip This Version"), 130.0);
+                                let hit = dialog_buttons(ui, &[download, later, skip]);
+                                if hit == Some(ButtonRole::Alternate) {
+                                    fields.insert("choice".into(), json!("skip"));
+                                }
+                                hit
+                            } else {
+                                dialog_buttons(ui, &[DialogButton::new(ButtonRole::Default, tl!("OK"), 84.0)])
+                            }
                         } else if crate::rasterize_prompt::is_filter(&fields) {
                             // Photoshop: Convert to Smart Object / Rasterize / Cancel (#4303).
                             let rasterize = DialogButton::new(ButtonRole::Default, tl!("Rasterize"), 84.0);
@@ -627,6 +643,7 @@ pub fn confirm(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
         DialogKind::Command if crate::shape_dialog::owns(&d.fields) => crate::shape_dialog::confirm(app, &d.fields),
         DialogKind::Command if crate::delete_layer_prompt::owns(&d.fields) => crate::delete_layer_prompt::confirm(app, &d.fields),
         DialogKind::Command if crate::disk_change_prompt::owns(&d.fields) => crate::disk_change_prompt::confirm(app, &d.fields),
+        DialogKind::Command if crate::update_check::owns(&d.fields) => crate::update_check::confirm(app, &d.fields),
         DialogKind::Command if crate::actions::owns_insert_stop(&d.fields) => crate::actions::insert_stop_confirm(app, &d.fields),
         DialogKind::Command if crate::new_layer_ui::owns(&d.fields) => crate::new_layer_ui::confirm(app, &d.fields),
         DialogKind::Command if crate::mask_trash_prompt::owns(&d.fields) => crate::mask_trash_prompt::confirm(app, &d.fields),

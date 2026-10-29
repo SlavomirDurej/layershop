@@ -37,6 +37,15 @@ also ProjectManager's Deploy buttons:
 The files are unsigned (`sign.ps1` skips without a certificate). The MSI keeps Preview 1's
 UpgradeCode and allows same-version upgrades, so each preview replaces the last.
 
+Installed copies find new releases themselves (`crates/ui-egui/src/update_check.rs`): at launch,
+unless Preferences › General › Check for Updates at Launch is off, and from Help › Check for
+Updates…, they read the fork's GitHub release list (drafts left out, pre-releases counted) and
+offer the highest version above their own. Only the version number in the tag counts, compared
+with the `[workspace.package] version` the build was made from: bump it (`0.11.0`, `1.0.0`) for a
+release people should be told about. Another preview of the same version is not announced, since
+a build doesn't know its preview number. GitHub allows 60 unauthenticated requests an hour per
+address, far more than one check per launch needs.
+
 Uninstalling (not upgrading) runs `photocraft.exe --uninstall-cleanup` as the user, before the
 program's files go: a small window asks whether the local AI engine, the downloaded models and
 the settings go too, and removes what is ticked (`apps/photocraft/src/uninstall.rs`). A silent

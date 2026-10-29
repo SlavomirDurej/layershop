@@ -3419,3 +3419,14 @@ curves	Smooth	매끄럽게
 	In Front	앞
 	Behind	뒤
 	Blend	혼합
+# Help › Check for Updates…
+	Check for Updates…	업데이트 확인…
+	Check for Updates	업데이트 확인
+	Check for Updates at Launch	시작할 때 업데이트 확인
+	Checking for updates…	업데이트 확인 중…
+	Couldn't check for updates: {error}	업데이트를 확인할 수 없습니다: {error}
+	Download	다운로드
+	Not Now	나중에
+	Skip This Version	이 버전 건너뛰기
+	You have the latest version, {name} {current}.	최신 버전 {name} {current}을(를) 사용 중입니다.
+	{name} {version} is available. You have {current}.	{name} {version}을(를) 사용할 수 있습니다. 현재 버전은 {current}입니다.

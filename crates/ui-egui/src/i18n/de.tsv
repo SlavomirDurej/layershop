@@ -3238,3 +3238,14 @@ curves	Smooth	Glätten
 	In Front	Davor
 	Behind	Dahinter
 	Blend	Mischen
+# Help › Check for Updates…
+	Check for Updates…	Nach Updates suchen…
+	Check for Updates	Nach Updates suchen
+	Check for Updates at Launch	Beim Start nach Updates suchen
+	Checking for updates…	Suche nach Updates…
+	Couldn't check for updates: {error}	Suche nach Updates fehlgeschlagen: {error}
+	Download	Herunterladen
+	Not Now	Nicht jetzt
+	Skip This Version	Diese Version überspringen
+	You have the latest version, {name} {current}.	Sie haben die neueste Version, {name} {current}.
+	{name} {version} is available. You have {current}.	{name} {version} ist verfügbar. Sie haben {current}.

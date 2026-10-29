@@ -3724,3 +3724,14 @@ curves	Smooth	Làm mượt
 	Use	Dùng
 	In Front	Phía trước
 	Behind	Phía sau
+# Help › Check for Updates…
+	Check for Updates…	Kiểm tra cập nhật…
+	Check for Updates	Kiểm tra cập nhật
+	Check for Updates at Launch	Kiểm tra cập nhật khi khởi động
+	Checking for updates…	Đang kiểm tra cập nhật…
+	Couldn't check for updates: {error}	Không thể kiểm tra cập nhật: {error}
+	Download	Tải xuống
+	Not Now	Để sau
+	Skip This Version	Bỏ qua phiên bản này
+	You have the latest version, {name} {current}.	Bạn đang dùng phiên bản mới nhất, {name} {current}.
+	{name} {version} is available. You have {current}.	Đã có {name} {version}. Bạn đang dùng {current}.

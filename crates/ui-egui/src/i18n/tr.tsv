@@ -3967,3 +3967,13 @@ cameraData	Lens	Lens
 	Use	Kullan
 	In Front	Önde
 	Behind	Arkada
+# Help › Check for Updates…
+	Check for Updates…	Güncellemeleri Kontrol Et…
+	Check for Updates at Launch	Başlangıçta Güncellemeleri Kontrol Et
+	Checking for updates…	Güncellemeler kontrol ediliyor…
+	Couldn't check for updates: {error}	Güncellemeler kontrol edilemedi: {error}
+	Download	İndir
+	Not Now	Şimdi Değil
+	Skip This Version	Bu Sürümü Atla
+	You have the latest version, {name} {current}.	En son sürümü kullanıyorsunuz: {name} {current}.
+	{name} {version} is available. You have {current}.	{name} {version} kullanılabilir. Sizdeki sürüm: {current}.

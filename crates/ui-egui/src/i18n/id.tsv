@@ -3232,3 +3232,14 @@ curves	Smooth	Haluskan
 	Use	Gunakan
 	In Front	Di Depan
 	Behind	Di Belakang
+# Help › Check for Updates…
+	Check for Updates…	Periksa Pembaruan…
+	Check for Updates	Periksa Pembaruan
+	Check for Updates at Launch	Periksa Pembaruan saat Mulai
+	Checking for updates…	Memeriksa pembaruan…
+	Couldn't check for updates: {error}	Tidak dapat memeriksa pembaruan: {error}
+	Download	Unduh
+	Not Now	Nanti
+	Skip This Version	Lewati Versi Ini
+	You have the latest version, {name} {current}.	Anda menggunakan versi terbaru, {name} {current}.
+	{name} {version} is available. You have {current}.	{name} {version} telah tersedia. Versi Anda {current}.

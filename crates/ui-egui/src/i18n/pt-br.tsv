@@ -4027,3 +4027,13 @@ layerLabel	No Color	Sem cor
 	Use	Usar
 	In Front	Na frente
 	Behind	Atrás
+# Help › Check for Updates…
+	Check for Updates…	Verificar atualizações…
+	Check for Updates at Launch	Verificar atualizações ao iniciar
+	Checking for updates…	Verificando atualizações…
+	Couldn't check for updates: {error}	Não foi possível verificar atualizações: {error}
+	Download	Baixar
+	Not Now	Agora não
+	Skip This Version	Ignorar esta versão
+	You have the latest version, {name} {current}.	Você tem a versão mais recente, {name} {current}.
+	{name} {version} is available. You have {current}.	{name} {version} está disponível. Você tem a {current}.

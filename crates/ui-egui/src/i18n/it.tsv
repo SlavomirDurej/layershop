@@ -4354,3 +4354,13 @@ shape	Appearance	Aspetto
 	Use	Usa
 	In Front	Davanti
 	Behind	Dietro
+# Help › Check for Updates…
+	Check for Updates…	Verifica aggiornamenti…
+	Check for Updates at Launch	Verifica aggiornamenti all'avvio
+	Checking for updates…	Verifica degli aggiornamenti in corso…
+	Couldn't check for updates: {error}	Impossibile verificare gli aggiornamenti: {error}
+	Download	Scarica
+	Not Now	Non ora
+	Skip This Version	Salta questa versione
+	You have the latest version, {name} {current}.	Hai la versione più recente, {name} {current}.
+	{name} {version} is available. You have {current}.	È disponibile {name} {version}. Hai la {current}.

@@ -3937,3 +3937,13 @@ curves	Smooth	Εξομάλυνση
 	Use	Χρήση
 	In Front	Μπροστά
 	Behind	Πίσω
+# Help › Check for Updates…
+	Check for Updates…	Έλεγχος ενημερώσεων…
+	Check for Updates at Launch	Έλεγχος ενημερώσεων κατά την εκκίνηση
+	Checking for updates…	Γίνεται έλεγχος ενημερώσεων…
+	Couldn't check for updates: {error}	Δεν ήταν δυνατός ο έλεγχος ενημερώσεων: {error}
+	Download	Λήψη
+	Not Now	Όχι τώρα
+	Skip This Version	Παράλειψη αυτής της έκδοσης
+	You have the latest version, {name} {current}.	Έχετε την πιο πρόσφατη έκδοση, {name} {current}.
+	{name} {version} is available. You have {current}.	Το {name} {version} είναι διαθέσιμο. Έχετε την {current}.

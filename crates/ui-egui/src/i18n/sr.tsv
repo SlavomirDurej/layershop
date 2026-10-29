@@ -4310,3 +4310,13 @@ shape	Appearance	Izgled
 	Use	Koristi
 	In Front	Ispred
 	Behind	Iza
+# Help › Check for Updates…
+	Check for Updates…	Proveri ažuriranja…
+	Check for Updates at Launch	Proveri ažuriranja pri pokretanju
+	Checking for updates…	Provera ažuriranja…
+	Couldn't check for updates: {error}	Provera ažuriranja nije uspela: {error}
+	Download	Preuzmi
+	Not Now	Ne sada
+	Skip This Version	Preskoči ovu verziju
+	You have the latest version, {name} {current}.	Imate najnoviju verziju, {name} {current}.
+	{name} {version} is available. You have {current}.	Dostupan je {name} {version}. Vi imate {current}.
