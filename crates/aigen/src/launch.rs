@@ -361,14 +361,20 @@ fn version_parts(v: &str) -> Vec<u64> {
 /// (ComfyUI Desktop's installations, [`desktop_folders`]) that holds `script` and is a newer
 /// version than `folder`'s. Two copies can share a user folder, and the older one then quits on
 /// the database the newer one moved on (settings saved by an older Find Installation pointed at
-/// such a copy). None when `folder`'s version is unknown or nothing newer is there.
+/// such a copy). None when `folder`'s version is unknown or nothing newer is there, and when
+/// `python` lives inside `folder` (a portable build's or LayerShop's own engine): that Python
+/// only imports from its own copy, so another copy's script would load this one's modules.
 pub fn newer_copy(
     folder: &std::path::Path,
+    python: &std::path::Path,
     script: &str,
     installed: &[std::path::PathBuf],
     read: &dyn Fn(&std::path::Path) -> Option<String>,
     is_file: &dyn Fn(&std::path::Path) -> bool,
 ) -> Option<std::path::PathBuf> {
+    if python.starts_with(folder) {
+        return None;
+    }
     let version = |d: &std::path::Path| d.join(script).parent().and_then(|p| read(&p.join("comfyui_version.py"))).and_then(|t| version_in(&t));
     let own = version_parts(&version(folder)?);
     installed.iter().filter(|d| d.as_path() != folder && is_file(&d.join(script))).find(|d| version(d).is_some_and(|v| version_parts(&v) > own)).cloned()
@@ -756,7 +762,7 @@ mod native {
             let script = args.iter().find(|a| a.to_ascii_lowercase().ends_with(".py")).cloned().unwrap_or_else(|| "main.py".into());
             let installed =
                 desktop_config_dir().map(|d| d.join("installations.json")).and_then(|f| small_text(&f)).map(|r| desktop_folders(&r)).unwrap_or_default();
-            let folder = newer_copy(Path::new(folder), &script, &installed, &small_text, &|p| p.is_file()).unwrap_or_else(|| PathBuf::from(folder));
+            let folder = newer_copy(Path::new(folder), Path::new(python), &script, &installed, &small_text, &|p| p.is_file()).unwrap_or_else(|| PathBuf::from(folder));
             args.push("--port".into());
             args.push(port.to_string());
             let mut cmd = Command::new(python);
@@ -1218,15 +1224,35 @@ mod tests {
         };
         let stale = Path::new("/desktop/resources");
         let installed = [PathBuf::from("/installs/Older"), "/installs/ComfyUI".into()];
-        assert_eq!(newer_copy(stale, script, &installed, &read, &is_file), Some("/installs/ComfyUI".into()));
+        let venv = Path::new("/home/ComfyUI/.venv/Scripts/python.exe");
+        assert_eq!(newer_copy(stale, venv, script, &installed, &read, &is_file), Some("/installs/ComfyUI".into()));
         // The newest copy is kept, and so is a folder whose version is unknown.
-        assert_eq!(newer_copy(Path::new("/installs/ComfyUI"), script, &[stale.into(), "/installs/Older".into()], &read, &is_file), None);
-        assert_eq!(newer_copy(Path::new("/elsewhere"), script, &installed, &read, &is_file), None);
+        assert_eq!(newer_copy(Path::new("/installs/ComfyUI"), venv, script, &[stale.into(), "/installs/Older".into()], &read, &is_file), None);
+        assert_eq!(newer_copy(Path::new("/elsewhere"), venv, script, &installed, &read, &is_file), None);
         // Without the same script it isn't a copy of the same thing.
-        assert_eq!(newer_copy(stale, "main.py", &installed, &read, &is_file), None);
-        assert_eq!(newer_copy(stale, script, &[], &read, &is_file), None);
+        assert_eq!(newer_copy(stale, venv, "main.py", &installed, &read, &is_file), None);
+        assert_eq!(newer_copy(stale, venv, script, &[], &read, &is_file), None);
         assert!(version_parts("0.42.1+9") > version_parts("0.42.0") && version_parts("0.10") > version_parts("0.9.9"));
         assert!(version_parts("") == version_parts("x"));
+    }
+
+    /// The user's machine, 2026-10-29: LayerShop's own engine (0.42.1, its `python_embeded`) was
+    /// swapped for Comfy Desktop's newer 0.43.0 copy, and that copy's `main.py` failed to import
+    /// its `app` package because the embedded Python only imports from the engine's own copy. A
+    /// copy whose Python lives inside it is self-contained and always starts as it is.
+    #[test]
+    fn a_copy_with_its_own_python_is_never_swapped_for_another() {
+        use std::path::{Path, PathBuf};
+        let script = "ComfyUI/main.py";
+        let versions = [("/engine/ComfyUI/comfyui_version.py", "0.42.1"), ("/installs/ComfyUI/ComfyUI/comfyui_version.py", "0.43.0")];
+        let read = |p: &Path| versions.iter().find(|(f, _)| Path::new(f) == p).map(|(_, v)| format!("__version__ = \"{v}\"
+"));
+        let is_file = |p: &Path| ["/engine/ComfyUI/main.py", "/installs/ComfyUI/ComfyUI/main.py"].iter().any(|f| Path::new(f) == p);
+        let installed = [PathBuf::from("/installs/ComfyUI")];
+        let engine = Path::new("/engine");
+        assert_eq!(newer_copy(engine, Path::new("/engine/python_embeded/python.exe"), script, &installed, &read, &is_file), None);
+        // The same folder started by a Python outside it would still move to the newer copy.
+        assert_eq!(newer_copy(engine, Path::new("/venv/Scripts/python.exe"), script, &installed, &read, &is_file), Some("/installs/ComfyUI".into()));
     }
 
     /// What that old copy printed before it quit: the cause is ten lines above the end.
