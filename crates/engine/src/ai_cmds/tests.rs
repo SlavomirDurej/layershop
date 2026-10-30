@@ -574,6 +574,8 @@ fn inpainting_says_what_it_needs() {
     let e = fails(&mut blank, json!({"prompt": "x", "mode": "inpaint"}));
     assert!(e.contains("is empty inside the selection"), "{e}");
     blank.execute("layer.newAdjustmentLayer.invert", json!({})).unwrap();
+    // The new layer took the selection as its mask, which deselects (as in Photoshop).
+    blank.execute("select.rect", json!({"x": 8, "y": 8, "width": 16, "height": 16})).unwrap();
     let e = fails(&mut blank, json!({"prompt": "x", "mode": "inpaint"}));
     assert!(e.contains("pixel layer") && e.contains("Adjustment"), "{e}");
     assert_eq!(layer_count(&s), 1, "a refused inpainting leaves the document alone");

@@ -15,7 +15,8 @@
   - craft-fonts: used when a ..\craft-fonts checkout exists (official builds embed its fonts).
   - SHA256SUMS.txt for the files made (`sha256sum -c` reads it), and build-info.json: the
     version, the commit and whether the tree had uncommitted changes, which the publish step
-    checks.
+    checks. The debug symbols zip package.ps1 also writes (for profilers) stays in distelease
+    but is not a release file: it is in neither, so it is not published.
 
   The build itself takes several minutes (longer the first time).
 
@@ -105,12 +106,14 @@ $Started = (Get-Date).AddSeconds(-2)
 $Package = Join-Path $PSScriptRoot 'package.ps1'
 if ($SkipBuild) { & $Package -Arch $Arch -SkipBuild } else { & $Package -Arch $Arch }
 
-# This build's files: the ones written since it started.
-$Files = @(Get-ChildItem -Path $Dist -File | Where-Object { $_.Name -like "layershop-$Version-windows-$Arch*" -and $_.LastWriteTime -ge $Started } | Sort-Object Name)
+# This build's files: the ones written since it started. The release files are all of them but the
+# debug symbols.
+$Made = @(Get-ChildItem -Path $Dist -File | Where-Object { $_.Name -like "layershop-$Version-windows-$Arch*" -and $_.LastWriteTime -ge $Started } | Sort-Object Name)
+$Files = @($Made | Where-Object { $_.Name -notlike '*-symbols.zip' })
 if (-not $Files) { throw "package.ps1 made no layershop-$Version-windows-$Arch files in $Dist" }
 # Any other release file there is an older build's: it goes, so only this build can be published
 # (notes written by hand stay).
-Get-ChildItem -Path $Dist -File | Where-Object { $_.Name -like 'layershop-*' -and $Files.Name -notcontains $_.Name } | Remove-Item -Force
+Get-ChildItem -Path $Dist -File | Where-Object { $_.Name -like 'layershop-*' -and $Made.Name -notcontains $_.Name } | Remove-Item -Force
 $Sums = $Files | ForEach-Object { '{0} *{1}' -f (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLowerInvariant(), $_.Name }
 # LF line ends, as sha256sum writes and reads them.
 [IO.File]::WriteAllText((Join-Path $Dist 'SHA256SUMS.txt'), (($Sums -join "`n") + "`n"))

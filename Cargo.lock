@@ -1440,13 +1440,14 @@ dependencies = [
 [[package]]
 name = "craft-update"
 version = "0.1.0"
-source = "git+https://github.com/storytold/craft-libs?rev=92d392cff132eaf53e13afff77f38b5c11b73aa0#92d392cff132eaf53e13afff77f38b5c11b73aa0"
+source = "git+https://github.com/storytold/craft-libs?rev=04aa1703b32d299e54f78fcde4182f2b393a9116#04aa1703b32d299e54f78fcde4182f2b393a9116"
 dependencies = [
  "chrono",
  "dunce",
  "egui",
  "flate2",
  "getrandom 0.3.4",
+ "image",
  "log",
  "plist",
  "semver",
@@ -5103,6 +5104,7 @@ dependencies = [
 name = "photocraft-algo"
 version = "0.17.0"
 dependencies = [
+ "criterion",
  "photocraft-color",
  "photocraft-geom",
  "photocraft-raster",
@@ -5176,6 +5178,7 @@ dependencies = [
  "image",
  "image-webp",
  "jpeg-encoder",
+ "jxl-oxide",
  "photocraft-heif",
  "png 0.18.1",
  "proptest",
@@ -5185,6 +5188,7 @@ dependencies = [
  "tiff",
  "zune-core 0.5.3",
  "zune-jpeg 0.5.15",
+ "zune-jpegxl",
 ]
 
 [[package]]
@@ -5377,6 +5381,7 @@ dependencies = [
  "photocraft-geom",
  "photocraft-raster",
  "rayon",
+ "rustc-hash 2.1.3",
  "serde",
  "serde_json",
 ]
