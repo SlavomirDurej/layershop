@@ -140,6 +140,7 @@ mod tests {
                 GenerationSource::Layer(99).into(),
             ],
             quality: GenerationQuality::Detail,
+            regions: Vec::new(),
         }
     }
 

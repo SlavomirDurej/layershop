@@ -151,6 +151,76 @@ pub struct Generation {
     pub references: Vec<GenerationReference>,
     /// ImgEdit: how much of the model's schedule was run.
     pub quality: GenerationQuality,
+    /// Txt2img with regions: the boxes the scene was laid out in, front to back, as the document
+    /// held them ([`crate::Document::ai_regions`]); Load Prompt puts them back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub regions: Vec<AiRegion>,
+}
+
+/// What an [`AiRegion`] holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum AiRegionKind {
+    #[default]
+    Object,
+    /// A person or creature.
+    Character,
+    /// Words to render exactly ([`AiRegion::text`]).
+    Text,
+}
+
+impl AiRegionKind {
+    pub const ALL: [AiRegionKind; 3] = [AiRegionKind::Object, AiRegionKind::Character, AiRegionKind::Text];
+
+    /// As the commands name it.
+    pub fn key(self) -> &'static str {
+        match self {
+            AiRegionKind::Object => "object",
+            AiRegionKind::Character => "character",
+            AiRegionKind::Text => "text",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Option<AiRegionKind> {
+        AiRegionKind::ALL.into_iter().find(|k| k.key() == key)
+    }
+}
+
+/// A box a text-to-image is told to place something in (the AI Gen panel's Create › Regions,
+/// [`crate::Document::ai_regions`]), for models trained on boxes. Kept with the document, so a
+/// layout can be refined over many generations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct AiRegion {
+    /// Stable within the document (the commands address a region by it).
+    pub id: u32,
+    pub kind: AiRegionKind,
+    /// What goes in the box; for text, how the words look.
+    pub caption: String,
+    /// Text regions: the words to render.
+    pub text: String,
+    /// Document pixels.
+    pub rect: crate::Rect,
+    /// The outline (and fill) colour it is drawn in on the canvas, sRGB.
+    pub color: [u8; 3],
+    /// The box is tinted with its colour on the canvas, at `fill_opacity` (0..=1).
+    pub fill: bool,
+    pub fill_opacity: f32,
+}
+
+impl Default for AiRegion {
+    fn default() -> Self {
+        AiRegion {
+            id: 0,
+            kind: AiRegionKind::Object,
+            caption: String::new(),
+            text: String::new(),
+            rect: crate::Rect::EMPTY,
+            color: [0xf2, 0xb3, 0x3d],
+            fill: true,
+            fill_opacity: 0.12,
+        }
+    }
 }
 
 #[cfg(test)]

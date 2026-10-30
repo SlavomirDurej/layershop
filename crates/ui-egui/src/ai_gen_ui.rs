@@ -103,6 +103,27 @@ impl EditTask {
     }
 }
 
+/// Create's two ways, under the tabs: the prompt alone, or the scene laid out in boxes
+/// ([`regions`]), which only models trained on boxes take.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum CreateTask {
+    #[default]
+    Prompt,
+    Regions,
+}
+
+impl CreateTask {
+    pub const ALL: [CreateTask; 2] = [CreateTask::Prompt, CreateTask::Regions];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            CreateTask::Prompt => "Prompt",
+            CreateTask::Regions => "Regions",
+        }
+    }
+}
+
 /// How a change is asked of a model that can do it both ways (Advanced › Method). A model that
 /// can do only one is asked that way, whatever this says.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -124,6 +145,12 @@ pub struct AiGenUi {
     pub mode: Mode,
     /// Edit: what to do with the picture.
     pub task: EditTask,
+    /// Create: the prompt alone, or the scene laid out in regions (a model that takes them).
+    pub create_task: CreateTask,
+    /// Create › Regions: the region selected in the list and on the canvas.
+    pub region: Option<u32>,
+    #[serde(skip)]
+    regions: regions::RegionsUi,
     /// Change: how a model that both edits and inpaints is asked.
     pub method: Method,
     /// The model chosen for Create and for Restyle, which list the models that generate (empty:
@@ -190,6 +217,9 @@ impl Default for AiGenUi {
         Self {
             mode: Mode::default(),
             task: EditTask::default(),
+            create_task: CreateTask::default(),
+            region: None,
+            regions: regions::RegionsUi::default(),
             method: Method::default(),
             model: String::new(),
             strength: 1.0,
@@ -553,6 +583,51 @@ fn task_row(ui: &mut egui::Ui, task: &mut EditTask, enabled: bool) {
     });
 }
 
+/// Create's ways, under the tabs, as Edit's tasks are drawn. Regions is off for a model that
+/// can't place them, and says which can.
+fn create_row(ui: &mut egui::Ui, task: &mut CreateTask, enabled: bool, model: Option<&Model>, able: &[String]) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let mut picked = false;
+    let regions_ok = model.is_some_and(|m| m.layout().is_some());
+    // A model that can't place regions shows Prompt, keeping the choice for one that can.
+    let showing_regions = *task == CreateTask::Regions && regions_ok;
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 4.0;
+        for k in CreateTask::ALL {
+            let allowed = enabled && (k == CreateTask::Prompt || regions_ok);
+            let on = (k == CreateTask::Regions) == showing_regions;
+            let galley = ui.painter().layout_no_wrap(tr(k.label()).to_owned(), crate::theme::medium(11.5), t.text);
+            let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 16.0, 24.0), if allowed { egui::Sense::click() } else { egui::Sense::hover() });
+            let color = if !allowed && k == CreateTask::Regions {
+                t.text_faint
+            } else if on || (allowed && resp.hovered()) {
+                t.text
+            } else {
+                t.text_dim
+            };
+            ui.painter().galley_with_override_text_color(rect.center() - galley.size() / 2.0, galley, color);
+            if on {
+                let y = rect.bottom() - 1.0;
+                ui.painter().line_segment([egui::pos2(rect.left() + 6.0, y), egui::pos2(rect.right() - 6.0, y)], egui::Stroke::new(2.0, t.accent));
+            }
+            let tip = match (k, allowed) {
+                (CreateTask::Prompt, _) => tr("Generate the whole picture from one prompt").to_string(),
+                (CreateTask::Regions, true) => tr("Lay the scene out in boxes: what goes where, and what is in front").to_string(),
+                (CreateTask::Regions, false) => {
+                    let name = model.map_or("This model", |m| m.name.as_str());
+                    let which = if able.is_empty() { "MOSS Image, Ideogram 4, FLUX.3 Klein, FLUX 3 Image or FIBO 2".to_string() } else { able.join(", ") };
+                    format!("{name} {} {which}", tr("can't place regions. Models that can:"))
+                }
+            };
+            if resp.on_hover_text(tip).clicked() && allowed {
+                picked |= k == CreateTask::Regions;
+                *task = k;
+            }
+        }
+    });
+    picked
+}
+
 /// The running generation, if any.
 fn running(app: &PhotocraftApp) -> Option<JobInfo> {
     app.session.jobs().into_iter().find(|j| j.command == GENERATE)
@@ -721,7 +796,13 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
     let kind = technique(ui, Some(&model));
     let mut params = json!({"model": model.id, "prompt": ui.prompt, "mode": kind.key()});
     match kind {
-        GenerationMode::Txt2img => params["alpha"] = json!(ui.alpha),
+        GenerationMode::Txt2img => {
+            params["alpha"] = json!(ui.alpha);
+            // The document's regions, laid out for the model.
+            if regions::tab_open(app) {
+                params["regions"] = json!(true);
+            }
+        }
         GenerationMode::Inpaint => {
             params["strength"] = json!(ui.strength());
             params["context"] = json!(ui.context());
@@ -788,6 +869,17 @@ pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
     }
     let Some(prompt) = layer_prompt(app, layer).map(str::to_owned) else { return false };
     app.ui.ai_gen.prompt = prompt;
+    // A layer laid out in regions brings them back, and the Regions tab with them.
+    let laid_out = app
+        .session
+        .active()
+        .and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer)))
+        .and_then(|l| l.generation.as_ref())
+        .map(|g| g.regions.clone())
+        .filter(|r| !r.is_empty());
+    if let Some(laid_out) = laid_out {
+        regions::restore(app, &laid_out);
+    }
     true
 }
 
@@ -828,6 +920,8 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
 const LOAD_PROMPT_GAP: i8 = 34;
 /// Height of the prompt box when the panel has no height of its own to fill.
 const PROMPT_HEIGHT: f32 = 84.0;
+/// Height of the scene box on the Regions tab: a few lines, the regions take the rest.
+const SCENE_HEIGHT: f32 = 64.0;
 /// The least the prompt box shrinks to in a short panel: two lines.
 const MIN_PROMPT_HEIGHT: f32 = 40.0;
 /// What the rows under the prompt need besides the notes: spacing and the Generate row.
@@ -877,7 +971,9 @@ pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
     // The line that leads to the Local AI wizard, while there is one (it may wrap).
     let setup = if setup_line(app).is_some() { 2.0 * (NOTE_SIZE + 4.0) } else { 0.0 };
-    rows + setup + (rows_above(ui, kind, refs::kept(&app.session).len()) + rows_below(ui, model, kind)) as f32 * ROW
+    // Create's ways (Prompt | Regions), and the regions under the scene.
+    let create = usize::from(ui.mode == Mode::Create) + regions::rows(app);
+    rows + setup + (create + rows_above(ui, kind, refs::kept(&app.session).len()) + rows_below(ui, model, kind)) as f32 * ROW
 }
 
 /// Is the inpaint mask being painted with the panel's brush?
@@ -1175,7 +1271,18 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         task_row(ui, &mut task, !busy);
         app.ui.ai_gen.task = task;
         ui.add_space(6.0);
+    } else {
+        let model = current_model(app).cloned();
+        let able: Vec<String> = enabled_models(app).into_iter().filter(|m| m.layout().is_some()).map(|m| m.name).collect();
+        let mut task = app.ui.ai_gen.create_task;
+        let picked = create_row(ui, &mut task, !busy, model.as_ref(), &able);
+        app.ui.ai_gen.create_task = task;
+        if picked {
+            regions::arm(app);
+        }
+        ui.add_space(6.0);
     }
+    regions::follow(app);
     let changing = app.ui.ai_gen.changing();
     // The panel's brush paints the mask only while the mask is there to paint.
     if !photocraft_engine::ai_cmds::mask_painting(&app.session) {
@@ -1294,11 +1401,17 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         .map(|text| ui.painter().layout(text.clone(), egui::FontId::proportional(NOTE_SIZE), t.text_faint, width).size().y + line_gap)
         .sum();
 
-    // Prompt. ⌘/Ctrl+Return generates.
+    // Prompt. ⌘/Ctrl+Return generates. Laying out regions, it is the scene, a box of a few lines
+    // with the regions under it.
+    let laying_out = regions::tab_open(app);
+    if laying_out {
+        ui.label(RichText::new(tr("Scene")).color(t.text_dim).size(11.5));
+    }
     let mut submit = false;
     ui.add_enabled_ui(!busy, |ui| {
         let below = BELOW_PROMPT + rows_below(&app.ui.ai_gen, Some(&current), kind) as f32 * (ROW + line_gap);
         let height = match room {
+            _ if laying_out => SCENE_HEIGHT,
             Some(room) => (room - (ui.cursor().top() - top) - below - notes_height).clamp(MIN_PROMPT_HEIGHT, 1200.0),
             None => PROMPT_HEIGHT,
         };
@@ -1323,6 +1436,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                     GenerationMode::Img2img => "Describe what the picture should become…",
                     GenerationMode::ImgEdit if !names.is_empty() => "Say what to change, calling a reference by name: \u{201c}@Luna sits on the bench\u{201d}…",
                     GenerationMode::ImgEdit => "Say what to change: \u{201c}make the jacket red leather\u{201d}…",
+                    GenerationMode::Txt2img if laying_out => "Describe the whole scene: the setting, the light, the style…",
                     GenerationMode::Txt2img => "Describe what to generate…",
                 }))
                 .desired_width(width)
@@ -1357,6 +1471,12 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         }
     });
     ui.add_space(6.0);
+
+    // Create › Regions: the boxes the scene is laid out in.
+    if laying_out {
+        regions::section(app, ui, busy, &current.id);
+        ui.add_space(6.0);
+    }
 
     // A change: what to change, marked from here.
     if changing {
@@ -3235,5 +3355,6 @@ pub fn load_keys(app: &mut PhotocraftApp) {
 }
 
 mod refs;
+pub mod regions;
 #[cfg(test)]
 mod tests;

@@ -43,6 +43,7 @@ fn document(depth: SampleType) -> Document {
             GenerationSource::Layer(u64::MAX).into(),
         ],
         quality: GenerationQuality::Draft,
+        regions: Vec::new(),
     }));
     // In a group: the walk reaches it.
     doc.layers = vec![photo, other, txt, Layer::group("Group", vec![edit])];

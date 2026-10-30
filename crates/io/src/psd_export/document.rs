@@ -236,6 +236,7 @@ fn export_supported_document(
         resources.push(ImageResource::new(crate::slices_map::SLICES, data));
     }
     crate::ai_refs_map::push(doc, &ex.layer_ids, &mut resources);
+    crate::ai_regions_map::push(doc, &mut resources);
     resources.push(version_info_resource(real_merged));
 
     let has_layers = !ex.records.is_empty();

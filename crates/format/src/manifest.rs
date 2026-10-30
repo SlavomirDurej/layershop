@@ -105,6 +105,9 @@ pub struct DocM {
     /// The AI Gen panel's references (layer ids are remapped on load).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ai_references: Vec<AiReferenceM>,
+    /// The AI Gen panel's regions (Create › Regions), front to back.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ai_regions: Vec<photocraft_doc::AiRegion>,
 }
 
 /// A [`photocraft_doc::AiReference`].

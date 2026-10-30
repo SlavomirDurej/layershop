@@ -302,6 +302,21 @@ impl Family {
         matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2)
     }
 
+    /// Places what a prompt describes in boxes ("regions", the panel's Create › Regions tab): the
+    /// layout format the family was trained on, or `None` when it reads layouts as plain words.
+    /// Only models trained on boxes are offered regions; FLUX.2, Qwen Image and the like read
+    /// "left side" as prose (the research of 2026-10-30, `docs/ai-generation.md`).
+    pub fn layout(self) -> Option<crate::layout::LayoutFormat> {
+        use crate::layout::LayoutFormat;
+        match self {
+            Family::MossImage => Some(LayoutFormat::Moss),
+            Family::Ideogram4 => Some(LayoutFormat::Ideogram),
+            Family::Flux3 => Some(LayoutFormat::Flux3),
+            Family::Fibo2 => Some(LayoutFormat::Fibo),
+            _ => None,
+        }
+    }
+
     /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
     /// three image inputs in all; the others take more than the panel offers.
     pub fn max_references(self) -> usize {
@@ -698,6 +713,16 @@ impl Model {
         match self.provider {
             Provider::Comfy => self.family.edits(),
             Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => true,
+        }
+    }
+
+    /// The layout format the model reads its regions in ([`Family::layout`]); of the cloud
+    /// models, Black Forest Labs' FLUX 3 endpoints. `None`: the model is offered no regions.
+    pub fn layout(&self) -> Option<crate::layout::LayoutFormat> {
+        match self.provider {
+            Provider::Comfy => self.family.layout(),
+            Provider::Bfl if self.api_model.trim().starts_with("flux-3") => Some(crate::layout::LayoutFormat::Flux3),
+            Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => None,
         }
     }
 
@@ -1131,6 +1156,21 @@ mod tests {
         let old: Settings = serde_json::from_str(r#"{"models":[]}"#).unwrap();
         assert!(old.show_cloud && old.show_local);
         assert_eq!(serde_json::to_value(&old).unwrap()["showCloud"], true);
+    }
+
+    #[test]
+    fn only_models_trained_on_boxes_take_regions() {
+        use crate::layout::LayoutFormat;
+        let local: Vec<(Family, LayoutFormat)> = Family::ALL.into_iter().filter_map(|f| f.preset().layout().map(|l| (f, l))).collect();
+        assert_eq!(
+            local,
+            [(Family::Flux3, LayoutFormat::Flux3), (Family::Ideogram4, LayoutFormat::Ideogram), (Family::MossImage, LayoutFormat::Moss), (Family::Fibo2, LayoutFormat::Fibo)]
+        );
+        let cloud: Vec<String> = Model::cloud_presets().into_iter().filter(|m| m.layout().is_some()).map(|m| m.api_model).collect();
+        assert_eq!(cloud, ["flux-3-image"]);
+        assert_eq!(Model::cloud(Provider::Bfl, "Klein", " flux-3-image-klein", false).layout(), Some(LayoutFormat::Flux3));
+        assert_eq!(Model::cloud(Provider::Bfl, "FLUX.2", "flux-2-pro", false).layout(), None);
+        assert_eq!(Model { family: Family::Custom, workflow: "%prompt%".into(), ..Model::default() }.layout(), None);
     }
 
     #[test]

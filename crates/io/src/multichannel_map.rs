@@ -178,6 +178,7 @@ pub(crate) fn layerless_file(
     // The AI references; a document without layers has only copied pictures and the document
     // itself to write.
     crate::ai_refs_map::push(doc, &Default::default(), &mut resources);
+    crate::ai_regions_map::push(doc, &mut resources);
     resources.push(version_info_resource(true));
     // Document-level tagged blocks (patterns, notes, ...) are valid without a layer section; a
     // kept layer block would describe layers the document doesn't have. Their signatures follow

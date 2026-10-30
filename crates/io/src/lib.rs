@@ -38,6 +38,7 @@ pub mod abr_map;
 mod adjust_map;
 pub mod affinity;
 pub mod ai_refs_map;
+pub mod ai_regions_map;
 pub mod annotations_map;
 pub mod asl_map;
 pub mod blocks;

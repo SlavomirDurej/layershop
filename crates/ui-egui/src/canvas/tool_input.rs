@@ -323,6 +323,10 @@ fn handle_eyedropper_event(app: &mut PhotocraftApp, tool: Tool, ev: ToolEvent, m
 
 /// Tool state machine. Shared by mouse input and automation.
 pub fn tool_event(app: &mut PhotocraftApp, ev: ToolEvent, mods: egui::Modifiers) {
+    // AI Gen › Create › Regions: while its boxes are being edited, the pointer is theirs.
+    if crate::ai_gen_ui::regions::pointer(app, ev) {
+        return;
+    }
     if consumes_cancelled_vector_event(app, ev) {
         return;
     }

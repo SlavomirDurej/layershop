@@ -648,9 +648,10 @@ fn a_long_reason_under_generate_fits_in_the_panel() {
     assert!(generate_blocked(&app, &broken).unwrap().len() > 150);
     let ctx = egui::Context::default();
     PhotocraftApp::setup_context(&ctx, Default::default());
-    // Panels of several sizes, down to a short narrow one (the tabs, the model, a two-line
-    // prompt, the Advanced heading, Generate and this reason): the notes always end inside.
-    for (w, h) in [(300.0, 420.0), (260.0, 330.0), (420.0, 700.0)] {
+    // Panels of several sizes, down to a short narrow one (the tabs, Prompt | Regions, the
+    // model, a two-line prompt, the Advanced heading, Generate and this reason): the notes
+    // always end inside.
+    for (w, h) in [(300.0, 420.0), (260.0, 360.0), (420.0, 700.0)] {
         let mut overflow = 0.0f32;
         for _ in 0..3 {
             ctx.run_ui(Default::default(), |ui| {
@@ -823,17 +824,18 @@ fn the_panel_asks_for_room_for_its_generate_button() {
     let mut app = app();
     let base = wanted_height(&app);
     assert!(base.is_finite() && base > crate::dock::Group::Properties.compact_height(), "{base}");
-    // A change has rows more: Edit's tasks and the mask tools. Advanced, open, adds its own.
+    // A change has a row more: the mask tools (Edit's tasks take the place of Create's Prompt |
+    // Regions). Advanced, open, adds its own.
     add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
     app.ui.ai_gen.mode = Mode::Edit;
-    assert_eq!(wanted_height(&app), base + 2.0 * ROW);
+    assert_eq!(wanted_height(&app), base + ROW);
     app.ui.ai_gen.advanced = true;
-    assert_eq!(wanted_height(&app), base + 4.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 3.0 * ROW);
     // A model that changes a picture both ways has the method to choose as well.
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     app.ui.ai_gen.edit_model = "flux".into();
     app.ui.ai_gen.method = Method::Fill;
-    assert_eq!(wanted_height(&app), base + 5.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 4.0 * ROW);
     app.ui.ai_gen.mode = Mode::Create;
     assert_eq!(wanted_height(&app), base + ROW);
 }
@@ -972,13 +974,13 @@ fn image_to_image_from_the_panel_picks_a_layer_or_another_document() {
     let old: AiGenUi = serde_json::from_value(json!({"prompt": "x"})).unwrap();
     assert_eq!((old.img_source, old.img_strength), (None, 0.6));
     assert_eq!(AiGenUi { img_strength: f64::NAN, ..Default::default() }.img_strength(), 0.6);
-    // The dock gives the task its rows: Edit's tasks, and the Source picker.
+    // The dock gives the task its rows: the Source picker (Edit's tasks take the place of Create's row).
     assert_eq!(
         wanted_height(&app),
         {
             app.ui.ai_gen.mode = Mode::Create;
             wanted_height(&app)
-        } + 2.0 * ROW
+        } + ROW
     );
 }
 
@@ -1033,13 +1035,13 @@ fn the_mask_tools_mark_what_to_repaint_from_the_panel() {
     app.run("select.editInQuickMaskMode", json!({"on": true})).unwrap();
     app.ui.ai_gen.mask_brush = true;
     assert!(!mask_brushing(&app));
-    // The dock makes room for the bar, and for Edit's tasks.
+    // The dock makes room for the bar (Edit's tasks take the place of Create's row).
     assert_eq!(
         wanted_height(&app),
         {
             app.ui.ai_gen.mode = Mode::Create;
             wanted_height(&app)
-        } + 2.0 * ROW
+        } + ROW
     );
 }
 
@@ -1136,15 +1138,15 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     assert_eq!((&state["editSource"], &state["editQuality"]), (&json!({"layer": background}), &json!("draft")));
     let old: AiGenUi = serde_json::from_value(json!({"prompt": "x", "mode": "imgEdit", "editReferences": [{"layer": 3}]})).unwrap();
     assert_eq!((old.mode, old.edit_source, old.edit_quality), (Mode::Edit, None, GenerationQuality::Standard));
-    // The dock gives the task its rows: Edit's tasks, the source, the chips and the mask tools;
-    // a chip open shows its name and picture too.
+    // The dock gives the task its rows: the source, the chips and the mask tools (Edit's tasks
+    // take the place of Create's row); a chip open shows its name and picture too.
     let tall = wanted_height(&app);
     app.ui.ai_gen.editing_ref = Some(0);
     assert_eq!(wanted_height(&app), tall + 2.0 * ROW);
     app.ui.ai_gen.editing_ref = Some(5);
     assert_eq!(wanted_height(&app), tall, "a chip that is gone is not open");
     app.ui.ai_gen.mode = Mode::Create;
-    assert_eq!(tall, wanted_height(&app) + 4.0 * ROW);
+    assert_eq!(tall, wanted_height(&app) + 3.0 * ROW);
 }
 
 #[test]
@@ -1946,4 +1948,79 @@ fn the_dialogs_own_look_at_the_server_is_not_reported_twice() {
     };
     assert!(on_job_event(&mut app, &event(21)), "the dialog says how its connect ended");
     assert!(!on_job_event(&mut app, &event(22)));
+}
+
+#[test]
+fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
+    use crate::canvas::ToolEvent;
+    use crate::state::Tool;
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+    app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    app.ui.ai_gen.prompt = "a reading nook".into();
+    // Z-Image reads a layout as words: the Regions tab stays shut, the choice kept for later.
+    app.ui.ai_gen.model = "z".into();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    app.ui.tool = Tool::Brush;
+    draw_panel(&mut app);
+    assert!(!regions::tab_open(&app) && !regions::editing(&app) && app.ui.tool == Tool::Brush);
+    let down = |x, y| ToolEvent::Down { x, y, pressure: 1.0 };
+    assert!(!regions::pointer(&mut app, down(5.0, 5.0)), "the brush keeps the pointer");
+    // MOSS Image takes them: the tab opens and gives the pointer to the boxes.
+    app.ui.ai_gen.model = "moss".into();
+    draw_panel(&mut app);
+    assert!(regions::tab_open(&app) && regions::editing(&app) && app.ui.tool == Tool::Move);
+    let rect = |app: &PhotocraftApp| app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.rect).collect::<Vec<_>>();
+    let gesture = |app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2]| {
+        assert!(regions::pointer(app, down(from[0], from[1])));
+        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Up { x: to[0], y: to[1] }));
+    };
+    // A drag on empty canvas draws a box, selected and open for typing; a click draws none.
+    gesture(&mut app, [10.0, 10.0], [60.0, 40.0]);
+    assert_eq!(rect(&app), [photocraft_geom::Rect::new(10, 10, 60, 40)]);
+    let id = app.session.active().unwrap().doc.ai_regions[0].id;
+    assert_eq!((app.ui.ai_gen.region, app.ui.ai_gen.regions.typing), (Some(id), Some(id)));
+    gesture(&mut app, [150.0, 80.0], [150.5, 80.0]);
+    assert_eq!((rect(&app).len(), app.ui.ai_gen.region), (1, None));
+    // Dragging it moves it (kept on the canvas); its corner, once selected, resizes it.
+    gesture(&mut app, [20.0, 20.0], [30.0, 25.0]);
+    assert_eq!(rect(&app), [photocraft_geom::Rect::new(20, 15, 70, 45)]);
+    gesture(&mut app, [70.0, 45.0], [300.0, 60.0]);
+    assert_eq!(rect(&app), [photocraft_geom::Rect::new(20, 15, 200, 60)]);
+    // A second box goes in front.
+    gesture(&mut app, [100.0, 70.0], [140.0, 95.0]);
+    assert_eq!(rect(&app)[0], photocraft_geom::Rect::new(100, 70, 140, 95));
+    // Double-clicking a box types its description.
+    app.ui.ai_gen.regions.typing = None;
+    assert!(regions::double_click(&mut app, 30.0, 30.0));
+    assert_eq!(app.ui.ai_gen.regions.typing, Some(id));
+    app.run("ai.region.set", json!({"id": id, "caption": "a green armchair"})).unwrap();
+    draw_panel(&mut app);
+    // The pencil's editor draws, for a text region too.
+    app.ui.ai_gen.regions.editor = Some(id);
+    app.run("ai.region.set", json!({"id": id, "kind": "text", "text": "HELLO"})).unwrap();
+    draw_panel(&mut app);
+    app.run("ai.region.set", json!({"id": id, "kind": "object"})).unwrap();
+    // Generate sends the scene and the boxes; the layer keeps them, and Load Prompt brings them
+    // back with the tab.
+    let r = generate(&mut app).unwrap();
+    let sent = r["modelPrompt"].as_str().unwrap();
+    assert!(sent.contains("abs_centralized") && sent.contains("a green armchair") && sent.contains("a reading nook"), "{sent}");
+    let layer = r["layer"].as_u64().unwrap();
+    let kept = rect(&app);
+    app.run("ai.setRegions", json!({"regions": []})).unwrap();
+    app.ui.ai_gen.create_task = CreateTask::Prompt;
+    assert!(load_prompt(&mut app, layer));
+    assert_eq!((rect(&app), app.ui.ai_gen.create_task), (kept, CreateTask::Regions));
+    // Another tool takes the pointer back; the boxes stay until the tab is left.
+    app.ui.tool = Tool::Brush;
+    draw_panel(&mut app);
+    assert!(regions::tab_open(&app) && !regions::editing(&app));
+    assert!(!regions::pointer(&mut app, down(30.0, 30.0)));
+    // The state reads and loads like the rest of the panel's.
+    let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
+    assert_eq!(state["createTask"], "regions");
 }

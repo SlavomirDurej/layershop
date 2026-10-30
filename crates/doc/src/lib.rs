@@ -36,7 +36,7 @@ pub use effects::{
     Bevel, BevelContour, BevelStyle, BevelTechnique, BevelTexture, Contour, Effect, FxCommon, FxPaint, GlobalLight, Glow, GlowSource, GlowTechnique, Gradient,
     GradientStyle, Satin, Shadow, StrokeFx, StrokePosition,
 };
-pub use generation::{AiPicture, AiReference, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource};
+pub use generation::{AiPicture, AiReference, AiRegion, AiRegionKind, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource};
 pub use mode::{ColorTable, Duotone, DuotoneInk, StackMode};
 pub use pattern::Pattern;
 pub use photocraft_color::{BlendMode, Color, ColorMode, PixelFormat, SampleType};
@@ -937,6 +937,8 @@ pub struct Document {
     pub file_encoding: FileEncoding,
     /// The pictures the AI Gen panel's edits refer to by name (`@Luna`), kept with the document.
     pub ai_references: Vec<AiReference>,
+    /// The boxes the AI Gen panel's Create › Regions lays a scene out in, front to back.
+    pub ai_regions: Vec<AiRegion>,
 }
 
 /// The encoder settings a document's file was opened or saved with: what File › Save and the
@@ -1006,6 +1008,7 @@ impl Document {
             timeline: None,
             file_encoding: FileEncoding::default(),
             ai_references: Vec::new(),
+            ai_regions: Vec::new(),
         }
     }
 

@@ -1,5 +1,5 @@
 use photocraft_color::{ColorMode, SampleType};
-use photocraft_doc::{Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, Size};
+use photocraft_doc::{AiRegion, AiRegionKind, Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, Rect, Size};
 use photocraft_format::LoadOptions;
 
 fn generated(source: Option<GenerationSource>) -> Generation {
@@ -15,7 +15,36 @@ fn generated(source: Option<GenerationSource>) -> Generation {
         source,
         references: Vec::new(),
         quality: GenerationQuality::Detail,
+        regions: Vec::new(),
     }
+}
+
+fn region(id: u32, kind: AiRegionKind) -> AiRegion {
+    AiRegion {
+        id,
+        kind,
+        caption: "Ginger cat \"asleep\"\non the cushion".into(),
+        text: if kind == AiRegionKind::Text { "READ MORE".into() } else { String::new() },
+        rect: Rect::new(-10, 4, 300, 220),
+        color: [1, 2, 3],
+        fill: id.is_multiple_of(2),
+        fill_opacity: 0.25,
+    }
+}
+
+#[test]
+fn the_documents_regions_and_a_layers_layout_survive_a_pcraft_round_trip() {
+    let mut doc = Document::new("Laid out", Size::new(2, 2), ColorMode::Rgb, SampleType::U8);
+    doc.ai_regions = vec![region(3, AiRegionKind::Character), region(1, AiRegionKind::Object), region(2, AiRegionKind::Text)];
+    let mut made = Layer::raster("From a layout", doc.pixel_format());
+    made.generation = Some(Box::new(Generation { mode: GenerationMode::Txt2img, regions: doc.ai_regions[..2].to_vec(), ..generated(None) }));
+    doc.layers.push(made);
+    let bytes = photocraft_format::save_to_bytes(&doc, &Default::default()).unwrap();
+    assert_eq!(photocraft_format::load_from_bytes(&bytes).unwrap(), doc);
+    // A file saved before regions existed loads with none (and a layer's generation without them).
+    let old: Generation = serde_json::from_str(r#"{"mode":"txt2img","prompt":"x"}"#).unwrap();
+    assert!(old.regions.is_empty());
+    assert!(serde_json::to_value(&old).unwrap().get("regions").is_none(), "an empty layout is not written");
 }
 
 #[test]

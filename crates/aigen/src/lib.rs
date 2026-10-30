@@ -20,6 +20,7 @@ pub mod comfy;
 pub mod detect;
 mod http;
 pub mod launch;
+pub mod layout;
 mod live;
 pub mod model;
 pub mod pricing;
@@ -33,6 +34,7 @@ pub use http::{MAX_RESPONSE_BYTES, Method, Part, Request, Response, Transport};
 #[cfg(not(target_arch = "wasm32"))]
 pub use launch::ComfyProcess;
 pub use launch::{Launch, LocalServer, ServerState};
+pub use layout::{LayoutFormat, Region, RegionKind, layout_prompt};
 pub use model::{Family, MAX_REFERENCES, Model, Provider, Settings, preferred_edit};
 pub use run::{Control, Generated, Job, Source, comfy_models, generate, random_seed, source_size};
 

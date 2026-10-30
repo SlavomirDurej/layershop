@@ -240,7 +240,7 @@ fn lost_server(server: Option<&Arc<dyn LocalServer>>, e: photocraft_aigen::Error
     }
 }
 
-fn settings(s: &Session) -> Settings {
+pub(crate) fn settings(s: &Session) -> Settings {
     s.prefs().integrations.ai.clone()
 }
 
@@ -250,7 +250,7 @@ fn transport(s: &Session) -> Result<Arc<dyn Transport>> {
 
 /// The area to fill: `rect` (`[x, y, w, h]`) when given, else the selection's bounds, else the
 /// canvas; always clipped to the canvas.
-fn target_area(p: &Value, selection: Option<&Surface>, canvas: Rect) -> Result<Rect> {
+pub(crate) fn target_area(p: &Value, selection: Option<&Surface>, canvas: Rect) -> Result<Rect> {
     let area = match p.get("rect") {
         Some(r) => {
             let v: Vec<i64> = r.as_array().into_iter().flatten().filter_map(|x| x.as_f64().filter(|x| x.is_finite()).map(|x| x.round() as i64)).collect();
@@ -1357,6 +1357,16 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             )
         }));
     }
+    // The regions the scene is laid out in (Create › Regions): only a text to image, only with a
+    // model trained on boxes. None: the prompt goes as written.
+    let regions = crate::ai_regions_cmds::regions_param(s, cmd, p)?;
+    let layout = if regions.is_empty() {
+        None
+    } else if kind != GenerationMode::Txt2img {
+        return Err(bad(cmd, "`regions` lay out a text to image (`\"mode\": \"txt2img\"`)"));
+    } else {
+        Some(crate::ai_regions_cmds::format_of(&model, &settings)?)
+    };
     // The references: those asked for, else the ones the document keeps (`ai.setReferences`). A
     // layer of the active document is kept as one, whichever way it was named: a saved file
     // keeps layers of its own document only.
@@ -1449,7 +1459,18 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let reseed = p.get("seed").is_none() && model.seed < 0;
     let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
-    let model_prompt = resolved.prompt;
+    // With regions, the prompt is the scene and the boxes in the model's layout format, the boxes
+    // made relative to the area generated.
+    let model_prompt = match layout {
+        Some(format) => photocraft_aigen::layout_prompt(
+            format,
+            &resolved.prompt,
+            &crate::ai_regions_cmds::layout(&regions, area),
+            area.width(),
+            area.height(),
+        ),
+        None => resolved.prompt,
+    };
     let mut job = Job { prompt: model_prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
     let name = layer_name(&model, &prompt);
     let model_id = model.id.clone();
@@ -1480,6 +1501,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             })
             .collect(),
         quality,
+        regions,
     };
     // A draft runs part of a local model's schedule, detail a little more of it.
     if model.provider.is_local() {
@@ -1611,6 +1633,7 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
                 "listed": listed.contains(&m.id.as_str()),
                 "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "references": m.max_references(),
+                "regions": m.layout().map(|f| f.key()),
                 "ready": ready.is_ok(), "why": ready.err(),
             })
         })
@@ -1745,7 +1768,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions or layout written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -1775,7 +1798,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Models",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {models:[{id,name,provider,local,enabled,listed (offered in the AI Gen panel),alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),ready,why}],listed:[id,…] (the panel's order: cloud first; the first is the default model),comfyUrl,available}"##,
+            params: r##"{} → {models:[{id,name,provider,local,enabled,listed (offered in the AI Gen panel),alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),regions ("moss|ideogram|flux3|fibo": the layout format of a model trained on boxes, which ai.generate's regions need; null: none),ready,why}],listed:[id,…] (the panel's order: cloud first; the first is the default model),comfyUrl,available}"##,
             enabled: always,
             run: models,
             journal: false,

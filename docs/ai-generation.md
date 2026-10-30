@@ -65,7 +65,8 @@ under *Local models*). MOSS Image is the other: it renders at the selection's ow
 The two tabs across the top of the panel say what you are there to do.
 
 **Create** generates a new image from the prompt alone, as above. It lists the models that
-generate.
+generate. Its second tab, **Regions**, lays the scene out in boxes for the models trained on
+that (see *Regions*).
 
 **Edit** changes a picture that is there. The row under the tabs chooses the task:
 
@@ -112,6 +113,65 @@ Steps, CFG, sampler, scheduler and the other rendering parameters are per model,
 *Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
 Gemini models cannot). If a provider rejects the option, untick it there. Of the local models
 **Ming Image** has it on: see *Ming Image* under *Local models*.
+
+## Regions (Create › Regions)
+
+Some models were trained on prompts that place what they describe in boxes. For those, Create
+has a second tab beside **Prompt**: **Regions**. It lays the scene out in boxes ("regions"),
+each with what goes in it, and the model is told both.
+
+- **Which models.** Only models trained on boxes: **MOSS Image**, **Ideogram 4**, **FLUX.3
+  Klein**, **FLUX 3 Image** (Black Forest Labs' API) and **FIBO 2**. For any other model the
+  tab is off, and its tooltip names the ones that can. FLUX.2, Qwen Image, GPT Image, Nano
+  Banana and the like read a layout as words ("on the left"); they get the Prompt tab only. The
+  choice of tab is kept: pick a model that takes regions and they are back as they were.
+- **On the canvas.** While the tab is in front the boxes are drawn over the picture: an outline in
+  the region's colour, its fill, a label with its depth and type, and its description. Opening
+  the tab gives the pointer to them (it picks the Move tool): drag on empty canvas to draw a
+  box, drag a box to move it, drag a corner of the selected box to resize it. A new box opens
+  for typing at once; double-click a box to type its description again (Esc or Ctrl+Enter
+  ends). Picking any other tool hands the pointer back to it; the boxes stay in view until the
+  tab is left.
+- **In the panel.** **Scene** is the prompt: the whole picture, its setting, light and style.
+  Under it, **Regions (N)**: **?** says how it works, then copy, clear all and add. Each row
+  is a region, front to back: drag a row up or down to change its depth (the top row is in
+  front), the pencil opens its **Type** (Object, Character, Text), the **Words** of a text
+  region, its **Colour** and its **Fill** and fill opacity, and the bin removes it.
+- **Copy** puts on the clipboard exactly what Generate would send the chosen model: its layout
+  format, for the selection's bounds (or the canvas).
+- **Kept with the document.** The regions are saved in `.pcraft` files and in PSD and PSB files
+  (an image resource of PhotoCraft's own, 4001 `pcRG`, beside the references' 4000, which other
+  programs step over), and every change is a History step. A layer generated from them keeps
+  them too: **Load Prompt** on it puts the scene and the regions back, with the Regions tab.
+- **The area.** Boxes are in document pixels. A generation is made into the selection's bounds
+  (or the canvas): the boxes are taken relative to that area, a box is cut where it leaves it,
+  and one wholly outside it is left out.
+
+What each model is sent (every format is the model's prompt, so it goes the way any prompt
+goes). No format has a depth field: regions are written back to front, so what is in front
+comes last, as the vendors advise for overlaps; saying how they overlap in the descriptions
+("asleep on the armchair cushion") helps more.
+
+| Model | Format | Boxes |
+|---|---|---|
+| MOSS Image | its authors' layout JSON: `summary.caption` and `items` labelled `object`, `character` or `text` (with the words in `text`) | `[top, left, bottom, right]` in pixels from the area's centre (`abs_centralized`, `yxyx`), scaled with the render size |
+| Ideogram 4 | its structured caption: `high_level_description` and `compositional_deconstruction` with an empty `background` and `elements` of type `obj` (a character too) or `text` | `[top, left, bottom, right]` on 0–1000 from the top left |
+| FLUX 3 Image, FLUX.3 Klein | the scene citing each box as `<obj_N>`, a space, then a JSON array of `{"id", "bbox", "desc"}` rows; text quoted in `desc` (`text reading "…"`) | as Ideogram's |
+| FIBO 2 | Bria's VGL: `short_description`, `objects` and `text_render` | `[x, y, width, height]`, 0–1 from the top left |
+
+Not yet tried against the models themselves (ComfyUI was not installed when this was built,
+2026-10-30). Each format follows its vendor's documentation, and these are still to check with
+a render:
+
+- FIBO 2's VGL documents normalised boxes but neither their range nor their origin.
+- ComfyUI's own Ideogram 4 layout node builds a dictionary, not text; whether the same JSON as
+  text through the text encoder is followed as well is to be seen.
+- FLUX.3 Klein runs here without its prompt upsampler, which Black Forest Labs say layouts are
+  weaker without.
+- Whether MOSS Image draws later items over earlier ones.
+
+All of them treat boxes as guidance, not as clipping: objects spill past their boxes, and very
+small boxes may be dropped.
 
 ## Filling a selection (Edit › Change, with an inpainting model)
 
@@ -797,7 +857,11 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint, or to scope an edit, instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself, for `inpaint` and for `imgEdit` |
 | `ai.generate {"prompt", "mode": "imgEdit", "source"?, "references"?: [{"layer": id} or {"document": id}, …], "quality"?: "draft"/"standard"/"detail", "context"?, …}` | change a picture following the prompt as an instruction, onto a new layer; with a selection only the part around it is sent, and the layer is masked by it. `--example ai_inpaint` runs it with `edit` or `edit:x,y,w,h` in place of the rectangle |
 | `ai.sources {"mode"?: "img2img"/"imgEdit"}` | what img2img (or an edit, and its references) can start from now: the active document's layers with pixels, the other open documents, for an edit also the active document itself, and which is the default |
-| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`), is offered for inpainting (`inpaint`), edits (`edit`) and how many `references` an edit with it takes |
+| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`), is offered for inpainting (`inpaint`), edits (`edit`) and how many `references` an edit with it takes, and the layout format of a model trained on boxes (`regions`: `moss`, `ideogram`, `flux3`, `fibo`; null for the others) |
+| `ai.regions` / `ai.setRegions {"regions": [{"id"?, "kind"?, "caption"?, "text"?, "rect"?: [x, y, w, h], "color"?, "fill"?, "fillOpacity"?}, …]}` | the active document's regions, front to back / replace them (an entry with an id changes that region, one without is new and needs a `rect`; order is depth). One History step |
+| `ai.region.set {"id", …fields}` | change one region; `"coalesce"` merges a run (typing) into one step |
+| `ai.layoutPrompt {"prompt", "model"?, "regions"?, "rect"?}` → `{text, format, area}` | what `ai.generate {"regions": true}` would send that model: the panel's copy button |
+| `ai.generate {"prompt", "regions": true or [...], …}` | a text to image laid out in the document's regions (or those given), with a model trained on boxes; `modelPrompt` in the result is the layout sent |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
@@ -819,11 +883,13 @@ section; `edit.preferences.generativeAi` returns them, and in the app opens the 
 `change` or `restyle`), `method` (`instruct` or `fill`, for a model that changes a picture both
 ways), `model` (Create and Restyle), `editModel` (Change), `strength`, `context`, `maskBrush`,
 `imgSource`, `imgStrength`, `editSource`, `editReferences`, `editQuality`, `prompt`, `alpha`,
-`seed`, `lastSeed`, `advanced`. The panel's tabs and tasks are the shell's; `ai.generate`'s `mode`
+`seed`, `lastSeed`, `advanced`, `createTask` (Create's: `prompt` or `regions`), `region` (the
+region selected). The panel's tabs and tasks are the shell's; `ai.generate`'s `mode`
 names the technique (`txt2img`, `inpaint`, `img2img`, `imgEdit`), as before.
 
 A generated layer carries its settings as `generation` in the layer tree (`document.inspect`
-and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source, references, quality}`, named
+and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source, references, quality}`
+(and `regions`, for one laid out in regions), named
 as `ai.generate` names its params, so they can be passed straight back to it. In the code it is
 `photocraft_doc::Layer::generation`.
 

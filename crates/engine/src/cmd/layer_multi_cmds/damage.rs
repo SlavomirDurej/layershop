@@ -250,6 +250,7 @@ fn doc_pixels_equal(a: &Document, b: &Document) -> bool {
         timeline: _,
         file_encoding: _,
         ai_references: _,
+        ai_regions: _,
     } = a;
     *size == b.size
         && resolution_dpi.to_bits() == b.resolution_dpi.to_bits()
@@ -353,6 +354,7 @@ pub fn selection_only_change(a: &Document, b: &Document) -> bool {
         timeline,
         file_encoding,
         ai_references,
+        ai_regions,
     } = a;
     // The ignored fields above are the pixel ones `pixels_equal_with` already compares.
     pixels_equal_with(a, b, video_frames_equal)
@@ -377,6 +379,7 @@ pub fn selection_only_change(a: &Document, b: &Document) -> bool {
         && *timeline == b.timeline
         && *file_encoding == b.file_encoding
         && *ai_references == b.ai_references
+        && *ai_regions == b.ai_regions
 }
 
 /// Pixels a single history step can have changed between `a` and `b` (the documents on either

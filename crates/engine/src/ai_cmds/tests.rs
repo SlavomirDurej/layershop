@@ -919,6 +919,7 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
         source: None,
         references: Vec::new(),
         quality: GenerationQuality::Standard,
+        regions: Vec::new(),
     };
     assert_eq!(made(&s), Some(txt.clone()));
     // The layer tree reports it, named as `ai.generate` names its params.
@@ -1548,4 +1549,43 @@ fn a_render_that_loses_the_server_it_started_says_how_that_ended() {
     let refused = lost_server(Some(&crashed), photocraft_aigen::Error::Server("bad workflow".into())).to_string();
     assert!(refused.contains("bad workflow") && !refused.contains("stopped"), "{refused}");
     assert!(matches!(lost_server(Some(&crashed), photocraft_aigen::Error::Cancelled), EngineError::Cancelled));
+}
+
+#[test]
+fn regions_lay_out_a_text_to_image_for_a_model_trained_on_boxes() {
+    let fake = FakeComfy::new(64, 48, [0, 0, 255, 255]);
+    let mut s = session(&fake);
+    let z = serde_json::to_value(Model { id: "z".into(), ..Family::ZImage.preset() }).unwrap();
+    let moss = serde_json::to_value(Model { id: "moss".into(), ..Family::MossImage.preset() }).unwrap();
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [z, moss]})).unwrap();
+    s.execute("ai.setRegions", json!({"regions": [{"kind": "character", "caption": "a cat", "rect": [0, 0, 32, 24]}]})).unwrap();
+    // A model that reads a layout as words is refused, naming one that can; so is a layout for
+    // anything but a text to image.
+    let e = s.execute("ai.generate", json!({"prompt": "a room", "model": "z", "regions": true})).unwrap_err().to_string();
+    assert!(e.contains("can't place regions") && e.contains("MOSS Image"), "{e}");
+    let e = s.execute("ai.generate", json!({"prompt": "a room", "model": "moss", "regions": true, "mode": "img2img"})).unwrap_err().to_string();
+    assert!(e.contains("txt2img"), "{e}");
+    for bad in [json!("all"), json!(3), json!([{"rect": "x"}])] {
+        assert!(s.execute("ai.generate", json!({"prompt": "a room", "model": "moss", "regions": bad})).is_err());
+    }
+    let v = s.execute("ai.generate", json!({"prompt": "a room", "model": "moss", "regions": true, "seed": 1})).unwrap();
+    // The model is told the scene and the box, in pixels from the area's centre.
+    let layout: Value = serde_json::from_str(v["modelPrompt"].as_str().unwrap()).unwrap();
+    assert_eq!(layout["summary"]["caption"], "a room");
+    assert_eq!(layout["items"][0], json!({"label": "character", "caption": "a cat", "bbox": [-24, -32, 0, 0]}));
+    let queued = fake.queued().to_string();
+    assert!(queued.contains("a cat") && queued.contains("abs_centralized"), "{queued}");
+    // The layer keeps the scene and the layout; ai.layoutPrompt says what was sent.
+    let d = s.active().unwrap();
+    let made = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.as_deref().cloned().unwrap();
+    assert_eq!((made.prompt.as_str(), &made.regions), ("a room", &d.doc.ai_regions));
+    let lp = s.execute("ai.layoutPrompt", json!({"prompt": "a room", "model": "moss"})).unwrap();
+    assert_eq!((&lp["text"], &lp["format"]), (&v["modelPrompt"], &json!("moss")));
+    assert!(s.execute("ai.layoutPrompt", json!({"prompt": "a room", "model": "z"})).is_err());
+    let models = s.execute("ai.models", json!({})).unwrap();
+    assert_eq!((&models["models"][0]["regions"], &models["models"][1]["regions"]), (&Value::Null, &json!("moss")));
+    // Without regions, the prompt goes as written.
+    s.execute("ai.setRegions", json!({"regions": []})).unwrap();
+    let plain = s.execute("ai.generate", json!({"prompt": "a room", "model": "z", "regions": true, "seed": 1})).unwrap();
+    assert_eq!(plain["modelPrompt"], "a room");
 }

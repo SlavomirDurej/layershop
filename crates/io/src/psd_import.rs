@@ -1231,6 +1231,8 @@ fn finish_import(mut doc: Document, mut cx: Ctx<'_>, ctl: &photocraft_raster::In
     crate::generation_map::import(&mut doc);
     // The AI Gen panel's references (PhotoCraft's resource 4000), which name layers by id too.
     crate::ai_refs_map::import(&mut doc);
+    // The AI Gen panel's regions (resource 4001).
+    crate::ai_regions_map::import(&mut doc);
     cx.warnings.extend(crate::text_styles_map::import(&mut doc));
     if ctl.cancelled() {
         return None;

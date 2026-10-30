@@ -1197,6 +1197,13 @@ fn handle_canvas_tool_clicks(
         let d = xf.to_doc(p);
         crate::type_tool::edit_at(app, d[0], d[1]);
     }
+    // AI Gen › Create › Regions: a double-click on a box types its description.
+    if response.double_clicked()
+        && let Some(p) = response.interact_pointer_pos()
+    {
+        let d = xf.to_doc(p);
+        crate::ai_gen_ui::regions::double_click(app, d[0], d[1]);
+    }
     if app.ui.transform.is_some() && response.double_clicked() {
         crate::transform_tool::commit(app);
     }
@@ -1313,6 +1320,9 @@ fn paint_primary_overlays(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut
     crate::artboard_tool::draw_overlay(app, painter, xf);
 
     draw_canvas_tool_cursor(app, ui, input, resizing);
+    // AI Gen › Create › Regions: the boxes, over everything the tools draw, and the pointer's
+    // shape over them (after the tool's, so it wins).
+    crate::ai_gen_ui::regions::canvas(app, ui, painter, xf);
 }
 
 fn draw_canvas_tool_cursor(app: &mut PhotocraftApp, ui: &mut egui::Ui, input: &CanvasOverlayInput<'_>, resizing: bool) {

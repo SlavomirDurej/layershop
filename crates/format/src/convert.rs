@@ -308,6 +308,7 @@ pub(crate) fn doc_m(d: &Document, sink: &mut dyn Sink) -> DocM {
                 },
             })
             .collect(),
+        ai_regions: d.ai_regions.clone(),
     }
 }
 
@@ -730,6 +731,7 @@ impl Loader<'_> {
             text_styles: m.text_styles.clone(),
             slices,
             ai_references,
+            ai_regions: m.ai_regions.clone(),
         })
     }
 

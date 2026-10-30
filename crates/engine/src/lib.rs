@@ -11,6 +11,7 @@ pub mod adjust_params;
 pub mod ai_cmds;
 pub mod ai_refs;
 pub mod ai_refs_cmds;
+pub mod ai_regions_cmds;
 pub mod ai_setup_cmds;
 mod allocation;
 pub mod build_info;
