@@ -1160,7 +1160,55 @@ fn connected(app: &mut PhotocraftApp, found: Option<Value>) {
         }
         l
     });
-    s.server = Some(json!({"folders": found.get("folders").cloned().unwrap_or(json!({})), "launch": launch, "local": local}));
+    let version = found.get("version").cloned().unwrap_or(json!(""));
+    s.server = Some(json!({"folders": found.get("folders").cloned().unwrap_or(json!({})), "launch": launch, "local": local, "version": version}));
+}
+
+/// The version of the user's ComfyUI while the wizard sets up with it: as it said when it was
+/// connected, else (not connected yet) as the look at this PC found it. Empty: not known.
+fn their_version(app: &PhotocraftApp) -> String {
+    let s = &app.ui.ai_setup;
+    if !s.existing {
+        return String::new();
+    }
+    match &s.server {
+        Some(server) => text(server, "/version").to_string(),
+        None => s.probe.as_ref().map(|p| text(p, "/probe/comfy/version").to_string()).unwrap_or_default(),
+    }
+}
+
+/// The first ComfyUI version a model of the wizard's list runs on, when the user's ComfyUI
+/// (`version`, known) is older: what to say beside the model.
+fn needs_newer<'a>(model: &'a Value, version: &str) -> Option<&'a str> {
+    let min = text(model, "/minComfy");
+    let known = version.trim().starts_with(|c: char| c.is_ascii_digit());
+    (known && !photocraft_aigen::launch::at_least(version, min)).then_some(min)
+}
+
+/// What to tell someone setting up with their own ComfyUI when it is older than the one the
+/// setup installs: which of the offered models it can't run, and that newer features may not
+/// work. `None` when it is recent enough, or its version is not known.
+fn version_warning(app: &PhotocraftApp) -> Option<String> {
+    let version = their_version(app);
+    let manifest = app.ui.ai_setup.manifest.as_ref()?;
+    let pinned = text(manifest, "/comfy/version");
+    let too_old: Vec<String> =
+        list(manifest, "/models").iter().filter_map(|m| needs_newer(m, &version).map(|min| format!("{} ({min})", text(m, "/name")))).collect();
+    let behind = version.trim().starts_with(|c: char| c.is_ascii_digit()) && !photocraft_aigen::launch::at_least(&version, pinned);
+    if !behind && too_old.is_empty() {
+        return None;
+    }
+    let head = format!("{} {version}, {} {pinned}.", tr("Your ComfyUI is version"), tr("and PhotoCraft is made for"));
+    Some(if too_old.is_empty() {
+        format!("{head} {}", tr("Some features may not work until you update ComfyUI."))
+    } else {
+        format!(
+            "{head} {} {}. {}",
+            tr("These models need a newer ComfyUI and won't run on it:"),
+            too_old.join(", "),
+            tr("Other features may not work either. Update ComfyUI to use them, or install a new ComfyUI instead.")
+        )
+    })
 }
 
 /// Tick or untick a model, keeping the preset tab honest.
@@ -1779,6 +1827,10 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             }
         };
         ui.add(egui::Label::new(RichText::new(line).color(t.text_faint).size(11.5)).wrap());
+        if !busy && let Some(warning) = version_warning(app) {
+            ui.add_space(6.0);
+            ui.add(egui::Label::new(RichText::new(warning).color(t.warning).size(12.0)).wrap().selectable(true));
+        }
         ui.add_space(12.0);
         if found.as_ref().is_some_and(|s| s.get("local").and_then(Value::as_bool) == Some(false)) {
             ui.add(
@@ -1863,6 +1915,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     // Files this app downloaded for its own engine are its to delete again.
     let managed = !list(&status, "/engines").is_empty() && !running(app);
     let needing = needs_sign_in(app);
+    let version = their_version(app);
     let mut any_gated = false;
     // The list takes the page down to the footer, less what follows it (the Hugging Face panel,
     // a problem), as tall as that was last frame.
@@ -1885,6 +1938,10 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 }
                 let does: Vec<&str> = list(&model, "/does").iter().filter_map(Value::as_str).map(tr).collect();
                 ui.label(RichText::new(does.join(" · ")).color(t.text_faint).size(11.0));
+                // Beside its name: whether it runs at all comes before the rest of its notes.
+                if let Some(min) = needs_newer(&model, &version) {
+                    ui.label(RichText::new(format!("{} {min} ({} {version})", tr("needs ComfyUI"), tr("yours is"))).color(t.warning).size(11.5));
+                }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let label = if installed { tr("installed").to_string() } else { download_size(number(&model, "/bytes")) };
                     ui.label(RichText::new(label).font(crate::theme::mono(12.0)).color(if installed { t.accent_text } else { t.text_dim }));

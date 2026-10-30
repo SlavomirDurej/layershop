@@ -30,11 +30,15 @@ fn title(file: &str) -> String {
 }
 
 /// The family a diffusion model file belongs to, by name. Video models, and edit models other
-/// than Qwen Image Edit, are not recognised.
+/// than Qwen Image Edit and FIBO 2, are not recognised.
 fn family_of(file: &str) -> Option<Family> {
     let n = file.to_ascii_lowercase();
     if n.contains("qwen_image_edit") || n.contains("qwen-image-edit") {
         return Some(Family::QwenEdit);
+    }
+    // Its distilled model is named for editing (`fibo2_edit_turbo_…`) but generates as well.
+    if n.contains("fibo2") || n.contains("fibo_2") || n.contains("fibo-2") {
+        return Some(Family::Fibo2);
     }
     if ["edit", "video", "i2v", "t2v", "ltx", "wan", "unconditional", "anima", "controlnet", "inpaint", "kontext"].iter().any(|x| n.contains(x)) {
         return None;
@@ -227,6 +231,9 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
                 m.clip = "mistral_3_small_flux2_bf16.safetensors".into();
             }
             Family::Flux1 if turbo => (m.steps, m.guidance) = (4, 0.0),
+            // FIBO 2 Edit Turbo, the step and CFG distillation of Dev: its template's four steps
+            // without guidance, and so no negative prompt.
+            Family::Fibo2 if turbo => (m.steps, m.cfg, m.negative_prompt) = (4, 1.0, String::new()),
             Family::QwenEdit => {
                 // With its release's four-step LoRA on the server, the model renders in four steps.
                 let release = ["2509", "2511"].into_iter().find(|r| n.contains(r));
@@ -242,7 +249,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
         }
         let clip_needles: &[&str] = match family {
             Family::ZImage => &["qwen_3_4b"],
-            Family::Krea2 | Family::Flux3 => &["qwen3vl_4b"],
+            Family::Krea2 | Family::Flux3 | Family::Fibo2 => &["qwen3vl_4b"],
             Family::Flux2 if n.contains("klein") => &["qwen_3_8b"],
             Family::Flux2 => &["mistral_3_small_flux2", "mistral"],
             Family::Flux1 | Family::Flux1Fill | Family::HidreamI1 => &["clip_l"],
@@ -270,6 +277,8 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
             Family::MingImage => &["ming_image_vae", "ming_image"],
             Family::MossImage => &["flux2-vae_small", "flux2_vae_small", "flux2-vae"],
+            // The full VAE, not the small decoder beside it.
+            Family::Fibo2 => &["flux2-vae.", "flux2_vae.", "flux2-vae", "flux2"],
             Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
             Family::Krea2 | Family::QwenImage | Family::QwenEdit => &["qwen_image_vae"],
             _ => &["ae.safetensors"],
@@ -568,6 +577,38 @@ mod tests {
         );
         assert_eq!((moss.steps, moss.cfg, moss.sampler.as_str(), moss.megapixels), (25, 2.5, "er_sde", 0.0));
         assert!(moss.can_generate() && !moss.can_edit() && !moss.can_inpaint());
+    }
+
+    #[test]
+    fn fibo_2_is_detected_with_its_encoder_and_the_full_flux_2_vae() {
+        let mut f = folders();
+        f.get_mut("diffusion_models").unwrap().extend(["fibo2_dev_int8_convrot.safetensors".into(), "fibo2_edit_turbo_int8_convrot.safetensors".into()]);
+        f.get_mut("text_encoders").unwrap().push("qwen3vl_4b_bf16.safetensors".into());
+        let found = detect(&f);
+        let by = |file: &str| found.iter().find(|m| m.unet == file).unwrap();
+        // Dev: the int8 Qwen 3 VL 4B (FLUX.3 Klein's) though the bf16 one is there too, the full
+        // VAE (not the small decoder beside it), 50 steps at CFG 5 with the structured negative.
+        let dev = by("fibo2_dev_int8_convrot.safetensors");
+        assert_eq!(
+            (dev.family, dev.clip.as_str(), dev.vae.as_str(), dev.steps, dev.cfg),
+            (Family::Fibo2, "qwen3vl_4b_int8_convrot.safetensors", "flux2-vae.safetensors", 50, 5.0)
+        );
+        assert_eq!(dev.negative_prompt, crate::model::FIBO2_NEGATIVE);
+        assert!(dev.can_generate() && dev.can_edit() && !dev.can_inpaint() && problem(dev).is_none());
+        // Turbo is named for editing but is FIBO 2 all the same: four steps, no guidance, so no
+        // negative to encode.
+        let turbo = by("fibo2_edit_turbo_int8_convrot.safetensors");
+        assert_eq!((turbo.family, turbo.steps, turbo.cfg, turbo.negative_prompt.as_str()), (Family::Fibo2, 4, 1.0, ""));
+        assert!(turbo.can_generate() && turbo.can_edit());
+        // Without the int8 encoder another Qwen 3 VL 4B is taken; without the full VAE, the small one.
+        let mut f = folders();
+        f.get_mut("diffusion_models").unwrap().push("fibo2_dev_int8_convrot.safetensors".into());
+        f.get_mut("text_encoders").unwrap().retain(|c| c != "qwen3vl_4b_int8_convrot.safetensors");
+        f.get_mut("text_encoders").unwrap().push("qwen3vl_4b_bf16.safetensors".into());
+        f.get_mut("vae").unwrap().retain(|v| v != "flux2-vae.safetensors");
+        let found = detect(&f);
+        let dev = found.iter().find(|m| m.family == Family::Fibo2).unwrap();
+        assert_eq!((dev.clip.as_str(), dev.vae.as_str()), ("qwen3vl_4b_bf16.safetensors", "flux2-vae_small.safetensors"));
     }
 
     #[test]

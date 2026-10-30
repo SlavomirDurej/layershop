@@ -75,7 +75,7 @@ fn manifest_value(m: &Manifest, installed: &[String], vram_gb: Option<u64>) -> V
                 "licence": {"name": model.licence.name, "url": model.licence.url, "commercial": model.licence.commercial},
                 "page": model.page, "gated": model.gated, "minVramGb": model.min_vram_gb, "testedVramGb": model.tested_vram_gb,
                 "bytes": m.download_bytes(std::slice::from_ref(&model.id)), "files": files,
-                "installed": installed.contains(&model.id), "fit": fit(model, vram_gb),
+                "installed": installed.contains(&model.id), "fit": fit(model, vram_gb), "minComfy": model.min_comfy,
             })
         })
         .collect();
@@ -1024,7 +1024,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Local AI Models to Install",
             menu: &[],
             shortcut: None,
-            params: r##"{"vramGb":int?} → {comfy:{version,builds},models:[{id,name,about,family,does:[create|edit|fill],licence:{name,url,commercial (true|false|null: read the licence)},page,gated (needs a Hugging Face sign-in),minVramGb,testedVramGb,bytes (downloaded alone),files:[{key,bytes,gated}],installed,fit:tested|untested|tooLarge}],presets:{light|starter|recommended|everything:{models,bytes (shared files counted once)}},suggested:light|recommended (the preset to start on: light on a card under 16 GB, its models then listed first)}: what the setup can install"##,
+            params: r##"{"vramGb":int?} → {comfy:{version,builds},models:[{id,name,about,family,does:[create|edit|fill],licence:{name,url,commercial (true|false|null: read the licence)},page,gated (needs a Hugging Face sign-in),minVramGb,testedVramGb,bytes (downloaded alone),files:[{key,bytes,gated}],installed,fit:tested|untested|tooLarge,minComfy (the first ComfyUI version that runs it)}],presets:{light|starter|recommended|everything:{models,bytes (shared files counted once)}},suggested:light|recommended (the preset to start on: light on a card under 16 GB, its models then listed first)}: what the setup can install"##,
             enabled: always,
             run: imp::manifest_cmd,
             journal: false,

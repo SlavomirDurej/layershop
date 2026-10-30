@@ -1497,7 +1497,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     ai.get_mut("models").and_then(Value::as_array_mut).unwrap().retain(|m| m["id"] != "nano-banana-pro" && m["id"] != "krea-2-turbo");
     assert_eq!(restore_defaults(&mut ai, &mut f), 2);
     let ids: Vec<&str> = ai["models"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
-    assert_eq!((ids.len(), &ids[14..]), (16, &["nano-banana-pro", "krea-2-turbo"][..]));
+    assert_eq!((ids.len(), &ids[15..]), (17, &["nano-banana-pro", "krea-2-turbo"][..]));
     // The same model stored another way, or under the user's own name, counts as listed.
     for m in ai.get_mut("models").and_then(Value::as_array_mut).unwrap() {
         if m["id"] == "z-image-turbo" {
@@ -1506,11 +1506,11 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
         }
     }
     assert_eq!(restore_defaults(&mut ai, &mut f), 0);
-    // Emptied, or unreadable: all sixteen come back.
+    // Emptied, or unreadable: all seventeen come back.
     let mut none = Map::new();
-    assert_eq!((restore_defaults(&mut none, &mut f), none["models"].as_array().unwrap().len()), (16, 16));
+    assert_eq!((restore_defaults(&mut none, &mut f), none["models"].as_array().unwrap().len()), (17, 17));
     let mut junk: Map<String, Value> = serde_json::from_value(json!({"models": [1, "a", {"provider": "nope"}]})).unwrap();
-    assert_eq!(restore_defaults(&mut junk, &mut f), 16);
+    assert_eq!(restore_defaults(&mut junk, &mut f), 17);
 
     // The fake server has Z-Image Turbo as bf16, not the int8 file the recommended entry names:
     // a scan points that entry at the server's file instead of listing the model twice, and adds
@@ -1519,7 +1519,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     f.insert(ACTION.into(), json!("detect"));
     after_body(&mut app, &mut f);
     let models: Vec<Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
-    assert_eq!(models.len(), 18, "{:?}", models.iter().map(|m| &m.id).collect::<Vec<_>>());
+    assert_eq!(models.len(), 19, "{:?}", models.iter().map(|m| &m.id).collect::<Vec<_>>());
     let z = models.iter().find(|m| m.id == "z-image-turbo").unwrap();
     assert_eq!((z.name.as_str(), z.unet.as_str(), z.cfg, z.steps), ("Z-Image Turbo", "z_image_turbo_bf16.safetensors", 2.0, 8));
     let status = f[STATUS]["text"].as_str().unwrap().to_string();
@@ -1527,14 +1527,14 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     // A second scan has nothing left to do.
     f.insert(ACTION.into(), json!("detect"));
     after_body(&mut app, &mut f);
-    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 18);
+    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 19);
     assert!(!f[STATUS]["text"].as_str().unwrap().contains("matched"));
     // With the server's files read, the list marks the models whose file it doesn't have.
     let listing: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_value(f[FILES].clone()).unwrap();
     let lost: Vec<&str> = models.iter().filter(|m| !photocraft_aigen::detect::on_server(&listing, m)).map(|m| m.id.as_str()).collect();
     assert_eq!(
         lost,
-        ["qwen-image-2-1", "krea-2-turbo", "flux-3-klein", "moss-image", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]
+        ["qwen-image-2-1", "krea-2-turbo", "flux-3-klein", "moss-image", "fibo-2-dev", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]
     );
     for x in Filter::ALL {
         f.insert(FILTER.into(), json!(x.key()));

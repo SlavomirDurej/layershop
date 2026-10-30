@@ -171,8 +171,8 @@ mod tests {
         assert_eq!((s.comfy_url.as_str(), s.comfy_autostart, &s.comfy_launch), ("http://127.0.0.1:8190", true, &launch()));
         assert_eq!(local_enabled(&s), ["qwen-image-2-1"]);
         assert_eq!(done.ready, ["qwen-image-2-1"]);
-        // The eight other local defaults are unticked, not removed; nothing was added twice.
-        assert_eq!((done.added, done.repaired, done.unlisted), (0, 0, 8));
+        // The nine other local defaults are unticked, not removed; nothing was added twice.
+        assert_eq!((done.added, done.repaired, done.unlisted), (0, 0, 9));
         assert_eq!(s.models.len(), Settings::default().models.len());
         // Cloud models are not the engine's business.
         assert_eq!(s.models.iter().filter(|m| !m.provider.is_local()).cloned().collect::<Vec<_>>(), cloud_before);
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(s.model("mine"), Some(&custom));
         // A model whose file is on another server can't run on this engine: unticked, kept.
         assert_eq!(s.model("sdxl").map(|m| m.enabled), Some(false));
-        assert_eq!(done.unlisted, 9);
+        assert_eq!(done.unlisted, 10);
         assert_eq!(local_enabled(&s), ["z-image-turbo", "mine"]);
     }
 

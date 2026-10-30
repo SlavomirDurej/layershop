@@ -177,8 +177,8 @@ mod native {
         }
         // What can be installed is no secret: the bundled manifest, with its totals.
         let m = s.execute("ai.setup.manifest", json!({"vramGb": 24})).unwrap();
-        assert_eq!(m["comfy"]["version"], "0.42.1");
-        assert_eq!(m["models"].as_array().unwrap().len(), 9);
+        assert_eq!(m["comfy"]["version"], "0.43.0");
+        assert_eq!(m["models"].as_array().unwrap().len(), 10);
         assert_eq!(
             (m["presets"]["starter"]["bytes"].as_u64(), m["presets"]["recommended"]["models"].as_array().map(Vec::len)),
             (Some(18_520_930_264), Some(3))
@@ -188,6 +188,14 @@ mod native {
             (qwen["id"].as_str(), qwen["installed"].as_bool(), qwen["fit"].as_str(), qwen["licence"]["commercial"].as_bool()),
             (Some("qwen-image-2-1"), Some(false), Some("tested"), Some(false))
         );
+        // Each says which ComfyUI it needs: FIBO 2 the one the setup installs. It is offered, not
+        // ticked: no preset but Everything has it.
+        assert_eq!(qwen["minComfy"], "0.37.0");
+        let fibo = m["models"].as_array().unwrap().iter().find(|x| x["id"] == "fibo-2-dev").unwrap();
+        assert_eq!((fibo["minComfy"].as_str(), fibo["licence"]["commercial"].as_bool(), fibo["gated"].as_bool()), (Some("0.43.0"), Some(false), Some(false)));
+        for preset in ["light", "starter", "recommended"] {
+            assert!(!m["presets"][preset]["models"].as_array().unwrap().iter().any(|id| id == "fibo-2-dev"), "{preset}");
+        }
         assert_eq!(m["suggested"], "recommended");
         // A smaller card than any it has run on: not tested, and it says so instead of guessing.
         // It starts on the light preset, its model listed first.

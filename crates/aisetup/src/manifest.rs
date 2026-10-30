@@ -82,6 +82,10 @@ pub struct ModelEntry {
     /// Card sizes it has been run on.
     #[serde(default)]
     pub tested_vram_gb: Vec<u32>,
+    /// The first ComfyUI release that runs it (its architecture, nodes and weight format), as
+    /// ComfyUI's release tags show. Empty: any. Never later than [`Comfy::version`].
+    #[serde(default)]
+    pub min_comfy: String,
 }
 
 /// One build of the runtime.
@@ -219,6 +223,15 @@ impl Manifest {
                     return Err(bad(format!("a link of `{}` does not go to https://{FILE_HOST}", model.id)));
                 }
             }
+            let min = model.min_comfy.as_str();
+            let min_ok = min.is_empty() || (min.len() <= 32 && min.starts_with(|c: char| c.is_ascii_digit()) && min.chars().all(|c| c.is_ascii_digit() || c == '.'));
+            if !min_ok {
+                return Err(bad(format!("`{}` names `{min}` as its ComfyUI version, which is not a version number", model.id)));
+            }
+            // The engine the wizard installs runs everything it offers.
+            if !photocraft_aigen::launch::at_least(&m.comfy.version, min) {
+                return Err(bad(format!("`{}` needs ComfyUI {min}, and the setup installs {}", model.id, m.comfy.version)));
+            }
         }
         for (name, list) in &m.presets {
             if let Some(unknown) = list.iter().find(|id| !ids.contains(id.as_str())) {
@@ -298,6 +311,22 @@ impl Manifest {
         out
     }
 
+    /// The models a ComfyUI of `version` is too old to run, in the manifest's order. A version
+    /// that is not known (empty, or not a number) is too old for none: nothing is claimed that
+    /// was not read.
+    pub fn too_new_for(&self, version: &str) -> Vec<&ModelEntry> {
+        if !version.trim().starts_with(|c: char| c.is_ascii_digit()) {
+            return Vec::new();
+        }
+        self.models.iter().filter(|m| !photocraft_aigen::launch::at_least(version, &m.min_comfy)).collect()
+    }
+
+    /// Is a ComfyUI of `version` older than the one the setup installs (and its workflows were
+    /// tried on)? Not known: no.
+    pub fn older_than_pinned(&self, version: &str) -> bool {
+        version.trim().starts_with(|c: char| c.is_ascii_digit()) && !photocraft_aigen::launch::at_least(version, &self.comfy.version)
+    }
+
     /// The build for a graphics card (`nvidia`, …), by its key.
     pub fn asset(&self, variant: &str) -> Result<&Asset> {
         self.comfy.assets.get(variant).ok_or_else(|| Error::Config(format!("there is no ComfyUI build for `{variant}`")))
@@ -320,9 +349,9 @@ mod tests {
     #[test]
     fn the_bundled_manifest_is_valid_and_pins_one_comfyui() {
         let m = bundled();
-        assert_eq!(m.comfy.version, "0.42.1");
+        assert_eq!(m.comfy.version, "0.43.0");
         assert_eq!(m.comfy.assets.keys().map(String::as_str).collect::<Vec<_>>(), ["amd", "intel", "nvidia", "nvidia_cu126"]);
-        assert!(m.comfy.assets.values().all(|a| a.url.contains("/v0.42.1/")));
+        assert!(m.comfy.assets.values().all(|a| a.url.contains("/v0.43.0/")));
         assert!(m.asset("nvidia").is_ok() && m.asset("voodoo").is_err());
         // Measured from each archive's header (`--example archive_contents`).
         assert!(m.comfy.assets.values().all(|a| a.unpacked_bytes > a.size && (100..=200).contains(&a.longest_path)));
@@ -341,7 +370,8 @@ mod tests {
         assert_eq!(gb(m.preset("recommended")), 44.1);
         // FLUX.3 Klein (2026-10-16) is 7.4 GB less than the FLUX.2 Klein 9B it replaced; MOSS
         // Image (2026-10-20) shares no file with the others.
-        assert_eq!(gb(m.preset("everything")), 182.1);
+        // FIBO 2 (2026-10-30) shares FLUX.3 Klein's text encoder and FLUX.2's VAE.
+        assert_eq!(gb(m.preset("everything")), 190.5);
         assert_eq!(m.preset("everything").len(), m.models.len());
         assert!(m.preset("nope").is_empty());
         for (id, alone) in [
@@ -353,6 +383,7 @@ mod tests {
             ("ming-image-0-1-design", 25.9),
             ("ernie-image-turbo", 24.1),
             ("hidream-o1", 46.1),
+            ("fibo-2-dev", 13.6),
         ] {
             assert_eq!(gb(&ids(&[id])), alone, "{id}");
         }
@@ -362,6 +393,7 @@ mod tests {
         assert_eq!(extra("ideogram-4", &["qwen-image-2-1", "flux-3-klein"]), 18.6);
         assert_eq!(extra("hidream-o1", &["z-image-turbo"]), 37.7);
         assert_eq!(extra("ernie-image-turbo", &["flux-3-klein"]), 23.8);
+        assert_eq!(extra("fibo-2-dev", &["flux-3-klein"]), 8.4);
         assert_eq!(extra("qwen-image-2-1", &["qwen-image-2-1"]), 0.0);
         assert_eq!(m.download_bytes(&ids(&["no-such-model"])), 0);
     }
@@ -471,6 +503,8 @@ mod tests {
             ("script path", Box::new(|v| v["comfy"]["script"] = "C:\\main.py".into())),
             ("version text", Box::new(|v| v["comfy"]["version"] = "../..".into())),
             ("licence link", Box::new(|v| v["models"][0]["licence"]["url"] = "https://evil.example/licence".into())),
+            ("min comfy text", Box::new(|v| v["models"][0]["minComfy"] = "latest".into())),
+            ("min comfy past the pin", Box::new(|v| v["models"][0]["minComfy"] = "9.0.0".into())),
         ] {
             assert!(broken(&*edit).contains("not usable"), "{what}");
         }
@@ -478,6 +512,25 @@ mod tests {
             assert!(Manifest::parse(junk).is_err(), "{junk}");
         }
         assert!(Manifest::parse(&" ".repeat((4 << 20) + 1)).is_err());
+    }
+
+    /// Every model says which ComfyUI it needs, none past the one the setup installs; a user's
+    /// older ComfyUI is told which models it can't run.
+    #[test]
+    fn each_model_names_the_comfyui_it_needs() {
+        let m = bundled();
+        assert!(m.models.iter().all(|x| !x.min_comfy.is_empty() && photocraft_aigen::launch::at_least(&m.comfy.version, &x.min_comfy)));
+        let names = |version: &str| m.too_new_for(version).into_iter().map(|x| x.id.as_str()).collect::<Vec<_>>();
+        // FIBO 2 came with 0.43.0, MOSS Image with 0.42.0, FLUX.3 Klein with 0.41.0.
+        assert_eq!(names("0.43.0"), Vec::<&str>::new());
+        assert_eq!(names("0.42.5"), ["fibo-2-dev"]);
+        assert_eq!(names("0.41.0"), ["moss-image", "fibo-2-dev"]);
+        assert_eq!(names("0.40.0"), ["flux-3-klein", "moss-image", "fibo-2-dev"]);
+        assert_eq!(names("0.36"), ["qwen-image-2-1", "flux-3-klein", "moss-image", "fibo-2-dev", "ming-image-0-1-design"]);
+        assert_eq!(names("0.1.0").len(), m.models.len());
+        // A version that was not read claims nothing.
+        assert!(m.too_new_for("").is_empty() && m.too_new_for("unknown").is_empty());
+        assert!(m.older_than_pinned("0.42.1") && !m.older_than_pinned("0.43.0") && !m.older_than_pinned("0.44.0") && !m.older_than_pinned(""));
     }
 
     /// A card with little memory starts on Light, MOSS Image, listed first; a larger card, or one

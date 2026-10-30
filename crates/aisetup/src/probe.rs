@@ -82,6 +82,9 @@ pub struct Existing {
     /// The folders it reads model files from, the one it saves new ones to first: as the running
     /// one reports them, else as the installed one's settings give them.
     pub models: Vec<String>,
+    /// Its version (`0.42.1`): as the running one on this computer says, else as the installed
+    /// one's source folder says. Empty: not known.
+    pub version: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -383,11 +386,10 @@ impl Probe {
             Some(folder) => format!(" Its models are in {folder}."),
             None => String::new(),
         };
+        let found = if self.comfy.version.is_empty() { "ComfyUI detected".to_string() } else { format!("ComfyUI {} detected", self.comfy.version) };
         out.push(match (self.comfy.running.first(), &self.comfy.installed) {
-            (Some(url), _) => row("comfy", Level::Info, "ComfyUI detected".into(), &format!("Running at {url}.{models} {HAS_COMFY}"), "running".into()),
-            (None, Some(_)) => {
-                row("comfy", Level::Info, "ComfyUI detected".into(), &format!("ComfyUI Desktop, not running now.{models} {HAS_COMFY}"), "installed".into())
-            }
+            (Some(url), _) => row("comfy", Level::Info, found, &format!("Running at {url}.{models} {HAS_COMFY}"), "running".into()),
+            (None, Some(_)) => row("comfy", Level::Info, found, &format!("ComfyUI Desktop, not running now.{models} {HAS_COMFY}"), "installed".into()),
             (None, None) => {
                 row("comfy", Level::Info, "ComfyUI not found".into(), "A private copy will be installed, with its own Python", "will install".into())
             }
@@ -528,6 +530,11 @@ mod native {
         {
             probe.comfy.models = photocraft_aigen::launch::models_folders_here(launch);
         }
+        // Which version it is, to say which models it is too old for.
+        probe.comfy.version = local
+            .and_then(|u| photocraft_aigen::launch::server_version(transport, u))
+            .or_else(|| probe.comfy.installed.as_ref().and_then(photocraft_aigen::launch::version_here))
+            .unwrap_or_default();
         if cancelled() {
             return probe;
         }
@@ -605,6 +612,13 @@ mod tests {
         );
         assert_eq!(p.variant(), ("nvidia", true));
         assert!(p.can_install());
+        // A ComfyUI that is here says its version, when it is known.
+        let comfy_title = |p: &Probe| p.checks().into_iter().find(|c| c.id == "comfy").map(|c| c.title).unwrap_or_default();
+        let mut found = probe();
+        found.comfy.running = vec!["http://127.0.0.1:8000".into()];
+        assert_eq!(comfy_title(&found), "ComfyUI detected");
+        found.comfy.version = "0.41.0".into();
+        assert_eq!(comfy_title(&found), "ComfyUI 0.41.0 detected");
         // The card's real memory and driver come from nvidia-smi; the other card from Windows.
         assert_eq!(p.gpus.len(), 2);
         assert_eq!((p.gpus[0].vram_mb, p.gpus[0].driver.as_str()), (Some(24564), "591.59"));
@@ -721,7 +735,7 @@ mod tests {
         // 32-bit Windows can't run the engine; an unchecked network says so.
         p.os = Os { name: "Windows 10 Home".into(), windows: true, ..Os::default() };
         p.hosts.clear();
-        p.comfy = Existing { running: Vec::new(), installed: Some(Launch::default()), models: vec![r"C:\Users\a\ComfyUI-Shared\models".into()] };
+        p.comfy = Existing { installed: Some(Launch::default()), models: vec![r"C:\Users\a\ComfyUI-Shared\models".into()], ..Existing::default() };
         let rows = p.checks();
         let by = |id: &str| rows.iter().find(|c| c.id == id).unwrap();
         assert_eq!((by("os").level, by("net").level, by("comfy").value.as_str()), (Level::Stop, Level::Info, "installed"));

@@ -366,7 +366,7 @@ fn an_installed_setup_can_lose_a_model_or_everything_without_being_taken_for_a_n
     assert!(set_up(&app), "the record says it is installed");
     assert_eq!(crate::menus::menu_items(&app).into_iter().find(|i| i.id == OPEN).unwrap().label, "Local AI Setup\u{2026}");
     let summary = summary(&app);
-    assert!(summary["text"].as_str().unwrap().contains("Installed: ComfyUI 0.42.1 \u{b7} 2 models"), "{summary}");
+    assert!(summary["text"].as_str().unwrap().contains("Installed: ComfyUI 0.43.0 \u{b7} 2 models"), "{summary}");
     assert_eq!((summary["installed"].as_bool(), summary["managed"].as_bool()), (Some(true), Some(true)));
     // The first screen says what is there, and the Models screen marks both installed.
     for page in [Page::Pc, Page::Models] {
@@ -462,7 +462,7 @@ fn a_comfyui_on_this_pc_is_a_choice_of_two_buttons_and_its_models_folder_is_fill
     // the two buttons in place of Next.
     let checks = app.ui.ai_setup.probe.clone().unwrap()["checks"].clone();
     let comfy = list(&checks, "").iter().find(|c| c["id"] == "comfy").cloned().unwrap();
-    assert_eq!((comfy["title"].as_str(), comfy["value"].as_str()), (Some("ComfyUI detected"), Some("installed")));
+    assert_eq!((comfy["title"].as_str(), comfy["value"].as_str()), (Some("ComfyUI 0.43.0 detected"), Some("installed")));
     assert!(comfy["detail"].as_str().unwrap().contains(&folders[0]), "{comfy}");
     assert!(offer_choice(&app));
     draw(&mut app, &c);
@@ -511,6 +511,47 @@ fn a_comfyui_on_this_pc_is_a_choice_of_two_buttons_and_its_models_folder_is_fill
     demo::pretend_installed(&installed, dir3.path()).unwrap();
     open(&mut installed);
     assert!(!offer_choice(&installed));
+}
+
+/// Setting up with one's own ComfyUI: one older than the setup's is told which models it can't
+/// run and that other features may not work, on the Your ComfyUI page and beside each model.
+#[test]
+fn an_older_comfyui_of_ones_own_is_told_what_will_not_run() {
+    // The real manifest: every model the setup offers.
+    let (mut app, dir) = app(demo::Scale::Real);
+    app.ui.ai_setup.probe = Some(demo::probe_with_comfy(dir.path()));
+    open(&mut app);
+    use_existing(&mut app);
+    let c = ctx();
+    let answer = |version: &str| json!({"folders": {}, "modelsFolders": [], "url": "http://127.0.0.1:8000", "version": version});
+    // 0.41.0: MOSS Image came with 0.42.0, FIBO 2 with 0.43.0.
+    connected(&mut app, Some(answer("0.41.0")));
+    assert_eq!(their_version(&app), "0.41.0");
+    let warning = version_warning(&app).unwrap();
+    assert!(warning.contains("0.41.0") && warning.contains("0.43.0") && warning.contains("Update ComfyUI"), "{warning}");
+    assert!(warning.contains("MOSS Image (0.42.0)") && warning.contains("FIBO 2 Dev (0.43.0)") && !warning.contains("Qwen Image 2.1"), "{warning}");
+    let manifest = app.ui.ai_setup.manifest.clone().unwrap();
+    let by_id = |id: &str| list(&manifest, "/models").iter().find(|m| m["id"] == id).cloned().unwrap();
+    assert_eq!((needs_newer(&by_id("fibo-2-dev"), "0.41.0"), needs_newer(&by_id("qwen-image-2-1"), "0.41.0")), (Some("0.43.0"), None));
+    app.ui.ai_setup.page = Page::Location;
+    draw(&mut app, &c);
+    app.ui.ai_setup.page = Page::Models;
+    draw(&mut app, &c);
+    // Only behind the setup's own version: no model is out, but it is still said.
+    connected(&mut app, Some(answer("0.42.9")));
+    let warning = version_warning(&app).unwrap();
+    assert!(warning.contains("FIBO 2 Dev") && !warning.contains("MOSS"), "{warning}");
+    // Recent enough, or not known: nothing is said.
+    for quiet in ["0.43.0", "0.44.1", "", "nightly"] {
+        connected(&mut app, Some(answer(quiet)));
+        assert_eq!(version_warning(&app), None, "{quiet}");
+    }
+    // Not connected yet: the version the look at this PC found; a new ComfyUI: none of it.
+    app.ui.ai_setup.server = None;
+    app.ui.ai_setup.probe.as_mut().unwrap()["probe"]["comfy"]["version"] = json!("0.40.0");
+    assert!(version_warning(&app).unwrap().contains("FLUX.3 Klein (0.41.0)"));
+    use_managed(&mut app);
+    assert_eq!((their_version(&app).as_str(), version_warning(&app)), ("", None));
 }
 
 #[test]

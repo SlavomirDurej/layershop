@@ -5,6 +5,7 @@
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a red frog" out.png 768 512
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a red frog" out.png 768 512 alpha   # transparent background
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "a teapot" out.png inpaint image.png mask.png 0.8
+//! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 2 "add a deer" out.png edit image.png [mask.png]
 //! cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188 find         # how it was started
 //! ```
 //!
@@ -93,12 +94,18 @@ fn run() -> Result<(), String> {
     let size = |i: usize| args.get(i).and_then(|v| v.parse().ok()).unwrap_or(1024u32);
     // `<url> <n> <prompt> <out.png> inpaint <image.png> <mask.png> [strength]`: repaint the part
     // of the image that is transparent in the mask (both PNGs of one size, edges in multiples of 16).
-    let job = if args.get(4).map(String::as_str) == Some("inpaint") {
+    // `<url> <n> <prompt> <out.png> edit <image.png> [mask.png]`: change the picture as the prompt
+    // says (the Edit tab's Change with an edit model), only where the mask is transparent if one
+    // is given.
+    let mode = args.get(4).map(String::as_str);
+    let job = if mode == Some("inpaint") || mode == Some("edit") {
+        let edit = mode == Some("edit");
         let read = |i: usize| {
-            let path = args.get(i).ok_or("inpaint needs <image.png> <mask.png>")?;
+            let path = args.get(i).ok_or("inpaint needs <image.png> <mask.png>, edit <image.png>")?;
             std::fs::read(path).map_err(|e| format!("{path}: {e}"))
         };
-        let (image, mask) = (read(5)?, read(6)?);
+        let image = read(5)?;
+        let mask = if edit && args.get(6).is_none() { Vec::new() } else { read(6)? };
         // A PNG's size is in its header: bytes 16..24.
         let edge = |at: usize| image.get(at..at + 4).and_then(|b| b.try_into().ok()).map(u32::from_be_bytes).ok_or("the image is not a PNG");
         let (width, height) = (edge(16)?, edge(20)?);
@@ -109,7 +116,7 @@ fn run() -> Result<(), String> {
             height,
             seed: random_seed(),
             alpha: false,
-            source: Some(Source { image, mask, width, height, strength, edit: false, references: Vec::new() }),
+            source: Some(Source { image, mask, width, height, strength, edit, references: Vec::new(), shown: Vec::new() }),
         }
     } else {
         // A further `alpha` asks for a transparent background (the panel's Alpha Channel box).

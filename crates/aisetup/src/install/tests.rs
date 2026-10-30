@@ -293,7 +293,7 @@ fn a_clean_machine_ends_with_an_engine_its_models_and_a_test_image() {
     assert!(layout.script.is_file() && layout.model_paths.is_file());
     assert_eq!(
         runtime::read_marker(&layout.engine_root).unwrap(),
-        Marker { version: "0.42.1".into(), variant: "nvidia".into(), sha256: rig.manifest.comfy.assets["nvidia"].sha256.clone() }
+        Marker { version: "0.43.0".into(), variant: "nvidia".into(), sha256: rig.manifest.comfy.assets["nvidia"].sha256.clone() }
     );
     assert!(!layout.archive.exists() && !part_of(&layout.archive).exists());
     // The models: each file whole, under its final name.
@@ -325,7 +325,7 @@ fn a_clean_machine_ends_with_an_engine_its_models_and_a_test_image() {
     let record = state::load(&rig.state_file());
     assert_eq!(
         (record.phase, record.installed, record.comfy_version.as_str(), record.port),
-        (Phase::Done, vec!["qwen-image-2-1".to_string()], "0.42.1", done.port)
+        (Phase::Done, vec!["qwen-image-2-1".to_string()], "0.43.0", done.port)
     );
     // Applied to the settings as they are then: the panel offers what was installed.
     let mut settings = Settings::default();

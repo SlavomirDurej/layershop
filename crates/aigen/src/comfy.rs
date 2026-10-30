@@ -55,6 +55,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::Flux3 => "flux3",
         Family::MossImage => "moss_image",
         Family::Ideogram4 => "ideogram4",
+        Family::Fibo2 => "fibo2",
         // Ming Image's encoder is recognised by its weights; its templates load it as this type.
         Family::QwenImage | Family::QwenImage21 | Family::MingImage | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
         _ => "stable_diffusion",
@@ -64,7 +65,7 @@ fn clip_type(family: Family) -> &'static str {
 fn latent_node(family: Family) -> &'static str {
     match family {
         Family::ZImage | Family::Flux1 | Family::HidreamI1 | Family::QwenImage => "EmptySD3LatentImage",
-        Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 | Family::MossImage => "EmptyFlux2LatentImage",
+        Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 | Family::MossImage | Family::Fibo2 => "EmptyFlux2LatentImage",
         Family::HidreamO1 => "EmptyHiDreamO1LatentImage",
         _ => "EmptyLatentImage",
     }
@@ -88,6 +89,9 @@ pub struct Edit<'a> {
     /// Where the model may paint (transparent, as an inpainting's mask; it may be soft). `None`:
     /// all of the picture.
     pub mask: Option<&'a str>,
+    /// With a mask: what the model is shown as image 1 instead of `image`, which is still what
+    /// it paints over ([`crate::Source::shown`]). Ignored without a mask.
+    pub shown: Option<&'a str>,
     /// Further pictures, which the instruction calls image 2, image 3, … ([`Family::max_references`]
     /// at most).
     pub references: &'a [String],
@@ -97,6 +101,9 @@ pub struct Edit<'a> {
 /// the next one, so ComfyUI's input folder holds two files of ours, not one pair per generation.
 pub const UPLOAD_IMAGE: &str = "photocraft_inpaint_image.png";
 pub const UPLOAD_MASK: &str = "photocraft_inpaint_mask.png";
+/// The name what a masked edit's model is shown of the picture is uploaded under, when that
+/// isn't the picture itself ([`Edit::shown`]; overwritten likewise).
+pub const UPLOAD_SHOWN: &str = "photocraft_edit_shown.png";
 /// The name the `index`th reference picture of an edit is uploaded under (overwritten likewise).
 pub fn upload_reference(index: usize) -> String {
     format!("photocraft_edit_reference_{}.png", index.saturating_add(1))
@@ -243,6 +250,8 @@ pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Resu
 /// - Ming Image: its encoder takes the pictures with the prompt, and the model is sampled with
 ///   the LCM sampler of ComfyUI's Image Edit template.
 /// - FLUX.2: each picture is a reference latent on the conditioning.
+/// - FIBO 2: its encoder takes the pictures with the prompt and gives the latent to sample, at
+///   the size asked for (ComfyUI's FIBO 2 Edit template).
 ///
 /// With a mask the sampler starts from the encoded picture and denoises only the masked part
 /// (Set Latent Noise Mask, through Differential Diffusion for a soft mask), as an inpainting
@@ -255,7 +264,7 @@ pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value>
 /// Can `model` edit a picture? The error says what to fix.
 pub fn check_edit(model: &Model) -> Result<()> {
     let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
-    build_edit(model, &job, &Edit { image: "image", mask: None, references: &[] }).map(|_| ())
+    build_edit(model, &job, &Edit { image: "image", mask: None, shown: None, references: &[] }).map(|_| ())
 }
 
 /// Can `model` run at all (and, with `inpainting`, repaint an image)? The error says what to fix.
@@ -299,6 +308,14 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         let id = g.add(
             "TextEncodeQwenImage21",
             json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "resolution": 1024, "vae": vae}),
+        );
+        (json!([id, 0]), json!([id, 1]))
+    } else if f == Family::Fibo2 {
+        // Its own node encodes both prompts; without pictures its size only sizes the latent it
+        // gives, which [`latent_node`] gives as well.
+        let id = g.add(
+            "TextEncodeFibo2",
+            json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "width": job.width, "height": job.height, "batch_size": 1}),
         );
         (json!([id, 0]), json!([id, 1]))
     } else {
@@ -576,7 +593,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
     if !f.edits() {
         return Err(Error::Config(format!(
-            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
+            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, FIBO 2, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
         )));
     }
     if let Some(why) = crate::detect::problem(model) {
@@ -588,9 +605,15 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     let mut g = Graph::default();
     let (mut unet, clip, vae) = loaders(&mut g, model)?;
     let cfg = finite(model.cfg, 1.0);
-    // The picture to edit first: it is "image 1" to the model, the references follow.
-    let pictures: Vec<Link> =
-        std::iter::once(edit.image).chain(edit.references.iter().map(String::as_str)).map(|name| g.node("LoadImage", json!({"image": name}))).collect();
+    // The picture to edit first: it is "image 1" to the model, the references follow. With a
+    // mask the model may be shown less of it than it paints over, but not FIBO 2: it scales a
+    // single picture to the result's size and lines the result up with it pixel for pixel, so
+    // part of the picture would be stretched over the whole.
+    let image = g.node("LoadImage", json!({"image": edit.image}));
+    let shown = edit.shown.filter(|_| edit.mask.is_some() && f != Family::Fibo2).map(|name| g.node("LoadImage", json!({"image": name})));
+    let pictures: Vec<Link> = std::iter::once(shown.unwrap_or_else(|| image.clone()))
+        .chain(edit.references.iter().map(|name| g.node("LoadImage", json!({"image": name}))))
+        .collect();
     let (positive, negative, latent) = match f {
         Family::QwenImage21 => {
             // The pictures are the same at every step: their part of the sequence is cached.
@@ -602,6 +625,21 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
                 inputs[format!("images.image_{}", i + 1)] = picture.clone();
             }
             let id = g.add("TextEncodeQwenImage21", inputs);
+            (json!([id, 0]), json!([id, 1]), json!([id, 2]))
+        }
+        Family::Fibo2 => {
+            // Its encoder shows the pictures to the text encoder and hands them to the model as
+            // reference latents on both sides of the guidance. One picture is scaled and cropped
+            // to the result's size, and the size asked for is the picture's, so nothing is
+            // cropped; several are each taken at the size the model was trained at.
+            let mut inputs = json!({
+                "clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "vae": vae,
+                "width": job.width, "height": job.height, "batch_size": 1,
+            });
+            for (i, picture) in pictures.iter().enumerate() {
+                inputs[format!("images.image_{}", i + 1)] = picture.clone();
+            }
+            let id = g.add("TextEncodeFibo2", inputs);
             (json!([id, 0]), json!([id, 1]), json!([id, 2]))
         }
         Family::QwenEdit => {
@@ -659,14 +697,14 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
         }
     };
     // Masked: the picture is the latent, and only the mask of it is painted afresh.
-    let latent = match (edit.mask, pictures.first()) {
-        (Some(mask), Some(picture)) => {
+    let latent = match edit.mask {
+        Some(mask) => {
             unet = g.node("DifferentialDiffusion", json!({"model": unet}));
             let mask = json!([g.add("LoadImage", json!({"image": mask})), 1]);
-            let encoded = g.node("VAEEncode", json!({"pixels": picture, "vae": vae}));
+            let encoded = g.node("VAEEncode", json!({"pixels": image, "vae": vae}));
             g.node("SetLatentNoiseMask", json!({"samples": encoded, "mask": mask}))
         }
-        _ => latent,
+        None => latent,
     };
     let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise: 1.0, from_picture: true });
     let image = decode(&mut g, model, &samples, &vae, transparent(model, job, true));
@@ -1115,7 +1153,7 @@ mod tests {
         // CFG above 1: the negative prompt is encoded.
         assert_eq!(c.iter().filter(|x| *x == "CLIPTextEncode").count(), 2);
         // Text to image only: its edits drew malformed animals ([`Family::edits`]).
-        let e = edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, references: &[] }).unwrap_err().to_string();
+        let e = edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &[] }).unwrap_err().to_string();
         assert!(e.contains("FLUX.3 Klein can't edit"), "{e}");
         assert!(m.can_generate() && !m.can_edit() && !m.can_inpaint());
         // Inpainting the user turns on by hand still shows it the picture, as FLUX.2 is.
@@ -1208,7 +1246,7 @@ mod tests {
         }
         // Text to image only.
         assert!(m.can_generate() && !m.can_edit() && !m.can_inpaint() && !m.alpha);
-        assert!(edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, references: &[] }).unwrap_err().to_string().contains("MOSS Image can't edit"));
+        assert!(edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &[] }).unwrap_err().to_string().contains("MOSS Image can't edit"));
         // Image to image is given the prompt as typed: there is a picture to follow, not a canvas to lay out.
         let w = inpaint_workflow(&m, &job(), &Inpaint { image: "src.png", mask: None, denoise: 0.6 }).unwrap();
         assert!(nodes_with(&w, "CLIPTextEncode").iter().any(|n| n["inputs"]["text"] == "a red frog"));
@@ -1312,7 +1350,7 @@ mod tests {
         // An edit, as ComfyUI's Image Edit template: its encoder takes the pictures (and the VAE,
         // to hand them to the model), over an empty latent of the size asked for.
         let references = ["logo.png".to_string()];
-        let w = edit_workflow(&ming, &alpha, &Edit { image: "src.png", mask: None, references: &references }).unwrap();
+        let w = edit_workflow(&ming, &alpha, &Edit { image: "src.png", mask: None, shown: None, references: &references }).unwrap();
         assert_well_formed(&w);
         let nodes = w.as_object().unwrap();
         let (id, encode) = nodes.iter().find(|(_, n)| n["class_type"] == "TextEncodeMingImageEdit").unwrap();
@@ -1326,7 +1364,7 @@ mod tests {
         assert!(has(&w, "SamplerLCM") && has(&w, "ModelSamplingFlux") && !has(&w, "CLIPTextEncode") && !has(&w, "VAEEncode"), "{:?}", classes(&w));
         assert_eq!((count(&w, "TextEncodeMingImageEdit"), shown(&w).as_str()), (1, "SplitImageWithAlpha"));
         // With CFG both sides of the guidance see the pictures.
-        let w = edit_workflow(&guided, &job(), &Edit { image: "src.png", mask: None, references: &[] }).unwrap();
+        let w = edit_workflow(&guided, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &[] }).unwrap();
         assert_well_formed(&w);
         assert_eq!((count(&w, "TextEncodeMingImageEdit"), has(&w, "CFGGuider")), (2, true));
     }
@@ -1557,7 +1595,7 @@ mod tests {
     #[test]
     fn editing_shows_the_model_the_picture_and_its_references() {
         let references = ["shirt.png".to_string(), "hat.png".to_string()];
-        let edit = Edit { image: "src.png", mask: None, references: &references };
+        let edit = Edit { image: "src.png", mask: None, shown: None, references: &references };
         let loaded = |w: &Value, link: &Value| w[link[0].as_str().unwrap()]["inputs"]["image"].as_str().unwrap().to_string();
 
         // Qwen Image 2.1, as ComfyUI's Image Edit template: its encoder takes the pictures and
@@ -1600,9 +1638,9 @@ mod tests {
         assert_eq!((latent["inputs"]["width"].as_u64(), latent["inputs"]["height"].as_u64()), (Some(1024), Some(768)));
         // It has three picture inputs in all: a third reference is refused in words.
         let many = ["a.png".to_string(), "b.png".to_string(), "c.png".to_string()];
-        let e = edit_workflow(&Family::QwenEdit.preset(), &job(), &Edit { image: "src.png", mask: None, references: &many }).unwrap_err().to_string();
+        let e = edit_workflow(&Family::QwenEdit.preset(), &job(), &Edit { image: "src.png", mask: None, shown: None, references: &many }).unwrap_err().to_string();
         assert!(e.contains("2 reference pictures"), "{e}");
-        assert!(edit_workflow(&Family::QwenImage21.preset(), &job(), &Edit { image: "src.png", mask: None, references: &many }).is_ok());
+        assert!(edit_workflow(&Family::QwenImage21.preset(), &job(), &Edit { image: "src.png", mask: None, shown: None, references: &many }).is_ok());
 
         // FLUX.2: every picture is a reference latent on both sides, over an empty latent.
         let w = edit_workflow(&Family::Flux2.preset(), &job(), &edit).unwrap();
@@ -1619,7 +1657,7 @@ mod tests {
         for f in Family::ALL {
             let mut m = f.preset();
             (m.cfg, m.guidance, m.steps) = (f64::NAN, f64::INFINITY, u32::MAX);
-            match edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, references: &[] }) {
+            match edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &[] }) {
                 Ok(w) => {
                     assert!(f.edits() && check_edit(&f.preset()).is_ok() && !w.to_string().contains("null"), "{f:?}");
                     assert_eq!(classes(&w).iter().filter(|x| *x == "LoadImage").count(), 1, "{f:?}");
@@ -1638,8 +1676,8 @@ mod tests {
     #[test]
     fn a_masked_edit_starts_from_the_picture_and_paints_only_the_mask() {
         let references = ["shirt.png".to_string()];
-        let edit = Edit { image: "src.png", mask: Some("mask.png"), references: &references };
-        for f in [Family::QwenImage21, Family::QwenEdit, Family::MingImage, Family::Flux2] {
+        let edit = Edit { image: "src.png", mask: Some("mask.png"), shown: None, references: &references };
+        for f in [Family::QwenImage21, Family::QwenEdit, Family::MingImage, Family::Flux2, Family::Fibo2] {
             let w = edit_workflow(&f.preset(), &job(), &edit).unwrap();
             assert_well_formed(&w);
             let nodes = w.as_object().unwrap();
@@ -1669,6 +1707,78 @@ mod tests {
         // No mask, no noise mask: the picture is rendered afresh as before.
         let w = edit_workflow(&Family::QwenImage21.preset(), &job(), &Edit { mask: None, ..edit }).unwrap();
         assert!(!classes(&w).iter().any(|x| x == "SetLatentNoiseMask" || x == "DifferentialDiffusion"));
+    }
+
+    #[test]
+    fn a_masked_edit_can_show_the_model_less_than_it_paints_over() {
+        let references = ["shirt.png".to_string()];
+        let edit = Edit { image: "src.png", mask: Some("mask.png"), shown: Some("shown.png"), references: &references };
+        let w = edit_workflow(&Family::QwenImage21.preset(), &job(), &edit).unwrap();
+        assert_well_formed(&w);
+        let nodes = w.as_object().unwrap();
+        let linked = |v: &Value| &nodes[v[0].as_str().unwrap()];
+        let loaded = |v: &Value| linked(v)["inputs"]["image"].as_str().unwrap().to_string();
+        // Image 1 is what it is shown, the reference is still image 2…
+        let encode = node(&w, "TextEncodeQwenImage21");
+        assert_eq!((loaded(&encode["inputs"]["images.image_1"]), loaded(&encode["inputs"]["images.image_2"])), ("shown.png".into(), "shirt.png".into()));
+        // …and the picture is what it paints over.
+        let masked = node(&w, "SetLatentNoiseMask");
+        assert_eq!(loaded(&linked(&masked["inputs"]["samples"])["inputs"]["pixels"]), "src.png");
+        // Without a mask there is nothing to paint over: the picture is shown.
+        let w = edit_workflow(&Family::QwenImage21.preset(), &job(), &Edit { mask: None, ..edit }).unwrap();
+        assert!(!w.to_string().contains("shown.png"), "{w}");
+    }
+
+    #[test]
+    fn fibo_2_follows_its_templates() {
+        let m = Family::Fibo2.preset();
+        let loaded = |w: &Value, link: &Value| w[link[0].as_str().unwrap()]["inputs"]["image"].as_str().unwrap().to_string();
+        // Its encoder loads as its own type.
+        let w = workflow(&m, &job()).unwrap();
+        assert_well_formed(&w);
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["type"], "fibo2");
+        // Text to image: its node encodes both prompts, the sampler at the template's settings
+        // starts from an empty FLUX.2 latent of the size asked for.
+        let encode = node(&w, "TextEncodeFibo2");
+        assert_eq!((&encode["inputs"]["prompt"], &encode["inputs"]["negative_prompt"]), (&json!("a red frog"), &json!(crate::model::FIBO2_NEGATIVE)));
+        assert!(!classes(&w).iter().any(|x| x == "CLIPTextEncode" || x == "LoadImage"), "{:?}", classes(&w));
+        let id = w.as_object().unwrap().iter().find(|(_, n)| n["class_type"] == "TextEncodeFibo2").map(|(id, _)| id.clone()).unwrap();
+        let sampler = &node(&w, "KSampler")["inputs"];
+        assert_eq!((&sampler["positive"], &sampler["negative"]), (&json!([id, 0]), &json!([id, 1])));
+        assert_eq!((&sampler["steps"], &sampler["cfg"], &sampler["sampler_name"], &sampler["scheduler"]), (&json!(50), &json!(5.0), &json!("euler"), &json!("simple")));
+        let latent = &w[sampler["latent_image"][0].as_str().unwrap()];
+        assert_eq!((latent["class_type"].as_str(), latent["inputs"]["width"].as_u64(), latent["inputs"]["height"].as_u64()), (Some("EmptyFlux2LatentImage"), Some(1024), Some(768)));
+
+        // An edit: the pictures go to its encoder, which gives the latent at the picture's size
+        // (asked for explicitly, so a single picture isn't cropped to a trained size).
+        let references = ["hat.png".to_string()];
+        let w = edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &references }).unwrap();
+        assert_well_formed(&w);
+        let nodes = w.as_object().unwrap();
+        let (id, encode) = nodes.iter().find(|(_, n)| n["class_type"] == "TextEncodeFibo2").unwrap();
+        let inputs = &encode["inputs"];
+        assert_eq!((loaded(&w, &inputs["images.image_1"]), loaded(&w, &inputs["images.image_2"])), ("src.png".into(), "hat.png".into()));
+        assert_eq!((inputs["width"].as_u64(), inputs["height"].as_u64(), inputs["batch_size"].as_u64()), (Some(1024), Some(768), Some(1)));
+        assert_eq!(nodes[inputs["vae"][0].as_str().unwrap()]["class_type"], "VAELoader");
+        let sampler = &node(&w, "KSampler")["inputs"];
+        assert_eq!((&sampler["positive"], &sampler["negative"], &sampler["latent_image"]), (&json!([id, 0]), &json!([id, 1]), &json!([id, 2])));
+        assert!(!classes(&w).iter().any(|x| x == "VAEEncode" || x == "ReferenceLatent"), "{:?}", classes(&w));
+        // Three references are taken, as the other edit models take them.
+        let many = ["a.png".to_string(), "b.png".to_string(), "c.png".to_string()];
+        assert!(edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &many }).is_ok());
+
+        // A masked edit shows it the picture it paints over, never a part of it: it would stretch
+        // that over the whole result.
+        let edit = Edit { image: "src.png", mask: Some("mask.png"), shown: Some("shown.png"), references: &references };
+        let w = edit_workflow(&m, &job(), &edit).unwrap();
+        assert_well_formed(&w);
+        assert!(!w.to_string().contains("shown.png"), "{w}");
+        assert_eq!(loaded(&w, &node(&w, "TextEncodeFibo2")["inputs"]["images.image_1"]), "src.png");
+        let encoded = &w[node(&w, "SetLatentNoiseMask")["inputs"]["samples"][0].as_str().unwrap()];
+        assert_eq!((encoded["class_type"].as_str(), loaded(&w, &encoded["inputs"]["pixels"])), (Some("VAEEncode"), "src.png".to_string()));
+        // It isn't offered for inpainting, but works on one at a time at about a megapixel.
+        assert!(!m.can_inpaint());
+        assert_eq!((Family::Fibo2.source_megapixels(4.0), Family::Fibo2.source_megapixels(0.5), Family::Fibo2.source_megapixels(0.0)), (1.0, 0.5, 0.0));
     }
 
     #[test]

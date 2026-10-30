@@ -477,22 +477,159 @@ fn pixel_count(size: (u32, u32)) -> Result<usize> {
     pixels.ok_or_else(|| EngineError::Other("the area is too large to send to the model".into()))
 }
 
-/// The pixels of `picture` inside `crop` at `size`, as an opaque PNG: over white where the
-/// picture is transparent.
-fn picture_png(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec<u8>> {
-    let (width, height) = size;
+/// The pixels of `picture` inside `crop` at `size`, as straight RGBA in 0..=1.
+fn picture_pixels(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec<[f32; 4]>> {
     let pixels = pixel_count(size)?;
     let fmt = picture.format();
-    let mut rgb = Vec::with_capacity(pixels * 3);
-    for px in resampled(picture, crop, width, height).chunks_exact(fmt.channels()) {
-        let [r, g, b, a] = photocraft_raster::to_rgba(&fmt, px);
-        let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
-        rgb.extend([r, g, b].map(|c| byte(c * a + (1.0 - a))));
-    }
-    if rgb.len() != pixels * 3 {
+    let unit = |v: f32, or: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { or };
+    let out: Vec<[f32; 4]> = resampled(picture, crop, size.0, size.1)
+        .chunks_exact(fmt.channels())
+        .map(|px| {
+            let [r, g, b, a] = photocraft_raster::to_rgba(&fmt, px);
+            [unit(r, 1.0), unit(g, 1.0), unit(b, 1.0), unit(a, 0.0)]
+        })
+        .collect();
+    if out.len() != pixels {
         return Err(EngineError::Other("could not read the picture to send to the model".into()));
     }
-    png(width, height, ChannelLayout::Rgb, rgb)
+    Ok(out)
+}
+
+/// `pixels` (at `size`) as an opaque PNG for a model: over white where they are transparent,
+/// except where they are `free` (0..=1 each: the part the model paints), which is over the
+/// picture's own colours carried out ([`extended`]). An edit model keeps what it is shown in an
+/// empty part: white comes back white, so an outpainting would stay blank.
+fn opaque_png(pixels: &[[f32; 4]], size: (u32, u32), free: &[f32]) -> Result<Vec<u8>> {
+    png(size.0, size.1, ChannelLayout::Rgb, opaque_rgb(pixels, size, free)?)
+}
+
+/// What [`opaque_png`] encodes: three bytes a pixel.
+fn opaque_rgb(pixels: &[[f32; 4]], size: (u32, u32), free: &[f32]) -> Result<Vec<u8>> {
+    let (width, height) = size;
+    if pixels.len() != pixel_count(size)? {
+        return Err(EngineError::Other("could not read the picture to send to the model".into()));
+    }
+    let empty_and_free = free.iter().zip(pixels).any(|(f, p)| *f > 0.0 && p[3] < 1.0);
+    let backdrop = if empty_and_free { extended(pixels, width as usize, height as usize) } else { Vec::new() };
+    let mut rgb = Vec::with_capacity(pixels.len() * 3);
+    for (i, [r, g, b, a]) in pixels.iter().enumerate() {
+        let f = free.get(i).copied().filter(|f| f.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0);
+        let under = backdrop.get(i).map_or([1.0; 3], |c| c.map(|v| v * f + (1.0 - f)));
+        rgb.extend([r, g, b].into_iter().zip(under).map(|(c, u)| byte(c * a + u * (1.0 - a))));
+    }
+    Ok(rgb)
+}
+
+/// The smallest picture an outpainting's model is shown on its own ([`shown_png`]): less than
+/// this a side, it is shown the whole area.
+const MIN_SHOWN: usize = 64;
+
+/// What an edit model is shown of an outpainting ([`photocraft_aigen::Source::shown`]): the
+/// picture in `pixels` (at `size`) alone, cut from `rgb` ([`opaque_rgb`] of them) to its bounds,
+/// when part of what is `free` (0..=1 each) is empty. Qwen Image 2.1 keeps what it is shown in
+/// an empty part, whether white or the picture's colours carried out and blurred, so it is
+/// shown none of it: the picture alone, it draws the scene on beyond it. Empty when nothing
+/// free is empty, or the picture is small or is all of the area.
+fn shown_png(pixels: &[[f32; 4]], rgb: &[u8], size: (u32, u32), free: &[f32]) -> Result<Vec<u8>> {
+    let width = size.0 as usize;
+    let solid = |p: &[f32; 4]| p[3] >= 0.5;
+    let empty_and_free = free.iter().zip(pixels).any(|(f, p)| *f > 0.0 && !solid(p));
+    if !empty_and_free || width == 0 || rgb.len() != pixels.len().saturating_mul(3) {
+        return Ok(Vec::new());
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, _) in pixels.iter().enumerate().filter(|(_, p)| solid(p)) {
+        let (x, y) = (i % width, i / width);
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+    }
+    let (w, h) = (x1.saturating_sub(x0), y1.saturating_sub(y0));
+    if w < MIN_SHOWN || h < MIN_SHOWN || (w, h) == (width, pixels.len() / width) {
+        return Ok(Vec::new());
+    }
+    let mut cut = Vec::with_capacity(w * h * 3);
+    for y in y0..y1 {
+        let row = rgb.get((y * width + x0) * 3..(y * width + x1) * 3).ok_or_else(|| EngineError::Other("could not read the picture to send to the model".into()))?;
+        cut.extend_from_slice(row);
+    }
+    png(w as u32, h as u32, ChannelLayout::Rgb, cut)
+}
+
+/// The colours of the picture in `pixels` (`width` × `height`) carried out over where it is
+/// empty, softly: each empty pixel takes the nearest pixel of the picture in its row (a row with
+/// none of it, the nearest one so filled in its column), and all of it is blurred. So an
+/// outpainting starts from the picture's sky, sea and sand going on, which the model then draws
+/// in detail. White where there is no picture at all.
+fn extended(pixels: &[[f32; 4]], width: usize, height: usize) -> Vec<[f32; 3]> {
+    if width == 0 || height == 0 || pixels.len() != width * height {
+        return Vec::new();
+    }
+    let mut filled: Vec<Option<[f32; 3]>> = pixels.iter().map(|p| (p[3] >= 0.5).then_some([p[0], p[1], p[2]])).collect();
+    for row in filled.chunks_exact_mut(width) {
+        fill_line(row);
+    }
+    for x in 0..width {
+        let mut column: Vec<_> = (0..height).map(|y| filled.get(y * width + x).copied().flatten()).collect();
+        fill_line(&mut column);
+        for (y, v) in column.into_iter().enumerate() {
+            if let Some(slot) = filled.get_mut(y * width + x) {
+                *slot = v;
+            }
+        }
+    }
+    // Three box blurs, divided by the same blur of ones so the edges don't darken.
+    let radius = (width.max(height) / 40).max(1);
+    let soft = |plane: Vec<f32>| {
+        let mut v = plane;
+        for _ in 0..3 {
+            v = box_blur_rows(&v, width, radius);
+        }
+        v = transposed(&v, width, height);
+        for _ in 0..3 {
+            v = box_blur_rows(&v, height, radius);
+        }
+        transposed(&v, height, width)
+    };
+    let weight = soft(vec![1.0; width * height]);
+    let [r, g, b] = [0, 1, 2].map(|c| soft(filled.iter().map(|v| v.map_or(1.0, |rgb| rgb[c])).collect()));
+    (0..width * height)
+        .map(|i| {
+            let w = weight.get(i).copied().filter(|w| *w > 1e-6).unwrap_or(1.0);
+            [&r, &g, &b].map(|plane| (plane.get(i).copied().unwrap_or(w) / w).clamp(0.0, 1.0))
+        })
+        .collect()
+}
+
+/// Give each empty (`None`) entry of `line` the nearest filled one's value; a line with none
+/// filled stays empty.
+fn fill_line(line: &mut [Option<[f32; 3]>]) {
+    if line.iter().all(Option::is_some) || line.iter().all(Option::is_none) {
+        return;
+    }
+    let mut before = Vec::with_capacity(line.len());
+    let mut last = None;
+    for (i, v) in line.iter().enumerate() {
+        if let Some(c) = v {
+            last = Some((i, *c));
+        }
+        before.push(last);
+    }
+    let mut after = vec![None; line.len()];
+    let mut next = None;
+    for ((i, v), slot) in line.iter().enumerate().rev().zip(after.iter_mut().rev()) {
+        if let Some(c) = v {
+            next = Some((i, *c));
+        }
+        *slot = next;
+    }
+    for (i, ((v, b), a)) in line.iter_mut().zip(before).zip(after).enumerate() {
+        if v.is_none() {
+            *v = match (b, a) {
+                (Some((bi, bc)), Some((ai, ac))) => Some(if i.abs_diff(bi) <= i.abs_diff(ai) { bc } else { ac }),
+                (Some((_, c)), None) | (None, Some((_, c))) => Some(c),
+                (None, None) => None,
+            };
+        }
+    }
 }
 
 /// The picture an image-to-image or an edit starts from, or one an edit refers to. In JSON
@@ -610,12 +747,17 @@ enum Picture {
 impl Picture {
     /// The part of the picture inside `rect` at `size`, as an opaque PNG.
     fn png(&self, rect: Rect, size: (u32, u32)) -> Result<Vec<u8>> {
+        opaque_png(&self.pixels(rect, size)?, size, &[])
+    }
+
+    /// The part of the picture inside `rect` at `size` ([`picture_pixels`]).
+    fn pixels(&self, rect: Rect, size: (u32, u32)) -> Result<Vec<[f32; 4]>> {
         match self {
-            Picture::Layer(pixels) => picture_png(pixels, rect, size),
+            Picture::Layer(pixels) => picture_pixels(pixels, rect, size),
             Picture::Document(doc) => {
                 let fmt = doc.pixel_format();
                 let flat = crate::file_cmds::flattened(doc, PixelFormat::new(fmt.mode, fmt.sample, true));
-                picture_png(&flat, rect, size)
+                picture_pixels(&flat, rect, size)
             }
         }
     }
@@ -857,7 +999,22 @@ impl Img2ImgPlan {
     /// What the model is sent: the source's pixels at `size`, with no mask (all of it is redrawn).
     fn source(&self, size: (u32, u32), strength: f64) -> Result<Source> {
         let image = self.picture.png(self.source_rect, size)?;
-        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength, edit: false, references: Vec::new() })
+        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new() })
+    }
+
+    /// What a local model editing inside `selection` is sent: the source's pixels at `size`, and
+    /// the selection as the mask ([`edit_mask`]). Where the selection is over nothing the picture
+    /// is carried out into it ([`opaque_png`]), and the model is shown the picture alone
+    /// ([`shown_png`]), so it paints there instead of keeping white or a blur.
+    fn masked_source(&self, selection: &Surface, canvas: Rect, size: (u32, u32), strength: f64) -> Result<Source> {
+        let pixels = self.picture.pixels(self.source_rect, size)?;
+        let opacity: Vec<f32> = pixels.iter().map(|p| p[3]).collect();
+        let mask = edit_mask(selection, self.area, canvas, size, &opacity)?;
+        let free = edge_held_coverage(selection, self.area, size);
+        let rgb = opaque_rgb(&pixels, size, &free)?;
+        let shown = if mask.is_empty() { Vec::new() } else { shown_png(&pixels, &rgb, size, &free)? };
+        let image = png(size.0, size.1, ChannelLayout::Rgb, rgb)?;
+        Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown })
     }
 }
 
@@ -926,29 +1083,36 @@ fn source_param(p: &Value) -> Result<Option<SourceRef>> {
     }
 }
 
-/// What an inpainting sends the model: the layer's pixels inside `crop` (over white where the
-/// layer is transparent) and the selection there as the mask, both at `size`. With `fade` the
-/// mask fades in from the selection's edge ([`MASK_FADE`]).
+/// What an inpainting sends the model: the layer's pixels inside `crop` and the selection there
+/// as the mask, both at `size`. Where the layer is transparent the picture goes on under the
+/// selection ([`opaque_png`]) and is white elsewhere. With `fade` the mask fades in from the
+/// selection's edge ([`MASK_FADE`]) where the layer has pixels to keep.
 fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Rect, size: (u32, u32), strength: f64, fade: bool) -> Result<Source> {
-    let image = picture_png(layer, crop, size)?;
-    let mut coverage = coverage(selection, crop, size);
+    let pixels = picture_pixels(layer, crop, size)?;
+    let whole = coverage(selection, crop, size);
+    let image = opaque_png(&pixels, size, &whole)?;
+    let mut coverage = whole.clone();
     if fade {
+        let opacity: Vec<f32> = pixels.iter().map(|p| p[3]).collect();
         fade_selection(&mut coverage, selected, crop, size, [false; 4]);
+        unfade_where_empty(&mut coverage, &whole, &opacity);
     }
     let mask = mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the area to inpaint".into()))?;
-    Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new() })
+    Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new() })
 }
 
 /// The mask an edit by a local model is given, so it composes what it paints inside the
 /// selection instead of anywhere in the picture it is shown: the selection inside `crop` at
 /// `size`, fading in from its edge ([`MASK_FADE`]) but not where the crop meets the canvas's
-/// edge and the selection goes on to it. Empty when it is all of the crop: the edit is the
-/// picture's.
-fn edit_mask(selection: &Surface, crop: Rect, canvas: Rect, size: (u32, u32)) -> Result<Vec<u8>> {
+/// edge and the selection goes on to it, nor where the picture (`opacity` at `size`) is empty.
+/// Empty when it is all of the crop: the edit is the picture's.
+fn edit_mask(selection: &Surface, crop: Rect, canvas: Rect, size: (u32, u32), opacity: &[f32]) -> Result<Vec<u8>> {
     pixel_count(size)?;
-    let mut coverage = edge_held_coverage(selection, crop, size);
+    let whole = edge_held_coverage(selection, crop, size);
+    let mut coverage = whole.clone();
     let open = [crop.x0 <= canvas.x0, crop.y0 <= canvas.y0, crop.x1 >= canvas.x1, crop.y1 >= canvas.y1];
     fade_selection(&mut coverage, selection.content_bounds().intersect(&crop), crop, size, open);
+    unfade_where_empty(&mut coverage, &whole, opacity);
     if coverage.iter().all(|v| byte(*v) == 255) {
         return Ok(Vec::new());
     }
@@ -998,6 +1162,15 @@ fn fade_selection(coverage: &mut [f32], selected: Rect, crop: Rect, size: (u32, 
     let (sx, sy) = (f64::from(width) / f64::from(crop.width().max(1)), f64::from(height) / f64::from(crop.height().max(1)));
     let shorter = (f64::from(selected.width()) * sx).min(f64::from(selected.height()) * sy);
     fade_inwards(coverage, width as usize, height as usize, (shorter * MASK_FADE).round().clamp(0.0, 256.0) as usize, open);
+}
+
+/// Where the picture sent is empty (`opacity` 0, sent as white) a faded mask has nothing to
+/// keep: there the mask is the selection's `whole` coverage again. Otherwise the model keeps
+/// the white in the fade, and an outpainting leaves white strips along the picture it extends.
+fn unfade_where_empty(faded: &mut [f32], whole: &[f32], opacity: &[f32]) {
+    for ((m, w), a) in faded.iter_mut().zip(whole).zip(opacity) {
+        *m = m.max(w * (1.0 - a.clamp(0.0, 1.0)));
+    }
 }
 
 /// `coverage` at `size` as a mask PNG: transparent where the model paints.
@@ -1167,7 +1340,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let context = number("context", DEFAULT_CONTEXT, 4.0)?;
     if edit && !model.can_edit() {
         return Err(EngineError::Other(format!(
-            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.2 or a cloud model; the panel's Edit tab lists them)",
+            "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, FIBO 2, Ming Image, Qwen Image Edit, FLUX.2 or a cloud model; the panel's Edit tab lists them)",
             model.name
         )));
     }
@@ -1332,13 +1505,14 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             }
             if let Some(plan) = &plan {
                 ctx.progress(0.0, "Reading the picture\u{2026}");
-                let mut source = plan.source(photocraft_aigen::source_size(&model, area.width(), area.height()), strength)?;
+                let size = photocraft_aigen::source_size(&model, area.width(), area.height());
+                let mut source = match &edit_selection {
+                    Some(selection) => plan.masked_source(selection, canvas, size, strength)?,
+                    None => plan.source(size, strength)?,
+                };
                 ctx.check()?;
                 if edit {
                     source.edit = true;
-                    if let Some(selection) = &edit_selection {
-                        source.mask = edit_mask(selection, plan.area, canvas, (source.width, source.height))?;
-                    }
                     for picture in &reference_pictures {
                         source.references.push(match picture {
                             Sent::Read(r) => r.png()?,
@@ -1485,9 +1659,13 @@ fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
             ctx.progress(0.5, "Reading the model files…");
             let folders = photocraft_aigen::comfy_models(transport.as_ref(), &url).map_err(ai_error)?;
             let roots = photocraft_aigen::launch::served_models_folders(transport.as_ref(), &url);
-            Ok((folders, roots, started, url))
+            // Which ComfyUI it is: the Local AI setup says which models it is too old for.
+            let version = photocraft_aigen::launch::server_version(transport.as_ref(), &url).unwrap_or_default();
+            Ok((folders, roots, started, url, version))
         },
-        |_, (folders, roots, started, url)| Ok(json!({"folders": folders, "modelsFolders": roots, "startedHere": started, "url": url})),
+        |_, (folders, roots, started, url, version)| {
+            Ok(json!({"folders": folders, "modelsFolders": roots, "startedHere": started, "url": url, "version": version}))
+        },
     )
 }
 
@@ -1607,7 +1785,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true,"findPort":bool=false (an address on this computer that doesn't answer: try ComfyUI's other port too, 8000 for ComfyUI Desktop, 8188 for the portable build)} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere,url (the address that answered)} (starts ComfyUI first when the settings say so and none is running)"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true,"findPort":bool=false (an address on this computer that doesn't answer: try ComfyUI's other port too, 8000 for ComfyUI Desktop, 8188 for the portable build)} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere,url (the address that answered),version (the ComfyUI version it reports; empty when it doesn't)} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
             journal: false,

@@ -573,7 +573,7 @@ mod tests {
     fn the_layout_keeps_one_engine_per_version_and_the_models_outside_it() {
         let m = manifest();
         let layout = Layout::new(m, &choices(&[])).unwrap();
-        assert_eq!(layout.engine_root, PathBuf::from(root("engine")).join("0.42.1"));
+        assert_eq!(layout.engine_root, PathBuf::from(root("engine")).join("0.43.0"));
         assert_eq!(layout.archive, PathBuf::from(root("engine")).join("ComfyUI_windows_portable_nvidia.7z"));
         assert_eq!(layout.python, layout.engine_root.join("python_embeded").join("python.exe"));
         assert_eq!(layout.script, layout.engine_root.join("ComfyUI").join("main.py"));

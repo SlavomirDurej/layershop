@@ -366,12 +366,17 @@ pub fn probe_without_card(dir: &Path) -> Value {
 /// [`probe`] on a machine with ComfyUI Desktop installed but not running, its models in the
 /// folders of [`comfy_folders`].
 pub fn probe_with_comfy(dir: &Path) -> Value {
+    probe_with_comfy_at(dir, "0.43.0")
+}
+
+/// [`probe_with_comfy`], its ComfyUI at `version`.
+pub fn probe_with_comfy_at(dir: &Path, version: &str) -> Value {
     let launch = photocraft_aigen::Launch {
         python: dir.join("Documents").join("ComfyUI").join(".venv").join("Scripts").join("python.exe").to_string_lossy().into_owned(),
         folder: dir.join("ComfyUI-Installs").join("ComfyUI").to_string_lossy().into_owned(),
         args: "ComfyUI\\main.py --enable-manager".into(),
     };
-    probe_with(dir, Existing { running: Vec::new(), installed: Some(launch), models: comfy_folders(dir) })
+    probe_with(dir, Existing { running: Vec::new(), installed: Some(launch), models: comfy_folders(dir), version: version.into() })
 }
 
 fn probe_with(dir: &Path, comfy: Existing) -> Value {
@@ -562,19 +567,33 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         return true;
     }
     // A machine with ComfyUI Desktop: the first screen asks which ComfyUI to use; Use my
-    // ComfyUI's screen has its models folders.
-    if let Some(screen) = page.strip_suffix("-comfy") {
-        if !matches!(screen, "pc" | "location") {
+    // ComfyUI's screen has its models folders. `-comfy-old`: a ComfyUI 0.41.0, older than the
+    // setup's, which says what won't run on it there and on the Models page.
+    let old = page.ends_with("-comfy-old");
+    if let Some(screen) = page.strip_suffix("-comfy-old").or_else(|| page.strip_suffix("-comfy")) {
+        if !matches!(screen, "pc" | "location" | "models") || (screen == "models" && !old) {
             return false;
         }
         install(app, dir, Scale::Real);
         for folder in comfy_folders(dir) {
             let _ = std::fs::create_dir_all(folder);
         }
-        app.ui.ai_setup.probe = Some(probe_with_comfy(dir));
+        let mut found = probe_with_comfy_at(dir, if old { "0.41.0" } else { "0.43.0" });
+        // An 8 GB card on the Models page: MOSS Image, which needs 0.42.0, is then listed first.
+        if screen == "models" {
+            found["vramGb"] = json!(8);
+        }
+        app.ui.ai_setup.probe = Some(found);
         super::open(app);
-        if screen == "location" {
+        if screen != "pc" {
             super::use_existing(app);
+        }
+        if old && screen != "pc" {
+            let folders = comfy_folders(dir);
+            super::connected(app, Some(json!({"folders": {}, "modelsFolders": folders, "url": "http://127.0.0.1:8000", "version": "0.41.0"})));
+        }
+        if screen == "models" {
+            app.ui.ai_setup.page = Page::Models;
         }
         return true;
     }

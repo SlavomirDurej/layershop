@@ -1,37 +1,37 @@
 {
   "version": 1,
-  "checked": "2026-10-24",
+  "checked": "2026-10-30",
   "comfy": {
-    "version": "0.42.1",
+    "version": "0.43.0",
     "python": "python_embeded/python.exe",
     "script": "ComfyUI/main.py",
     "assets": {
       "nvidia": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_nvidia.7z",
-        "size": 2018444114,
-        "sha256": "496afd18790ec685d99ebba2edf200d7371a29fbdd3a992bb0f4f52f244a6874",
-        "unpackedBytes": 4444541117,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.43.0/ComfyUI_windows_portable_nvidia.7z",
+        "size": 2039673203,
+        "sha256": "4928f88e6a8407c4574d4f7d92cfeba020d782edba4a076b7d107ecc98955e50",
+        "unpackedBytes": 4487647194,
         "longestPath": 160
       },
       "nvidia_cu126": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_nvidia_cu126.7z",
-        "size": 1910153206,
-        "sha256": "0506abc6563ea5928a052fe0bc0b32c2a063098558bd593fe39345a27f1e47fc",
-        "unpackedBytes": 5619088436,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.43.0/ComfyUI_windows_portable_nvidia_cu126.7z",
+        "size": 1930972692,
+        "sha256": "691dcb5295e73594c6530ff7f3fca8dbe7dfb45114b951328c5dd3df0fff6c6b",
+        "unpackedBytes": 5662503112,
         "longestPath": 160
       },
       "amd": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_amd.7z",
-        "size": 1636139353,
-        "sha256": "8af051e342de65e5ca2d9f43a5f0b11a6377da10bd96159dc41e8722cc5841fc",
-        "unpackedBytes": 6191685727,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.43.0/ComfyUI_windows_portable_amd.7z",
+        "size": 1656949572,
+        "sha256": "9a26c93ce43a6c277deff1d1a0fc69ca8e039430bad9b96134af560bb201e6cb",
+        "unpackedBytes": 6235103226,
         "longestPath": 191
       },
       "intel": {
-        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.42.1/ComfyUI_windows_portable_intel.7z",
-        "size": 1451207360,
-        "sha256": "a1e03d31ea364af2f80820461cd0c5ae5bbba4b562c023c1f43b2cf65541d4ab",
-        "unpackedBytes": 5351586975,
+        "url": "https://github.com/Comfy-Org/ComfyUI/releases/download/v0.43.0/ComfyUI_windows_portable_intel.7z",
+        "size": 1472205875,
+        "sha256": "50dd4f7fd8b08c066f29d0b4f9464fbf63014b413b4c00cf81dbe10362aa593c",
+        "unpackedBytes": 5394938794,
         "longestPath": 159
       }
     }
@@ -158,6 +158,11 @@
       "size": 9057782194,
       "sha256": "bf0b4fa2e41a25684dc9e9b256cd505564f02fed09be3da95ce024e653e2c52b"
     },
+    "diffusion_models/fibo2_dev_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Fibo-2.0/resolve/main/diffusion_models/fibo2_dev_int8_convrot.safetensors",
+      "size": 8408562474,
+      "sha256": "063dd397395809fd22234c6bd32932cfcb22619f4d2282bdbf1dc58c406fe325"
+    },
     "diffusion_models/z_image_turbo_bf16.safetensors": {
       "url": "https://huggingface.co/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
       "size": 12309866400,
@@ -180,7 +185,8 @@
       "page": "https://huggingface.co/Comfy-Org/Qwen-Image-2.1",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.37.0"
     },
     {
       "id": "z-image-turbo",
@@ -197,7 +203,8 @@
       "page": "https://huggingface.co/Comfy-Org/z_image_turbo",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.27.0"
     },
     {
       "id": "flux-3-klein",
@@ -218,7 +225,8 @@
       "page": "https://huggingface.co/black-forest-labs/flux-3-image-klein-comfy",
       "gated": true,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.41.0"
     },
     {
       "id": "moss-image",
@@ -235,7 +243,26 @@
       "page": "https://huggingface.co/Comfy-Org/MOSS-Image",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.42.0"
+    },
+    {
+      "id": "fibo-2-dev",
+      "name": "FIBO 2 Dev",
+      "about": "Edits a picture as you say and keeps the rest of it as it was. Makes pictures from a prompt too.",
+      "family": "fibo2",
+      "files": [
+        "diffusion_models/fibo2_dev_int8_convrot.safetensors",
+        "text_encoders/qwen3vl_4b_int8_convrot.safetensors",
+        "vae/flux2-vae.safetensors"
+      ],
+      "does": ["create", "edit"],
+      "licence": { "name": "CC BY-NC 4.0 (Bria)", "url": "https://huggingface.co/briaai/Fibo-2.0-dev", "commercial": false },
+      "page": "https://huggingface.co/Comfy-Org/Fibo-2.0",
+      "gated": false,
+      "minVramGb": null,
+      "testedVramGb": [24],
+      "minComfy": "0.43.0"
     },
     {
       "id": "krea-2-turbo",
@@ -252,7 +279,8 @@
       "page": "https://huggingface.co/Comfy-Org/Krea-2",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.27.0"
     },
     {
       "id": "ideogram-4",
@@ -274,7 +302,8 @@
       "page": "https://huggingface.co/Comfy-Org/Ideogram-4",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.24.0"
     },
     {
       "id": "hidream-o1",
@@ -293,7 +322,8 @@
       "page": "https://huggingface.co/Comfy-Org/HiDream-O1-Image",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.21.1"
     },
     {
       "id": "ernie-image-turbo",
@@ -310,7 +340,8 @@
       "page": "https://huggingface.co/Comfy-Org/ERNIE-Image",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.19.0"
     },
     {
       "id": "ming-image-0-1-design",
@@ -327,7 +358,8 @@
       "page": "https://huggingface.co/Comfy-Org/Ming-Image",
       "gated": false,
       "minVramGb": null,
-      "testedVramGb": [24]
+      "testedVramGb": [24],
+      "minComfy": "0.38.0"
     }
   ],
   "presets": {
@@ -343,7 +375,8 @@
       "ideogram-4",
       "hidream-o1",
       "ernie-image-turbo",
-      "ming-image-0-1-design"
+      "ming-image-0-1-design",
+      "fibo-2-dev"
     ]
   }
 }

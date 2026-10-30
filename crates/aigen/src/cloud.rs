@@ -580,7 +580,7 @@ mod tests {
     }
 
     fn source() -> Source {
-        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 1024, height: 1536, strength: 0.5, edit: false, references: Vec::new() }
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 1024, height: 1536, strength: 0.5, edit: false, references: Vec::new(), shown: Vec::new() }
     }
 
     #[test]
@@ -702,6 +702,7 @@ mod tests {
             strength: 1.0,
             edit: mask.is_empty(),
             references: references.iter().map(|r| r.to_vec()).collect(),
+            shown: Vec::new(),
         };
         Job { source: Some(source), ..job(1024, 768, false) }
     }

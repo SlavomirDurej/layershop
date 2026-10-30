@@ -50,6 +50,12 @@ pub struct Source {
     /// Edit: further pictures the instruction may refer to (PNG, any size), in the order the
     /// model numbers them after the image ([`Model::max_references`] at most).
     pub references: Vec<Vec<u8>>,
+    /// Masked edit: the picture the model is shown as image 1 when it isn't `image` (PNG, any
+    /// size), while `image` is still what it paints over. An outpainting shows it the picture
+    /// alone, without the empty margins it is to fill: an edit model keeps what it is shown
+    /// there, so margins of white, or of the picture's colours blurred, come back as they went.
+    /// Empty: `image`.
+    pub shown: Vec<u8>,
 }
 
 impl std::fmt::Debug for Source {
@@ -62,6 +68,7 @@ impl std::fmt::Debug for Source {
             .field("strength", &self.strength)
             .field("edit", &self.edit)
             .field("references", &self.references.len())
+            .field("shown_len", &self.shown.len())
             .finish()
     }
 }
@@ -252,11 +259,14 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
                 return Err(Error::Config(format!("{} takes {} reference pictures at most", model.name, model.max_references())));
             }
             (control.progress)(0.01, "Sending the picture to ComfyUI…");
-            // The picture, its mask when it has one, then the references.
+            // The picture, its mask when it has one, what the model is shown of it, then the
+            // references.
             let masked = !source.mask.is_empty();
-            let mut names = Vec::with_capacity(2 + source.references.len());
+            let shown = masked && !source.shown.is_empty();
+            let mut names = Vec::with_capacity(3 + source.references.len());
             let uploads = std::iter::once((comfy::UPLOAD_IMAGE.to_string(), &source.image))
                 .chain(masked.then(|| (comfy::UPLOAD_MASK.to_string(), &source.mask)))
+                .chain(shown.then(|| (comfy::UPLOAD_SHOWN.to_string(), &source.shown)))
                 .chain(source.references.iter().enumerate().map(|(i, bytes)| (comfy::upload_reference(i), bytes)));
             for (name, bytes) in uploads {
                 let r = transport.send(&comfy::upload_request(&base, &name, bytes)).map_err(unreachable)?;
@@ -265,12 +275,12 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
                     return Err(Error::Cancelled);
                 }
             }
-            let Some((image, rest)) = names.split_first() else { return Err(Error::BadResponse("ComfyUI did not take the picture".into())) };
-            let (mask, references) = match rest.split_first() {
-                Some((mask, references)) if masked => (Some(mask.as_str()), references),
-                _ => (None, rest),
-            };
-            comfy::edit_workflow(model, &render, &comfy::Edit { image, mask, references })?
+            let taken = |i: usize, sent: bool| names.get(i).filter(|_| sent).map(String::as_str);
+            let Some(image) = taken(0, true) else { return Err(Error::BadResponse("ComfyUI did not take the picture".into())) };
+            let mask = taken(1, masked);
+            let shown = taken(1 + usize::from(masked), shown);
+            let references = names.get(1 + usize::from(masked) + usize::from(shown.is_some())..).unwrap_or_default();
+            comfy::edit_workflow(model, &render, &comfy::Edit { image, mask, shown, references })?
         }
         Some(source) => {
             // The set-up is checked before anything is uploaded.
@@ -431,12 +441,18 @@ fn poll_comfy(
 }
 
 /// `e`, ComfyUI's refusal of `model`'s workflow, with what to do when the server is older than
-/// the model: MOSS Image came to ComfyUI after its 0.41.0 release, and an older server rejects
-/// its text encoder type.
+/// the model: MOSS Image came to ComfyUI with its 0.42.0 release and FIBO 2 with 0.43.0, and an
+/// older server rejects their text encoder type (and FIBO 2's prompt node).
 fn too_old(model: &Model, e: Error) -> Error {
+    use crate::model::Family;
+    // The engine the Local AI setup installed is updated by running the setup again.
+    const UPDATE: &str = "update ComfyUI (for the one File › Set Up Local AI installed, run that again: it installs the newer engine)";
     match e {
-        Error::Server(msg) if model.family == crate::model::Family::MossImage && msg.contains("moss_image") => {
-            Error::Server(format!("{msg}. This ComfyUI predates MOSS Image, which it supports since 2026-10-16 (after its 0.41.0 release): update ComfyUI"))
+        Error::Server(msg) if model.family == Family::MossImage && msg.contains("moss_image") => {
+            Error::Server(format!("{msg}. This ComfyUI predates MOSS Image, which it supports since its 0.42.0 release: {UPDATE}"))
+        }
+        Error::Server(msg) if model.family == Family::Fibo2 && msg.to_ascii_lowercase().contains("fibo2") => {
+            Error::Server(format!("{msg}. This ComfyUI predates FIBO 2, which it supports since its 0.43.0 release: {UPDATE}"))
         }
         e => e,
     }
@@ -672,7 +688,7 @@ mod tests {
     }
 
     fn source() -> Source {
-        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7, edit: false, references: Vec::new() }
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7, edit: false, references: Vec::new(), shown: Vec::new() }
     }
 
     #[test]
@@ -743,6 +759,45 @@ mod tests {
         let job = Job { source: Some(edit), ..job() };
         generate(&fake, &settings(), &Family::QwenImage21.preset(), "", &job, &control(&|| false)).unwrap();
         assert_eq!(fake.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 3);
+    }
+
+    #[test]
+    fn a_masked_edit_uploads_what_the_model_is_shown_before_the_references() {
+        const NAMES: [&str; 4] = ["photocraft_inpaint_image.png", "photocraft_inpaint_mask.png", "photocraft_edit_shown.png", "photocraft_edit_reference_1.png"];
+        let fake = Fake::new(|r, n| match r.url.as_str() {
+            u if u.ends_with("/upload/image") => {
+                let body = String::from_utf8_lossy(&r.body).into_owned();
+                assert!(body.contains(NAMES[n]) && body.contains(["IMAGEPNG", "MASKPNG", "SHOWN", "SHIRT"][n]), "{n}: {body}");
+                ok(&format!(r#"{{"name":"stored {n}.png","subfolder":""}}"#))
+            }
+            u if u.ends_with("/prompt") => {
+                let w = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].clone();
+                let nodes = w.as_object().unwrap();
+                let encode = nodes.values().find(|n| n["class_type"] == "TextEncodeQwenImage21").unwrap();
+                let loaded = |i: u32| nodes[encode["inputs"][format!("images.image_{i}")][0].as_str().unwrap()]["inputs"]["image"].clone();
+                assert_eq!((loaded(1), loaded(2)), ("stored 2.png".into(), "stored 3.png".into()), "{w}");
+                ok(r#"{"prompt_id":"abc"}"#)
+            }
+            u if u.ends_with("/history/abc") => ok(DONE),
+            u if u.contains("/view?") => ok("PNGDATA"),
+            u => panic!("unexpected request {u}"),
+        });
+        let edit = Source { edit: true, references: vec![b"SHIRT".to_vec()], shown: b"SHOWN".to_vec(), ..source() };
+        generate(&fake, &settings(), &Family::QwenImage21.preset(), "", &Job { source: Some(edit.clone()), ..job() }, &control(&|| false)).unwrap();
+        assert_eq!(fake.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 4);
+        // Without a mask it isn't sent: there is nothing to paint over.
+        let idle = Fake::new(|r, n| match r.url.as_str() {
+            u if u.ends_with("/upload/image") => {
+                assert!(!String::from_utf8_lossy(&r.body).contains("SHOWN"), "{n}");
+                ok(&format!(r#"{{"name":"stored {n}.png","subfolder":""}}"#))
+            }
+            u if u.ends_with("/prompt") => ok(r#"{"prompt_id":"abc"}"#),
+            u if u.ends_with("/history/abc") => ok(DONE),
+            _ => ok("PNGDATA"),
+        });
+        let unmasked = Source { mask: Vec::new(), ..edit };
+        generate(&idle, &settings(), &Family::QwenImage21.preset(), "", &Job { source: Some(unmasked), ..job() }, &control(&|| false)).unwrap();
+        assert_eq!(idle.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 2);
     }
 
     #[test]
@@ -905,6 +960,13 @@ mod tests {
         });
         let e = generate(&old, &settings(), &moss, "", &job, &control(&|| false)).unwrap_err().to_string();
         assert!(e.contains("Value not in list") && e.contains("update ComfyUI"), "{e}");
+        // FIBO 2's prompt node, which a server before 0.43.0 doesn't have.
+        let older = Fake::new(|r, _| {
+            assert!(r.url.ends_with("/prompt"));
+            ok(r#"{"error":{"type":"invalid_prompt","message":"Cannot execute because node TextEncodeFibo2 does not exist."},"node_errors":{}}"#)
+        });
+        let e = generate(&older, &settings(), &Family::Fibo2.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
+        assert!(e.contains("TextEncodeFibo2 does not exist") && e.contains("0.43.0") && e.contains("update ComfyUI") && e.contains("Set Up Local AI"), "{e}");
         // Another model's refusal is left as it is.
         let e = generate(&old, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
         assert!(!e.contains("update ComfyUI"), "{e}");

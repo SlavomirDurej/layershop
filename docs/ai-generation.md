@@ -72,7 +72,7 @@ generate.
 - **Change** changes the picture as the prompt says. With a selection only that part changes, and
   the rest stays exactly as it was; without one the whole picture is changed. It lists the models
   that edit or inpaint, and how the model is asked follows from the model:
-  - an **edit model** (Qwen Image 2.1, Ming Image, Qwen Image Edit, FLUX.2, the cloud models) is shown the
+  - an **edit model** (Qwen Image 2.1, FIBO 2, Ming Image, Qwen Image Edit, FLUX.2, the cloud models) is shown the
     picture and told what to change: "make the jacket red leather". See *Changing by
     instruction*.
   - an **inpainting model** (FLUX.1 Fill, Qwen Image with the InstantX ControlNet, or a model
@@ -252,8 +252,8 @@ and renders a new one from it; the result is a new layer, and the source is not 
   **Detail** a fifth more, for hands and fine detail. A cloud model's quality is in its settings.
 - **Alpha Channel** as on Create (cloud models that support it; an edit with Ming Image comes
   back opaque).
-- The models offered are the ones that edit: **Qwen Image 2.1**, **Ming Image** and **FLUX.2**
-  (which also generate), **Qwen Image Edit** 2509 / 2511 (which do nothing else; Scan Server adds them, with
+- The models offered are the ones that edit: **Qwen Image 2.1**, **FIBO 2**, **Ming Image** and
+  **FLUX.2** (which also generate), **Qwen Image Edit** 2509 / 2511 (which do nothing else; Scan Server adds them, with
   their four-step Lightning LoRA when the server has it), and cloud models (OpenAI's image edit
   endpoint, Gemini with the pictures attached).
 
@@ -319,7 +319,8 @@ dialog: the editor stays usable beside it.
   arrives wrong is fetched once more, then refused with both checksums in the message.
 - **Shared files are downloaded once** (Ideogram 4 uses Qwen Image 2.1's text encoder), and the
   totals count them once: Light 13.0 GB, Starter 18.5 GB, Recommended 44.1 GB, Everything
-  182.1 GB.
+  190.5 GB. FIBO 2 Dev (13.6 GB alone, 8.4 GB beside FLUX.3 Klein) is offered unticked: only
+  Everything has it.
 - **A small card starts on Light.** With less than 16 GB of video memory
   (`photocraft_aisetup::manifest::LIGHT_BELOW_VRAM_GB`), the Models step starts on the Light
   preset, MOSS Image (13.0 GB, Apache 2.0, ungated), and lists it first; larger cards and
@@ -370,7 +371,7 @@ dialog: the editor stays usable beside it.
     links to Hugging Face's settings, where the app is revoked. **How does this work?** links to
     <https://layershop.aardvarkstudios.net/hugging-face/>.
 - **The engine** is ComfyUI's official Windows portable build, pinned by version and sha256
-  (0.42.1 today, since 2026-10-20 for MOSS Image; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
+  (0.43.0 today, since 2026-10-30 for FIBO 2; 0.42.1 before, for MOSS Image; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
   builds, the last two untested). It is unpacked in pure Rust; the archive is refused whole if
   any entry would land outside the engine folder. It gets a port of its own (8190 or the next
   free one), so it never collides with a ComfyUI on 8188 or ComfyUI Desktop on 8000, and it is
@@ -382,6 +383,20 @@ dialog: the editor stays usable beside it.
   **Continue with My ComfyUI** or **Continue with New ComfyUI** (recommended); without one, Use
   my ComfyUI is a link in the footer. Its screen has **Install New ComfyUI Instead** to change
   one's mind.
+- **An older ComfyUI of one's own is told what won't run.** Each model of the setup names the
+  first ComfyUI release that runs it (`minComfy` in `crates/aisetup/manifest.json`, read from
+  ComfyUI's release tags: the newest of its architecture, its nodes and its weight format):
+  Ernie 0.19.0, HiDream O1 0.21.1, Ideogram 4 0.24.0, Z-Image Turbo and Krea 2 0.27.0 (int8
+  weights), Qwen Image 2.1 0.37.0, Ming Image 0.38.0, FLUX.3 Klein 0.41.0, MOSS Image 0.42.0,
+  FIBO 2 0.43.0. None may be later than the pinned engine (the manifest is refused otherwise).
+  The version is what the ComfyUI says when Connect reaches it (`ai.comfyModels` › `version`),
+  else, before that, what the first look found (the running one's `/system_stats`, or the
+  installed ComfyUI Desktop's `comfyui_version.py`; the first screen's row reads "ComfyUI 0.41.0
+  detected"). When it is older than the pinned engine, the Your ComfyUI screen says so under
+  the address, names the offered models it can't run with the version each needs, and says
+  other features may not work, to update ComfyUI or install a new one instead; the Models page
+  says "needs ComfyUI 0.43.0 (yours is 0.41.0)" beside each such model. They can still be
+  ticked: ComfyUI can be updated later. A version that can't be read claims nothing.
 - **Its models folder is filled in.** The folders a ComfyUI reads models from come from the
   ComfyUI itself when it runs (`GET /experiment/models`), else from how it is started: its base
   folder or `--models-directory`, and the extra model paths files it reads (ComfyUI Desktop
@@ -464,6 +479,7 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 | Z-Image Turbo | local | 8 steps, CFG 2, `res_multistep`, shift 3, 1 MP |
 | FLUX.3 Klein | local | 50 steps, CFG 3.5, 1 MP |
 | MOSS Image | local | 25 steps, CFG 2.5, `er_sde`, the selection's own size |
+| FIBO 2 Dev | local | 50 steps, CFG 5, structured negative, 1 MP |
 | Ideogram 4 | local | 28 steps, CFG 5, shift 5, 1 MP |
 | HiDream O1 | local | 40 steps, CFG 5, `dpmpp_2m_sde_gpu`, noise scale 8, its trained sizes; prompt written by Gemma 4, result refined by Z-Image Turbo at 0.35 |
 | Ernie Image Turbo | local | 8 steps, CFG 1, 2 MP |
@@ -525,6 +541,7 @@ loads. The workflows follow ComfyUI's own text-to-image templates and use only b
 | Qwen Image 2.1 | diffusion model, text encoder (`qwen_image`, Qwen 3 VL 8B), the 2.1 VAE | its own prompt node, KSampler; edges in multiples of 32 |
 | Ming Image (0.1 Design) | diffusion model, text encoder (`qwen_image`, Ling mini 2.0), its own VAE | FLUX shift by size, a guider without CFG, 12 steps; see below |
 | MOSS Image (SFT, Base) | diffusion model, text encoder (`moss_image`, Qwen 3.5 9B), the small FLUX.2 VAE | skip layer guidance (layer 22), KSampler; a layout prompt; see below |
+| FIBO 2 (Dev, Edit Turbo) | diffusion model, text encoder (`fibo2`, Qwen 3 VL 4B), the FLUX.2 VAE | its own prompt node, KSampler; see below |
 | FLUX.1 Fill (inpainting only) | diffusion model, two text encoders, VAE | Inpaint Model Conditioning, FLUX guidance, KSampler |
 | Qwen Image + InstantX ControlNet (inpainting only) | diffusion model, text encoder (`qwen_image`), VAE, ControlNet | ControlNet Inpainting Apply, AuraFlow shift, KSampler |
 | Checkpoint (SD / SDXL) | one checkpoint | KSampler |
@@ -649,9 +666,54 @@ rewriting the prompt as a caption), which can rewrite a layout away.
 
 MOSS Image came to ComfyUI on 2026-10-16, after its 0.41.0 release, so it needs a later
 ComfyUI (ComfyUI Desktop has it); an older server rejects its text encoder type, and the error
-says to update. The Local AI setup pins ComfyUI 0.42.1, which has it, and offers it (the Light
+says to update. The Local AI setup pins ComfyUI 0.43.0, which has it, and offers it (the Light
 preset on a small card); Scan Server finds it on a ComfyUI that has its files (`moss_image_sft_…` or
 `moss_image_base_…`, `qwen3.5_9b_w4a8_gptq…`, `flux2-vae_small…`).
+
+**FIBO 2** (from Bria) generates and edits with the same weights, in FLUX.2's latent space,
+with Qwen 3 VL 4B reading the prompt. It follows ComfyUI's FIBO 2 Edit templates:
+
+- **Dev** (`fibo2_dev_…`, the full model): 50 steps, CFG 5, `euler` / `simple`, and the
+  template's negative prompt, a structured caption of what to steer away from (plastic skin,
+  blur, oversaturation).
+- **Edit Turbo** (`fibo2_edit_turbo_…`, distilled from Dev, and despite its name a
+  text-to-image model too): 4 steps, CFG 1, no negative prompt. Scan Server sets this up from
+  the file name.
+- **An edit is lined up with the picture pixel for pixel.** Its prompt node scales a single
+  picture to the result's size; PhotoCraft asks for the picture's own size, so nothing is
+  cropped. With references, each is taken at the size the model was trained at.
+- **A picture it is given is worked on at one megapixel at most**, whatever the render size is
+  raised to: it was trained there, and above it follows the instruction less (the template's
+  notes). A render size of 0 is not capped.
+- **Plain instructions work.** The model also reads Bria's structured captions (VGL, JSON), and
+  a prompt that is one goes in as written.
+
+Not run: the template's prompt enhancer (Qwen 3 VL 8B rewriting the instruction as a structured
+caption, about 3000 tokens with Bria's long system prompt); an instruction as typed was
+followed without it. Tried against ComfyUI 0.43.0 (RTX 4090, `fibo2_dev_int8_convrot`): asked
+to add a red deer to the meadow picture FLUX.3 Klein failed on, it drew one well-formed stag
+and kept the rest of the picture as it was, in 50 s (54 s with the models loading); a red wool
+hat put on a rock in 50 s; text to image at 1216 × 832 in 24 s. With a selection it doesn't
+know where the selection is, as no edit model does: "add a rowing boat in the grass" with the
+bottom-right corner selected drew the boat mid-picture, outside the selection, so nothing
+changed; "… in the bottom right of the picture" put it inside, with the rest untouched. In an
+outpainting it is shown the whole area, empty margins included, not the picture alone as Qwen
+Image 2.1 is: it lines its result up with what it is shown, and the picture alone would be
+stretched over the whole. It paints the margins all the same: the meadow shrunk to the middle
+of a white canvas, margins selected, "extend the photo outwards" came back with sky, trees and
+meadow all round and no seam, in 54 s (one seed).
+
+FIBO 2 came to ComfyUI with its 0.43.0 release: an older server rejects its prompt node, and
+the error says to update. The Local AI setup pins 0.43.0 and offers FIBO 2 Dev unticked (only
+the Everything preset has it), from Comfy-Org's repack (`Comfy-Org/Fibo-2.0`, which ComfyUI's
+template downloads): Bria's own repository holds only the diffusers weights, behind a form. Its
+row says "non-commercial use only" and links Bria's page. The weights are licensed CC BY-NC 4.0
+(non-commercial use unless you have an agreement with Bria). Scan Server finds it on a ComfyUI
+that has its files (`fibo2_…`, `qwen3vl_4b_…`, `flux2-vae…`).
+
+It loads the int8 Qwen 3 VL 4B (`qwen3vl_4b_int8_convrot`, FLUX.3 Klein's), not the template's
+bf16 one: the deer and the hat edits came out the same at the same speed (52 s, 50 s), and the
+setup then downloads 8.9 GB less.
 
 **Custom workflow.** For anything the built-in graphs don't cover (LoRA stacks, prompt
 enhancers, custom nodes): in ComfyUI use **Workflow › Export (API)** and paste the JSON. Put

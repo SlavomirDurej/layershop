@@ -407,7 +407,11 @@ fn connect_finds_the_other_local_port() {
             if !r.url.starts_with(self.0) {
                 return Err(photocraft_aigen::Error::Network("connection refused".into()));
             }
-            let body: &[u8] = if r.url.ends_with("/system_stats") { br#"{"system":{"argv":["main.py","--port","8000"]}}"# } else { br#"["a.safetensors"]"# };
+            let body: &[u8] = if r.url.ends_with("/system_stats") {
+                br#"{"system":{"argv":["main.py","--port","8000"],"comfyui_version":"0.41.0"}}"#
+            } else {
+                br#"["a.safetensors"]"#
+            };
             Ok(Response { status: 200, body: body.to_vec() })
         }
     }
@@ -416,6 +420,8 @@ fn connect_finds_the_other_local_port() {
     let r = s.execute("ai.comfyModels", json!({"url": "http://127.0.0.1:8188", "start": false, "findPort": true})).unwrap();
     assert_eq!(r["url"], "http://127.0.0.1:8000");
     assert_eq!(r["folders"]["vae"], json!(["a.safetensors"]));
+    // And which ComfyUI it is, for the Local AI setup to say what it is too old for.
+    assert_eq!(r["version"], "0.41.0");
     // Already right: kept.
     let r = s.execute("ai.comfyModels", json!({"url": "http://127.0.0.1:8000/", "start": false, "findPort": true})).unwrap();
     assert_eq!(r["url"], "http://127.0.0.1:8000");
@@ -1090,10 +1096,127 @@ fn an_edit_of_all_the_picture_is_not_masked() {
     let canvas = Rect::new(0, 0, 64, 48);
     s.execute("select.rect", json!({"x": 0, "y": 0, "width": 32, "height": 48})).unwrap();
     let selection = s.active().unwrap().doc.selection.clone().unwrap();
-    let mask = photocraft_codecs::decode(&edit_mask(&selection, canvas, canvas, (640, 480)).unwrap()).unwrap();
+    let opaque = vec![1.0; 640 * 480];
+    let mask = photocraft_codecs::decode(&edit_mask(&selection, canvas, canvas, (640, 480), &opaque).unwrap()).unwrap();
     let alpha = |x: usize, y: usize| mask.data()[(y * 640 + x) * 4 + 3];
     assert_eq!((alpha(0, 240), alpha(100, 0), alpha(100, 479), alpha(500, 240)), (0, 0, 0, 255));
     assert!(alpha(318, 240) > 0, "faded at its inner edge");
+}
+
+#[test]
+fn an_outpainting_edit_paints_up_to_the_picture_it_extends() {
+    // A picture in the middle of the canvas, everything around it selected (Select Inverse).
+    // The empty sides are sent as white: the mask must not fade in there, or the model keeps
+    // that white along the picture's edges and the new layer shows it as strips.
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    let canvas = Rect::new(0, 0, 64, 48);
+    s.execute("select.rect", json!({"x": 16, "y": 0, "width": 32, "height": 48})).unwrap();
+    s.execute("select.inverse", json!({})).unwrap();
+    let selection = s.active().unwrap().doc.selection.clone().unwrap();
+    let (w, h) = (640usize, 480usize);
+    // Opaque over the picture (x 160..480 at this size), empty beside it.
+    let opacity: Vec<f32> = (0..w * h).map(|i| if (160..480).contains(&(i % w)) { 1.0 } else { 0.0 }).collect();
+    let mask = photocraft_codecs::decode(&edit_mask(&selection, canvas, canvas, (640, 480), &opacity).unwrap()).unwrap();
+    let alpha = |x: usize, y: usize| mask.data()[(y * w + x) * 4 + 3];
+    // Right up to the picture, on both sides, the model paints it all.
+    for x in [100, 150, 154, 486, 490, 540] {
+        assert_eq!(alpha(x, 240), 0, "x {x}");
+    }
+    // The picture itself is kept.
+    assert_eq!(alpha(320, 240), 255);
+    // Had the sides been opaque, the mask would fade in from the picture's edge.
+    let opaque = vec![1.0; w * h];
+    let faded = photocraft_codecs::decode(&edit_mask(&selection, canvas, canvas, (640, 480), &opaque).unwrap()).unwrap();
+    assert!(faded.data()[(240 * w + 150) * 4 + 3] > 0, "faded where there is a picture to keep");
+}
+
+#[test]
+fn an_outpainting_is_sent_the_picture_carried_out_not_white() {
+    // A picture in the middle of a 64 × 32 area: sky blue over sand, nothing beside it. An edit
+    // model keeps the white it is shown in an empty part, so the part it paints is sent the
+    // picture's own colours going on; what it doesn't paint stays white.
+    let (w, h) = (64usize, 32usize);
+    let (sky, sand) = ([0.3, 0.6, 0.9], [0.9, 0.8, 0.6]);
+    let pixels: Vec<[f32; 4]> = (0..w * h)
+        .map(|i| {
+            let [r, g, b] = if i / w < h / 2 { sky } else { sand };
+            if (16..48).contains(&(i % w)) { [r, g, b, 1.0] } else { [0.0; 4] }
+        })
+        .collect();
+    let left_free: Vec<f32> = (0..w * h).map(|i| if i % w < 16 { 1.0 } else { 0.0 }).collect();
+    let png = photocraft_codecs::decode(&opaque_png(&pixels, (w as u32, h as u32), &left_free).unwrap()).unwrap();
+    let rgb = |x: usize, y: usize| {
+        let i = (y * w + x) * png.layout().channels();
+        [0, 1, 2].map(|c| png.data()[i + c])
+    };
+    let near = |px: [u8; 3], c: [f32; 3]| px.iter().zip(c).all(|(p, c)| (f32::from(*p) / 255.0 - c).abs() < 0.12);
+    // The free side goes on as sky above and sand below, out to the area's edge.
+    assert!(near(rgb(2, 2), sky) && near(rgb(2, 29), sand), "{:?} {:?}", rgb(2, 2), rgb(2, 29));
+    // The picture is sent as it is, and the side the model keeps stays white.
+    assert!(near(rgb(30, 2), sky) && near(rgb(30, 29), sand));
+    assert_eq!((rgb(60, 2), rgb(60, 29)), ([255; 3], [255; 3]));
+    // Nothing free: white around the picture as before. No picture at all: white.
+    let plain = photocraft_codecs::decode(&opaque_png(&pixels, (w as u32, h as u32), &[]).unwrap()).unwrap();
+    assert_eq!(&plain.data()[..3], &[255, 255, 255]);
+    let blank = photocraft_codecs::decode(&opaque_png(&vec![[0.0; 4]; w * h], (w as u32, h as u32), &left_free).unwrap()).unwrap();
+    assert!(blank.data().iter().all(|v| *v == 255));
+}
+
+#[test]
+fn an_outpainting_model_is_shown_the_picture_alone() {
+    // A red picture 80 × 64 at x 40 of a 160 × 80 area, nothing around it.
+    let (w, h) = (160usize, 80usize);
+    let inside = |i: usize| (40..120).contains(&(i % w)) && (8..72).contains(&(i / w));
+    let pixels: Vec<[f32; 4]> = (0..w * h).map(|i| if inside(i) { [1.0, 0.0, 0.0, 1.0] } else { [0.0; 4] }).collect();
+    let size = (w as u32, h as u32);
+    let all: Vec<f32> = vec![1.0; w * h];
+    let shown = |pixels: &[[f32; 4]], free: &[f32]| shown_png(pixels, &opaque_rgb(pixels, size, free).unwrap(), size, free).unwrap();
+    // The empty part is to be painted: the model is shown the picture's bounds, nothing else.
+    let png = photocraft_codecs::decode(&shown(&pixels, &all)).unwrap();
+    assert_eq!((png.width(), png.height()), (80, 64));
+    let c = png.layout().channels();
+    assert!(png.data().chunks_exact(c).all(|p| p[..3] == [255, 0, 0]));
+    // Nothing empty to paint, a picture too small to show alone, or none at all: the whole area.
+    let over_the_picture: Vec<f32> = (0..w * h).map(|i| if inside(i) { 1.0 } else { 0.0 }).collect();
+    assert!(shown(&pixels, &over_the_picture).is_empty());
+    assert!(shown(&pixels, &[]).is_empty());
+    let small: Vec<[f32; 4]> = (0..w * h).map(|i| if (40..100).contains(&(i % w)) && inside(i) { pixels[i] } else { [0.0; 4] }).collect();
+    assert!(shown(&small, &all).is_empty());
+    assert!(shown(&vec![[0.0; 4]; w * h], &all).is_empty());
+    // Bytes that don't match the pixels are not cut from.
+    assert!(shown_png(&pixels, &[0; 5], size, &all).unwrap().is_empty());
+}
+
+#[test]
+fn an_outpainting_edit_sends_the_picture_alone_to_be_shown() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    // A red picture down the middle of an empty layer; all but it selected.
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("select.rect", json!({"x": 16, "y": 0, "width": 32, "height": 48})).unwrap();
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    s.execute("select.inverse", json!({})).unwrap();
+    let layer = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("ai.generate", json!({"prompt": "a beach", "mode": "imgEdit", "source": {"layer": layer}, "seed": 1})).unwrap();
+    // The model paints over the whole area but is shown the red half of it, as image 1.
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    let shown = fake.uploaded("photocraft_edit_shown.png");
+    assert_eq!(shown.height(), image.height());
+    assert!((shown.width() as f32 / image.width() as f32 - 0.5).abs() < 0.02, "{} of {}", shown.width(), image.width());
+    let c = shown.layout().channels();
+    let middle = (shown.height() as usize / 2 * shown.width() as usize + shown.width() as usize / 2) * c;
+    assert_eq!(&shown.data()[middle..middle + 3], &[255, 0, 0]);
+    let queued = fake.queued();
+    let nodes = queued["prompt"].as_object().unwrap();
+    let loaded = |class: &str, input: &str| {
+        let n = nodes.values().find(|n| n["class_type"] == class).unwrap();
+        nodes[n["inputs"][input][0].as_str().unwrap()]["inputs"]["image"].clone()
+    };
+    assert_eq!(
+        (loaded("TextEncodeQwenImage21", "images.image_1"), loaded("VAEEncode", "pixels")),
+        (json!("photocraft_edit_shown.png"), json!("photocraft_inpaint_image.png"))
+    );
 }
 
 #[test]

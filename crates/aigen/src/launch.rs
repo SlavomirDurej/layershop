@@ -112,7 +112,7 @@ pub fn startup_cause(lines: &[&str]) -> Option<String> {
 }
 
 /// The version the ComfyUI at `base` says it is (`/system_stats`).
-fn server_version(transport: &dyn Transport, base: &str) -> Option<String> {
+pub fn server_version(transport: &dyn Transport, base: &str) -> Option<String> {
     let r = transport.send(&Request::get(format!("{base}/system_stats")).timeout(3)).ok().filter(|r| r.ok())?;
     let v: serde_json::Value = serde_json::from_slice(&r.body).ok()?;
     v.pointer("/system/comfyui_version").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty() && s.len() <= 32).map(str::to_string)
@@ -327,6 +327,14 @@ pub fn version_in(text: &str) -> Option<String> {
     (!value.is_empty() && value.len() <= 32).then(|| value.to_string())
 }
 
+/// The version of the ComfyUI `launch` starts, as its source folder says (the
+/// `comfyui_version.py` beside its script). `read` reads a small text file.
+pub fn version_of(launch: &Launch, read: &dyn Fn(&std::path::Path) -> Option<String>) -> Option<String> {
+    let script = split_args(&launch.args).into_iter().next().filter(|s| !s.trim().is_empty())?;
+    let file = std::path::Path::new(launch.folder.trim()).join(script).with_file_name("comfyui_version.py");
+    read(&file).and_then(|t| version_in(&t))
+}
+
 /// The first of `candidates` that holds `script` (relative to it) and, when the running server
 /// said its `version`, is that version: a stale copy beside the real one is never taken for it.
 /// `read` reads a small text file.
@@ -344,6 +352,23 @@ pub fn pick_folder(
         version.is_none_or(|want| found.as_deref() == Some(want))
     };
     candidates.iter().filter(holds).find(same).cloned()
+}
+
+/// Is ComfyUI `version` `min` or later? An empty `min` asks for nothing; a `version` that isn't
+/// one (empty, or no digits) is not known to be late enough.
+pub fn at_least(version: &str, min: &str) -> bool {
+    if min.trim().is_empty() {
+        return true;
+    }
+    if !version.trim().starts_with(|c: char| c.is_ascii_digit()) {
+        return false;
+    }
+    let (mut have, mut want) = (version_parts(version), version_parts(min));
+    // `0.43` is `0.43.0`.
+    let len = have.len().max(want.len());
+    have.resize(len, 0);
+    want.resize(len, 0);
+    have >= want
 }
 
 /// `0.42.1` as numbers, for ordering versions (a part's leading digits; `0.42.1+9` is `0.42.1`).
@@ -942,6 +967,11 @@ mod native {
         std::fs::metadata(p).ok().filter(|m| m.is_file() && m.len() <= 1 << 20).and_then(|_| std::fs::read_to_string(p).ok())
     }
 
+    /// [`super::version_of`] on this computer's disk.
+    pub fn version_here(launch: &Launch) -> Option<String> {
+        super::version_of(launch, &small_text)
+    }
+
     /// [`models_folders`] on this computer's disk.
     pub fn models_folders_here(launch: &Launch) -> Vec<String> {
         // Settings files, not databases: anything big is not one.
@@ -1075,7 +1105,7 @@ mod native {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{find_installed, find_running, models_folders_here};
+pub use native::{find_installed, find_running, models_folders_here, version_here};
 
 #[cfg(test)]
 mod tests {
@@ -1233,6 +1263,18 @@ mod tests {
         assert_eq!(newer_copy(stale, venv, "main.py", &installed, &read, &is_file), None);
         assert_eq!(newer_copy(stale, venv, script, &[], &read, &is_file), None);
         assert!(version_parts("0.42.1+9") > version_parts("0.42.0") && version_parts("0.10") > version_parts("0.9.9"));
+        // A ComfyUI late enough for a model: the same version, a later one, nothing asked.
+        assert!(at_least("0.43.0", "0.43.0") && at_least("0.43.2", "0.43") && at_least("0.44", "0.43.1") && at_least("1.0.0", "0.43.0"));
+        assert!(!at_least("0.42.5", "0.43.0") && !at_least("0.9.9", "0.10") && !at_least("0.43", "0.43.1"));
+        assert!(at_least("", "") && at_least("0.1", " "));
+        // What isn't a version is not known to be late enough.
+        assert!(!at_least("", "0.43.0") && !at_least("nightly", "0.43.0") && !at_least("v0.43.0", "0.43.0"));
+        // An installed ComfyUI's version is read beside the script it starts.
+        let desktop = Launch { python: "/d/.venv/python".into(), folder: "/installs/ComfyUI".into(), args: "ComfyUI/main.py --port 8000".into() };
+        let read = |p: &std::path::Path| (p == std::path::Path::new("/installs/ComfyUI/ComfyUI/comfyui_version.py")).then(|| "__version__ = \"0.41.0\"\n".to_string());
+        assert_eq!(version_of(&desktop, &read).as_deref(), Some("0.41.0"));
+        assert_eq!(version_of(&Launch { args: String::new(), ..desktop.clone() }, &read), None);
+        assert_eq!(version_of(&Launch { folder: "/elsewhere".into(), ..desktop }, &read), None);
         assert!(version_parts("") == version_parts("x"));
     }
 

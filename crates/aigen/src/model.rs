@@ -94,6 +94,9 @@ pub enum Family {
     /// MOSS Image (SFT, Base): text to image from a layout prompt, JSON that places what it
     /// describes in boxes on the canvas ([`crate::comfy`] writes one for a typed prompt).
     MossImage,
+    /// FIBO 2 (Bria): one model that generates and edits, in FLUX.2's latent space, with its own
+    /// prompt node. It reads plain prompts and instructions, and Bria's structured captions (VGL).
+    Fibo2,
     /// FLUX.1 Fill (Fill Dev, OneReward): BFL's inpainting model. It is given the picture and
     /// the mask as conditioning, so it knows where it paints; it can't generate from text alone.
     Flux1Fill,
@@ -110,7 +113,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 18] = [
+    pub const ALL: [Family; 19] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux3,
@@ -124,6 +127,7 @@ impl Family {
         Family::QwenImage21,
         Family::MingImage,
         Family::MossImage,
+        Family::Fibo2,
         Family::Flux1Fill,
         Family::QwenInpaint,
         Family::QwenEdit,
@@ -146,6 +150,7 @@ impl Family {
             Family::QwenImage21 => "qwenImage21",
             Family::MingImage => "mingImage",
             Family::MossImage => "mossImage",
+            Family::Fibo2 => "fibo2",
             Family::Flux1Fill => "flux1Fill",
             Family::QwenInpaint => "qwenInpaint",
             Family::QwenEdit => "qwenEdit",
@@ -173,6 +178,7 @@ impl Family {
             Family::QwenImage21 => "Qwen Image 2.1",
             Family::MingImage => "Ming Image",
             Family::MossImage => "MOSS Image",
+            Family::Fibo2 => "FIBO 2",
             Family::Flux1Fill => "FLUX.1 Fill (inpainting)",
             Family::QwenInpaint => "Qwen Image + InstantX ControlNet (inpainting)",
             Family::QwenEdit => "Qwen Image Edit (editing)",
@@ -236,8 +242,15 @@ impl Family {
     /// a picture doubles what it attends to: on an RTX 4090 an edit at four megapixels took 45 s
     /// against 17 s at two, and one stalled for ten minutes encoding the picture beside the
     /// 18 GB text encoder. 0 (the selection's own size) is the user's to choose.
+    ///
+    /// FIBO 2 was trained at about one megapixel: above it the model's coordinates stay anchored
+    /// top left, and the instruction is followed less (its ComfyUI template's notes).
     pub fn source_megapixels(self, megapixels: f64) -> f64 {
-        if self == Family::MingImage && megapixels > 2.0 { 2.0 } else { megapixels }
+        match self {
+            Family::MingImage if megapixels > 2.0 => 2.0,
+            Family::Fibo2 if megapixels > 1.0 => 1.0,
+            _ => megapixels,
+        }
     }
 
     /// Has a distilled-guidance control (FLUX), separate from CFG.
@@ -278,14 +291,15 @@ impl Family {
 
     /// Edits a picture following an instruction (the panel's Edit tab): the edit models, and
     /// the models that generate and edit with the same weights (Qwen Image 2.1, Ming Image,
-    /// FLUX.2). They are shown the picture whole, as a reference, and render a new one from it.
+    /// FLUX.2, FIBO 2). They are shown the picture whole, as a reference, and render a new one
+    /// from it.
     ///
     /// Not FLUX.3 Klein, though its templates edit: asked to add a deer to a meadow (2026-10-16,
     /// ComfyUI 0.39, the template's graph) it drew heads growing from chests, fused bodies and
     /// rocks turned half into animals at CFG 3.5, and at the template's CFG 1 no deer or a
     /// shapeless one.
     pub fn edits(self) -> bool {
-        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2)
+        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2)
     }
 
     /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
@@ -442,6 +456,23 @@ impl Family {
                 megapixels: 0.0,
                 ..base
             },
+            // ComfyUI's FIBO 2 Edit (Dev) template, without its prompt enhancer: the full,
+            // undistilled model at Bria's 50 steps and CFG 5, with the template's structured
+            // negative. A plain instruction ("add a red deer in the meadow") was followed without
+            // the enhancer's rewriting, the rest of the picture kept pixel for pixel (2026-10-30,
+            // RTX 4090: 50 s for an edit at one megapixel, 24 s for a text to image). The int8
+            // text encoder, not the template's bf16 one: the same edits came out the same at the
+            // same speed, and FLUX.3 Klein downloads it already.
+            Family::Fibo2 => Model {
+                name: "FIBO 2 Dev".into(),
+                unet: "fibo2_dev_int8_convrot.safetensors".into(),
+                clip: "qwen3vl_4b_int8_convrot.safetensors".into(),
+                vae: "flux2-vae.safetensors".into(),
+                steps: 50,
+                cfg: 5.0,
+                negative_prompt: FIBO2_NEGATIVE.into(),
+                ..base
+            },
             Family::MingImage => Model {
                 name: "Ming Image 0.1 Design".into(),
                 unet: "ming_image_0.1_design_int8_convrot.safetensors".into(),
@@ -496,6 +527,9 @@ impl Family {
 pub const MOSS_MEGAPIXELS: (f64, f64) = (0.25, 4.0);
 /// MOSS Image's negative prompt, as its authors recommend it.
 pub const MOSS_NEGATIVE: &str = "nsfw, worst quality, bad anatomy, watermark, jpeg artifact";
+/// FIBO 2 Dev's negative prompt, a structured caption of what to steer away from (ComfyUI's
+/// FIBO 2 Edit template). Only CFG above 1 reads it: the distilled Turbo model runs without.
+pub const FIBO2_NEGATIVE: &str = r#"{"short_description":"","objects":[{"description":"the main subject","texture":"smooth, featureless, plastic-like, airbrushed, no fine surface detail","appearance_details":"soft blurred edges, simplified shapes, no fine detail","skin_tone_and_texture":"waxy airbrushed skin, poreless, plastic smooth"}],"background_setting":"a plain seamless studio backdrop, perfectly smooth gradient, blurred and featureless, no visible texture","lighting":{},"aesthetics":{"artifacts":["oversaturated colours","neon colour cast","overexposed highlights","lens flare","slight blur","motion blur","haze"]},"photographic_characteristics":{"depth_of_field":"shallow, heavy bokeh obscuring most of the frame","focus":"soft, slightly out of focus, lacking fine texture"},"style_medium":"","context":"","artistic_style":""}"#;
 
 /// The most reference pictures an edit is given besides the one it edits (`ai.generate`'s
 /// `references`, the Edit tab's rows).
@@ -714,6 +748,9 @@ impl Model {
             // Added 2026-10-18 (not in that comparison): renders at the selection's own size and
             // places its subject to fill it.
             Some(local(Family::MossImage, "MOSS Image")),
+            // Added 2026-10-30 (not in that comparison): edits as well as it generates, beside
+            // Qwen Image 2.1, which stays the recommended edit model ([`preferred_edit`]).
+            Some(local(Family::Fibo2, "FIBO 2 Dev")),
             Some(local(Family::Ideogram4, "Ideogram 4")),
             // With its prompt written by Gemma 4 and the result refined by Z-Image Turbo.
             Some(Model {
@@ -755,12 +792,13 @@ impl Model {
             "flux-2",
             "grok-imagine",
         ];
-        const LOCAL: [Family; 18] = [
+        const LOCAL: [Family; 19] = [
             Family::QwenImage21,
             Family::Krea2,
             Family::ZImage,
             Family::Flux3,
             Family::MossImage,
+            Family::Fibo2,
             Family::Flux2,
             Family::Ideogram4,
             Family::HidreamO1,
@@ -949,7 +987,7 @@ mod tests {
     #[test]
     fn editing_follows_the_architecture() {
         for f in Family::ALL {
-            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2);
+            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2);
             assert_eq!((f.preset().can_edit(), f.edits()), (want, want), "{f:?}");
             assert!(f.max_references() <= MAX_REFERENCES && (!f.edit_only() || f.edits()), "{f:?}");
         }
@@ -992,6 +1030,7 @@ mod tests {
                 "z-image-turbo",
                 "flux-3-klein",
                 "moss-image",
+                "fibo-2-dev",
                 "ideogram-4",
                 "hidream-o1",
                 "ernie-image-turbo",
@@ -1015,7 +1054,8 @@ mod tests {
         without.models.iter_mut().filter(|m| m.family == Family::QwenImage21).for_each(|m| m.enabled = false);
         assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("gpt-image-2-5-sunburst"));
         without.show_cloud = false;
-        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("ming-image-0-1-design"));
+        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("fibo-2-dev"));
+        assert_eq!(s.edit_model("fibo-2-dev").map(|m| m.id.as_str()), Some("fibo-2-dev"));
         assert_eq!(preferred_edit([]), None);
         // Nothing that edits: the first listed, which refuses in words.
         without.models.retain(|m| m.provider.is_local() && !m.can_edit());
