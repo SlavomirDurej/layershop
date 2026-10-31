@@ -127,9 +127,10 @@ each with what goes in it, and the model is told both.
   choice of tab is kept: pick a model that takes regions and they are back as they were.
 - **On the canvas.** While the tab is in front the boxes are drawn over the picture: an outline in
   the region's colour, its fill, a label with its depth and type, and its description. Opening
-  the tab gives the pointer to them (it picks the Move tool): drag on empty canvas to draw a
-  box (shown as you drag, in the colour it will get, with its size), drag a box to move it,
-  drag a corner of the selected box to resize it. A new box opens
+  the tab gives the pointer to them (it picks the Move tool): click a box to select it, drag
+  the selected box to move it and its corners to resize it. A drag anywhere else draws a new
+  box (shown as you drag, in the colour it will get, with its size), over other boxes too, so
+  a canvas they already cover still takes one. A new box opens
   for typing at once; double-click a box to type its description again (Esc or Ctrl+Enter
   ends). Picking any other tool hands the pointer back to it; the boxes stay in view until the
   tab is left.

@@ -31,7 +31,7 @@ const ROW_HEIGHT: f32 = 24.0;
 
 const HELP: &str = "Placing things with regions\n\n\
 1. Describe the whole picture in the Scene box.\n\
-2. Drag on the canvas to draw a box, then type what goes in it (double-click a box to type again).\n\
+2. Drag on the canvas to draw a box, then type what goes in it (double-click a box to type again). Click a box to select it; drag the selected box to move it, its corners to resize it. A drag anywhere else draws a new box, over other boxes too.\n\
 3. The pencil sets a region's type (Object, Character, Text), colour and fill. A Text region renders the exact words you give it.\n\
 4. Drag rows to set depth: the top row is in front.\n\n\
 Boxes guide the model, they don't clip it, and very small boxes may be dropped. Where boxes overlap, say how in the description: \u{201c}cat asleep on the armchair cushion\u{201d}.";
@@ -57,9 +57,11 @@ pub struct RegionsUi {
 /// A pointer gesture on the canvas, in document pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
+    /// `hit`: the box pressed on, which a click (no drag) selects.
     New {
         start: [f64; 2],
         cur: [f64; 2],
+        hit: Option<u32>,
     },
     Move {
         id: u32,
@@ -534,7 +536,7 @@ fn rect_from(a: [f64; 2], b: [f64; 2]) -> photocraft_geom::Rect {
 /// The rect a gesture leaves `drag`'s region with, kept inside `canvas` (a move keeps its size).
 fn dragged(drag: &Drag, canvas: photocraft_geom::Rect) -> Option<(Option<u32>, photocraft_geom::Rect)> {
     match *drag {
-        Drag::New { start, cur } => Some((None, rect_from(start, cur).intersect(&canvas))),
+        Drag::New { start, cur, .. } => Some((None, rect_from(start, cur).intersect(&canvas))),
         Drag::Move { id, start, cur, rect } => {
             let dx = (cur[0] - start[0]).round().clamp(-1e7, 1e7) as i32;
             let dy = (cur[1] - start[1]).round().clamp(-1e7, 1e7) as i32;
@@ -594,18 +596,18 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
         ToolEvent::Down { x, y, .. } => {
             let st = &mut app.ui.ai_gen.regions;
             st.typing = None;
-            // A corner of the selected box resizes it; a press in a box (the front one first)
-            // selects and moves it; anywhere else draws a new one.
+            // A corner of the selected box resizes it, a press in it moves it; anywhere else a
+            // drag draws a new box, over other boxes too (so a canvas full of them still takes
+            // one), and a click selects the box under it (the front one first).
             let selected = app.ui.ai_gen.region.and_then(|id| regions.iter().find(|r| r.id == id));
             let reach = f64::from(HANDLE_REACH) / zoom;
             let grabbed = selected.and_then(|r| corner_near(r.rect, x, y, reach).map(|c| (r, c)));
             let drag = if let Some((r, corner)) = grabbed {
                 Drag::Resize { id: r.id, corner, start: [x, y], cur: [x, y], rect: r.rect }
-            } else if let Some(r) = regions.iter().find(|r| contains(r.rect, x, y)) {
-                app.ui.ai_gen.region = Some(r.id);
+            } else if let Some(r) = selected.filter(|r| contains(r.rect, x, y)) {
                 Drag::Move { id: r.id, start: [x, y], cur: [x, y], rect: r.rect }
             } else {
-                Drag::New { start: [x, y], cur: [x, y] }
+                Drag::New { start: [x, y], cur: [x, y], hit: regions.iter().find(|r| contains(r.rect, x, y)).map(|r| r.id) }
             };
             app.ui.ai_gen.regions.drag = Some(drag);
         }
@@ -618,13 +620,13 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
             let (Drag::New { cur, .. } | Drag::Move { cur, .. } | Drag::Resize { cur, .. }) = &mut drag;
             *cur = [x, y];
             match (drag, dragged(&drag, canvas)) {
-                (Drag::New { start, cur }, Some((_, rect))) => {
+                (Drag::New { start, cur, hit }, Some((_, rect))) => {
                     let far = (cur[0] - start[0]).abs().max((cur[1] - start[1]).abs()) * zoom >= f64::from(MIN_DRAG);
                     if far && rect.width() >= 1 && rect.height() >= 1 {
                         add(app, rect);
                     } else {
-                        // A click on empty canvas: nothing selected.
-                        app.ui.ai_gen.region = None;
+                        // A click: the box under it selected, or none on empty canvas.
+                        app.ui.ai_gen.region = hit;
                     }
                 }
                 (Drag::Move { rect: before, .. } | Drag::Resize { rect: before, .. }, Some((Some(id), rect))) if rect != before => {
@@ -738,7 +740,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
         let icon = match sel.and_then(|r| corner_at(screen_rect(xf, r.rect), p)) {
             Some([-1, -1] | [1, 1]) => egui::CursorIcon::ResizeNwSe,
             Some(_) => egui::CursorIcon::ResizeNeSw,
-            None if regions.iter().any(|r| contains(r.rect, d[0], d[1])) => egui::CursorIcon::Move,
+            None if sel.is_some_and(|r| contains(r.rect, d[0], d[1])) => egui::CursorIcon::Move,
             None => egui::CursorIcon::Crosshair,
         };
         ui.ctx().set_cursor_icon(icon);

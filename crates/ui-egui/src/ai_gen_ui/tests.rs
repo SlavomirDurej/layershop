@@ -1985,7 +1985,9 @@ fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
     assert_eq!((app.ui.ai_gen.region, app.ui.ai_gen.regions.typing), (Some(id), Some(id)));
     gesture(&mut app, [150.0, 80.0], [150.5, 80.0]);
     assert_eq!((rect(&app).len(), app.ui.ai_gen.region), (1, None));
-    // Dragging it moves it (kept on the canvas); its corner, once selected, resizes it.
+    // A click selects it; dragging it then moves it (kept on the canvas), and its corner resizes it.
+    gesture(&mut app, [20.0, 20.0], [20.0, 20.0]);
+    assert_eq!(app.ui.ai_gen.region, Some(id));
     gesture(&mut app, [20.0, 20.0], [30.0, 25.0]);
     assert_eq!(rect(&app), [photocraft_geom::Rect::new(20, 15, 70, 45)]);
     gesture(&mut app, [70.0, 45.0], [300.0, 60.0]);
@@ -2023,6 +2025,43 @@ fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
     // The state reads and loads like the rest of the panel's.
     let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
     assert_eq!(state["createTask"], "regions");
+}
+
+#[test]
+fn a_drag_on_a_box_that_is_not_selected_draws_a_new_one() {
+    use crate::canvas::ToolEvent;
+    let mut app = app();
+    add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+    app.ui.ai_gen.model = "moss".into();
+    app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    draw_panel(&mut app);
+    assert!(regions::editing(&app));
+    // Two boxes cover the whole canvas: no empty place is left to start a new one from.
+    let full = |x0: i32, x1: i32| json!([x0, 0, x1 - x0, 100]);
+    app.run("ai.setRegions", json!({"regions": [{"rect": full(0, 100)}, {"rect": full(100, 200)}]})).unwrap();
+    let rects = |app: &PhotocraftApp| app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.rect).collect::<Vec<_>>();
+    let ids = app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.id).collect::<Vec<_>>();
+    let gesture = |app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2]| {
+        assert!(regions::pointer(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Up { x: to[0], y: to[1] }));
+    };
+    // A click selects the box under it.
+    app.ui.ai_gen.region = None;
+    gesture(&mut app, [150.0, 50.0], [150.0, 50.0]);
+    assert_eq!((app.ui.ai_gen.region, rects(&app).len()), (Some(ids[1]), 2));
+    // A drag on the other one, not selected, draws a new box over it and leaves it where it is.
+    gesture(&mut app, [20.0, 20.0], [60.0, 50.0]);
+    let now = rects(&app);
+    assert_eq!(now.len(), 3, "{now:?}");
+    assert!(now.contains(&photocraft_geom::Rect::new(20, 20, 60, 50)) && now.contains(&photocraft_geom::Rect::new(0, 0, 100, 100)), "{now:?}");
+    let new = app.ui.ai_gen.region.unwrap();
+    assert!(!ids.contains(&new));
+    // The selected box still moves.
+    gesture(&mut app, [30.0, 30.0], [40.0, 35.0]);
+    assert!(rects(&app).contains(&photocraft_geom::Rect::new(30, 25, 70, 55)), "{:?}", rects(&app));
 }
 
 #[test]
