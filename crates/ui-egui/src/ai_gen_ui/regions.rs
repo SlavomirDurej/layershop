@@ -57,10 +57,24 @@ pub struct RegionsUi {
 /// A pointer gesture on the canvas, in document pixels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Drag {
-    New { start: [f64; 2], cur: [f64; 2] },
-    Move { id: u32, start: [f64; 2], cur: [f64; 2], rect: photocraft_geom::Rect },
+    New {
+        start: [f64; 2],
+        cur: [f64; 2],
+    },
+    Move {
+        id: u32,
+        start: [f64; 2],
+        cur: [f64; 2],
+        rect: photocraft_geom::Rect,
+    },
     /// `corner`: which edges move, −1 the left or top, +1 the right or bottom.
-    Resize { id: u32, corner: [i8; 2], start: [f64; 2], cur: [f64; 2], rect: photocraft_geom::Rect },
+    Resize {
+        id: u32,
+        corner: [i8; 2],
+        start: [f64; 2],
+        cur: [f64; 2],
+        rect: photocraft_geom::Rect,
+    },
 }
 
 /// Is the Regions tab in front, with a model that takes regions?
@@ -211,7 +225,15 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
                     let canvas = app.session.active().map(|d| d.doc.bounds()).unwrap_or_default();
                     let third = |v: u32| i32::try_from(v / 3).unwrap_or(1).max(1);
                     let (w, h) = (third(canvas.width()), third(canvas.height()));
-                    add(app, photocraft_geom::Rect::new(canvas.x0.saturating_add(w), canvas.y0.saturating_add(h), canvas.x0.saturating_add(2 * w), canvas.y0.saturating_add(2 * h)));
+                    add(
+                        app,
+                        photocraft_geom::Rect::new(
+                            canvas.x0.saturating_add(w),
+                            canvas.y0.saturating_add(h),
+                            canvas.x0.saturating_add(2 * w),
+                            canvas.y0.saturating_add(2 * h),
+                        ),
+                    );
                     arm(app);
                 }
                 let clear = ui.add_enabled_ui(!regions.is_empty(), |ui| crate::icons::button(ui, "trash", 22.0, false, tr("Clear all regions"))).inner;
@@ -236,6 +258,9 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
     let row_drag = app.ui.ai_gen.regions.row_drag;
     let mut line_at: Option<f32> = None;
     let mut tops: Vec<(f32, f32)> = Vec::with_capacity(regions.len());
+    // The open editor and its row's pencil: a press anywhere else closes it.
+    let mut editor_rect = None;
+    let mut pencil_rect = None;
     for (i, r) in regions.iter().enumerate() {
         let mut edit = false;
         let mut delete = false;
@@ -256,7 +281,13 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             let chip = Rect::from_min_size(rect.left_center() + vec2(4.0, -9.0), vec2(18.0, 18.0));
             ui.painter().rect_filled(chip, 3.0, color32(r.color).gamma_multiply(fade));
             ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, format!("{}", i + 1), crate::theme::medium(11.0), Color32::from_gray(20));
-            crate::icons::paint(ui, Rect::from_min_size(chip.right_top() + vec2(5.0, 1.0), vec2(16.0, 16.0)), kind_icon(r.kind), 13.0, t.text_dim.gamma_multiply(fade));
+            crate::icons::paint(
+                ui,
+                Rect::from_min_size(chip.right_top() + vec2(5.0, 1.0), vec2(16.0, 16.0)),
+                kind_icon(r.kind),
+                13.0,
+                t.text_dim.gamma_multiply(fade),
+            );
             let label = match r.kind {
                 AiRegionKind::Text => format!("\u{201c}{}\u{201d} {}", r.text, r.caption),
                 _ if r.caption.is_empty() => tr("Untitled region").to_string(),
@@ -281,7 +312,12 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             let tip = if busy { "" } else { "Drag to change depth: the top row is in front" };
             let _ = resp.on_hover_text(tr(tip));
             ui.add_enabled_ui(!busy, |ui| {
-                edit = crate::icons::button(ui, "pencil", 22.0, app.ui.ai_gen.regions.editor == Some(r.id), tr("Edit region")).clicked();
+                let open = app.ui.ai_gen.regions.editor == Some(r.id);
+                let pencil = crate::icons::button(ui, "pencil", 22.0, open, tr("Edit region"));
+                if open {
+                    pencil_rect = Some(pencil.rect);
+                }
+                edit = pencil.clicked();
                 delete = crate::icons::button(ui, "trash", 22.0, false, tr("Remove region")).clicked();
             });
             rect
@@ -299,7 +335,16 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             return;
         }
         if app.ui.ai_gen.regions.editor == Some(r.id) {
-            editor(app, ui, r, busy);
+            editor_rect = Some(editor(app, ui, r, busy, width));
+        }
+    }
+    // The editor belongs to the selected region: it closes when another is selected, or on a
+    // press outside it (not in a colour popup it opened, nor on its pencil, which toggles it).
+    if let Some(id) = app.ui.ai_gen.regions.editor {
+        let press = ui.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
+        let outside = press.is_some_and(|p| !editor_rect.is_some_and(|r: Rect| r.contains(p)) && !pencil_rect.is_some_and(|r: Rect| r.contains(p)));
+        if app.ui.ai_gen.region != Some(id) || (outside && !egui::Popup::is_any_open(ui.ctx())) {
+            app.ui.ai_gen.regions.editor = None;
         }
     }
     // Where a dragged row would go: before the first row whose middle is below the pointer.
@@ -339,78 +384,126 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
     }
 }
 
-/// A region's properties, under its row: type, the words of a text region, colour and fill.
-fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool) {
+/// A region's properties, under its row, one per line: type, the words of a text region,
+/// colour, fill. `width` is the section's. Returns the editor's rect.
+fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, width: f32) -> Rect {
     let t = Tokens::get(ui.ctx());
     let label_w = 52.0;
     let label = |ui: &mut egui::Ui, text: &str| {
         let (rect, _) = ui.allocate_exact_size(vec2(label_w, 22.0), egui::Sense::hover());
         ui.painter().text(rect.left_center(), egui::Align2::LEFT_CENTER, tr(text), egui::FontId::proportional(11.5), t.text_dim);
     };
-    let frame = egui::Frame::new().fill(t.field).stroke(Stroke::new(1.0, t.field_border)).corner_radius(t.radius_sm).inner_margin(8.0);
+    let margin = 8.0;
+    let frame = egui::Frame::new().fill(t.field).stroke(Stroke::new(1.0, t.field_border)).corner_radius(t.radius_sm).inner_margin(margin);
+    // Indented under the row's chip, and inside the section: never wider than the panel.
+    let indent = 24.0;
+    let inner_w = (width - indent - 2.0 * margin - 2.0).max(120.0);
     ui.add_enabled_ui(!busy, |ui| {
         ui.horizontal(|ui| {
-            ui.add_space(24.0);
-            frame.show(ui, |ui| {
-                ui.set_width((ui.available_width() - 4.0).max(120.0));
-                ui.spacing_mut().item_spacing.y = 6.0;
-                ui.horizontal(|ui| {
-                    label(ui, "Type");
-                    for k in AiRegionKind::ALL {
-                        if ui.selectable_label(r.kind == k, tr(kind_label(k))).clicked() && r.kind != k {
-                            let mut fields = json!({"kind": k.key()});
-                            if k == AiRegionKind::Text && r.text.trim().is_empty() {
-                                fields["text"] = json!("TITLE");
+            ui.add_space(indent);
+            frame
+                .show(ui, |ui| {
+                    ui.vertical(|ui| {
+                        ui.set_width(inner_w);
+                        ui.spacing_mut().item_spacing.y = 6.0;
+                        ui.horizontal(|ui| {
+                            label(ui, "Type");
+                            // Three equal cells in the width left, drawn here so no label can widen
+                            // them (and the panel) past it.
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let cell = ((ui.available_width() - 4.0) / 3.0).max(30.0);
+                            for k in AiRegionKind::ALL {
+                                let (rect, resp) = ui.allocate_exact_size(vec2(cell, 22.0), egui::Sense::click());
+                                let on = r.kind == k;
+                                if on {
+                                    ui.painter().rect_filled(rect, t.radius_sm, t.accent);
+                                } else if resp.hovered() {
+                                    ui.painter().rect_filled(rect, t.radius_sm, t.hover);
+                                }
+                                let color = if on { Color32::WHITE } else { t.text };
+                                let galley = ui.painter().layout_no_wrap(tr(kind_label(k)).to_string(), egui::FontId::proportional(11.5), color);
+                                let at = egui::pos2((rect.center().x - galley.size().x / 2.0).max(rect.left() + 2.0), rect.center().y - galley.size().y / 2.0);
+                                ui.painter().with_clip_rect(rect.intersect(ui.clip_rect())).galley(at, galley, color);
+                                if resp.clicked() && !on {
+                                    let mut fields = json!({"kind": k.key()});
+                                    if k == AiRegionKind::Text && r.text.trim().is_empty() {
+                                        fields["text"] = json!("TITLE");
+                                    }
+                                    set(app, r.id, fields, None);
+                                }
                             }
-                            set(app, r.id, fields, None);
+                        });
+                        if r.kind == AiRegionKind::Text {
+                            ui.horizontal(|ui| {
+                                label(ui, "Words");
+                                let mut words = r.text.clone();
+                                let field = ui.add(
+                                    egui::TextEdit::singleline(&mut words)
+                                        .id(egui::Id::unique("ai-region-words").with(r.id))
+                                        .hint_text(tr("The exact words"))
+                                        .desired_width(f32::INFINITY),
+                                );
+                                if field.changed() {
+                                    set(app, r.id, json!({"text": words}), Some(format!("ai-region-words-{}", r.id)));
+                                }
+                            });
                         }
-                    }
-                });
-                if r.kind == AiRegionKind::Text {
-                    ui.horizontal(|ui| {
-                        label(ui, "Words");
-                        let mut words = r.text.clone();
-                        let field = ui.add(egui::TextEdit::singleline(&mut words).id(egui::Id::unique("ai-region-words").with(r.id)).hint_text(tr("The exact words")).desired_width(f32::INFINITY));
-                        if field.changed() {
-                            set(app, r.id, json!({"text": words}), Some(format!("ai-region-words-{}", r.id)));
-                        }
+                        ui.horizontal(|ui| {
+                            label(ui, "Colour");
+                            // The swatches and the picker share the width left (8 + 1 cells).
+                            ui.spacing_mut().item_spacing.x = 3.0;
+                            let swatch = ((ui.available_width() - 9.0 * 3.0) / 9.0).clamp(10.0, 16.0);
+                            for c in photocraft_engine::ai_regions_cmds::PALETTE {
+                                let (rect, resp) = ui.allocate_exact_size(vec2(swatch, swatch), egui::Sense::click());
+                                ui.painter().rect_filled(rect, 3.0, color32(c));
+                                if c == r.color {
+                                    ui.painter().rect_stroke(rect.expand(2.0), 4.0, Stroke::new(1.5, t.text), egui::StrokeKind::Inside);
+                                }
+                                if resp.on_hover_text(tr("Outline colour")).clicked() && c != r.color {
+                                    set(app, r.id, json!({"color": hex(c)}), None);
+                                }
+                            }
+                            let mut custom = r.color;
+                            ui.spacing_mut().interact_size = vec2(swatch + 4.0, swatch);
+                            if egui::color_picker::color_edit_button_srgb(ui, &mut custom).changed() && custom != r.color {
+                                set(app, r.id, json!({"color": hex(custom)}), Some(format!("ai-region-colour-{}", r.id)));
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            let mut fill = r.fill;
+                            let (rect, _) = ui.allocate_exact_size(vec2(label_w, 22.0), egui::Sense::hover());
+                            let check = ui.put(rect, |ui: &mut egui::Ui| crate::widgets::checkbox(ui, &mut fill, tr("Fill")));
+                            if check.changed() {
+                                set(app, r.id, json!({"fill": fill}), None);
+                            }
+                            // The percentage on the right, the slider in between (it takes the width left).
+                            ui.add_enabled_ui(r.fill, |ui| {
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    let pct = RichText::new(format!("{}%", (r.fill_opacity * 100.0).round())).color(t.text_dim).size(11.5);
+                                    ui.add_sized(vec2(34.0, 18.0), egui::Label::new(pct));
+                                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                        let mut v = r.fill_opacity.clamp(0.0, 1.0) * 100.0;
+                                        let resp = crate::widgets::slider(ui, &mut v, 0.0..=60.0, None).on_hover_text(tr("Fill opacity"));
+                                        if resp.changed() {
+                                            set(
+                                                app,
+                                                r.id,
+                                                json!({"fillOpacity": (f64::from(v.round()) / 100.0).clamp(0.0, 1.0)}),
+                                                Some(format!("ai-region-fill-{}", r.id)),
+                                            );
+                                        }
+                                    });
+                                });
+                            });
+                        });
                     });
-                }
-                ui.horizontal(|ui| {
-                    label(ui, "Colour");
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    for c in photocraft_engine::ai_regions_cmds::PALETTE {
-                        let (rect, resp) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::click());
-                        ui.painter().rect_filled(rect, 3.0, color32(c));
-                        if c == r.color {
-                            ui.painter().rect_stroke(rect.expand(2.0), 4.0, Stroke::new(1.5, t.text), egui::StrokeKind::Inside);
-                        }
-                        if resp.on_hover_text(tr("Outline colour")).clicked() && c != r.color {
-                            set(app, r.id, json!({"color": hex(c)}), None);
-                        }
-                    }
-                    let mut custom = r.color;
-                    if egui::color_picker::color_edit_button_srgb(ui, &mut custom).changed() && custom != r.color {
-                        set(app, r.id, json!({"color": hex(custom)}), Some(format!("ai-region-colour-{}", r.id)));
-                    }
-                });
-                ui.horizontal(|ui| {
-                    let mut fill = r.fill;
-                    if crate::widgets::checkbox(ui, &mut fill, tr("Fill")).changed() {
-                        set(app, r.id, json!({"fill": fill}), None);
-                    }
-                    ui.add_enabled_ui(r.fill, |ui| {
-                        let mut v = r.fill_opacity.clamp(0.0, 1.0) * 100.0;
-                        let resp = crate::widgets::slider(ui, &mut v, 0.0..=60.0, None).on_hover_text(tr("Fill opacity"));
-                        if resp.changed() {
-                            set(app, r.id, json!({"fillOpacity": (f64::from(v.round()) / 100.0).clamp(0.0, 1.0)}), Some(format!("ai-region-fill-{}", r.id)));
-                        }
-                        ui.label(RichText::new(format!("{}%", (r.fill_opacity * 100.0).round())).color(t.text_dim).size(11.5));
-                    });
-                });
-            });
-        });
-    });
+                })
+                .response
+                .rect
+        })
+        .inner
+    })
+    .inner
 }
 
 fn hex(c: [u8; 3]) -> String {
@@ -423,8 +516,10 @@ pub(super) fn rows(app: &PhotocraftApp) -> usize {
         return 0;
     }
     let n = app.session.active().map_or(0, |d| d.doc.ai_regions.len());
-    // The heading, the rows (or the hint), an open editor.
-    1 + n.max(1) + if app.ui.ai_gen.regions.editor.is_some() { 4 } else { 0 }
+    // The heading, the rows (or the hint), an open editor (type, colour, fill and its margins;
+    // the words too for a text region).
+    let words = |id: u32| app.session.active().is_some_and(|d| d.doc.ai_regions.iter().any(|r| r.id == id && r.kind == AiRegionKind::Text));
+    1 + n.max(1) + app.ui.ai_gen.regions.editor.map_or(0, |id| 4 + usize::from(words(id)))
 }
 
 fn screen_rect(xf: &ViewXform, r: photocraft_geom::Rect) -> Rect {
@@ -611,11 +706,22 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
             }
         }
     }
-    // A box being drawn.
+    // A box being drawn: in the colour it will get (the engine's next one), dashed light over
+    // dark so it shows on any picture, white canvas included, with its size.
     if let Some((None, rect)) = moving {
         let sr = screen_rect(xf, rect);
+        let next = regions.iter().map(|r| r.id).max().unwrap_or(0).saturating_add(1);
+        let palette = photocraft_engine::ai_regions_cmds::PALETTE;
+        let color = color32(palette.get(next as usize % palette.len()).copied().unwrap_or(palette[0]));
+        painter.rect_filled(sr, 0.0, color.gamma_multiply(0.18));
+        painter.rect_stroke(sr, 0.0, Stroke::new(1.0, Color32::from_black_alpha(200)), egui::StrokeKind::Outside);
+        painter.rect_stroke(sr, 0.0, Stroke::new(1.5, color), egui::StrokeKind::Inside);
         let pts = [sr.left_top(), sr.right_top(), sr.right_bottom(), sr.left_bottom(), sr.left_top()];
-        painter.add(egui::Shape::dashed_line(&pts, Stroke::new(1.5, Color32::WHITE), 4.0, 3.0));
+        painter.add(egui::Shape::dashed_line(&pts, Stroke::new(1.0, Color32::WHITE), 4.0, 4.0));
+        let size = painter.layout_no_wrap(format!("{} \u{d7} {} px", rect.width(), rect.height()), egui::FontId::proportional(11.0), Color32::WHITE);
+        let tag = Rect::from_min_size(sr.right_bottom() + vec2(6.0, 6.0), size.size() + vec2(10.0, 6.0));
+        painter.rect_filled(tag, 3.0, Color32::from_black_alpha(200));
+        painter.galley(tag.min + vec2(5.0, 3.0), size, Color32::WHITE);
     }
     if let Some(id) = typing
         && let Some(r) = regions.iter().find(|r| r.id == id)
@@ -652,25 +758,28 @@ fn type_caption(app: &mut PhotocraftApp, ctx: &egui::Context, xf: &ViewXform, r:
     let mut done = false;
     let mut changed = false;
     egui::Area::new(egui::Id::unique("ai-region-typing").with(r.id)).order(egui::Order::Foreground).fixed_pos(sr.left_top() + vec2(5.0, 5.0)).show(ctx, |ui| {
-        egui::Frame::new().fill(Color32::from_black_alpha(225)).stroke(Stroke::new(1.0, color32(r.color))).corner_radius(3.0).inner_margin(4.0).show(ui, |ui| {
-            let field = ui.add(
-                egui::TextEdit::multiline(&mut caption)
-                    .id(egui::Id::unique("ai-region-caption").with(r.id))
-                    .hint_text(tr("Describe what goes here"))
-                    .desired_width(width)
-                    .desired_rows(2)
-                    .frame(egui::Frame::NONE)
-                    .text_color(Color32::from_gray(245)),
-            );
-            if focus {
-                field.request_focus();
-            }
-            changed = field.changed();
-            let keys = ui.input(|i| i.key_pressed(egui::Key::Escape) || (i.key_pressed(egui::Key::Enter) && i.modifiers.command));
-            done = keys || (field.lost_focus() && !focus);
-            let hint = egui::RichText::new(tr("Esc or Ctrl+Enter when done")).size(10.5).color(t.text_faint);
-            ui.label(hint);
-        });
+        egui::Frame::new().fill(Color32::from_black_alpha(225)).stroke(Stroke::new(1.0, color32(r.color))).corner_radius(3.0).inner_margin(4.0).show(
+            ui,
+            |ui| {
+                let field = ui.add(
+                    egui::TextEdit::multiline(&mut caption)
+                        .id(egui::Id::unique("ai-region-caption").with(r.id))
+                        .hint_text(tr("Describe what goes here"))
+                        .desired_width(width)
+                        .desired_rows(2)
+                        .frame(egui::Frame::NONE)
+                        .text_color(Color32::from_gray(245)),
+                );
+                if focus {
+                    field.request_focus();
+                }
+                changed = field.changed();
+                let keys = ui.input(|i| i.key_pressed(egui::Key::Escape) || (i.key_pressed(egui::Key::Enter) && i.modifiers.command));
+                done = keys || (field.lost_focus() && !focus);
+                let hint = egui::RichText::new(tr("Esc or Ctrl+Enter when done")).size(10.5).color(t.text_faint);
+                ui.label(hint);
+            },
+        );
     });
     if changed {
         set(app, r.id, json!({"caption": caption}), Some(format!("ai-region-caption-{}", r.id)));

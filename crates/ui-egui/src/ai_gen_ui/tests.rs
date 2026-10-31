@@ -2024,3 +2024,42 @@ fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
     let state = serde_json::to_value(&app.ui.ai_gen).unwrap();
     assert_eq!(state["createTask"], "regions");
 }
+
+#[test]
+fn the_region_editor_follows_the_selection_and_closes_on_a_press_outside_it() {
+    let mut app = app();
+    add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+    app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    app.ui.ai_gen.model = "moss".into();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    app.run("ai.setRegions", json!({"regions": [{"rect": [0, 0, 50, 50]}, {"rect": [60, 0, 50, 50]}]})).unwrap();
+    let ids: Vec<u32> = app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.id).collect();
+    let open = |app: &mut PhotocraftApp| {
+        app.ui.ai_gen.region = Some(ids[0]);
+        app.ui.ai_gen.regions.editor = Some(ids[0]);
+    };
+    open(&mut app);
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.regions.editor, Some(ids[0]), "open while its region is selected");
+    // Selecting another region (in the list or on the canvas) closes it.
+    app.ui.ai_gen.region = Some(ids[1]);
+    draw_panel(&mut app);
+    assert_eq!(app.ui.ai_gen.regions.editor, None);
+    // So does a press anywhere outside it.
+    open(&mut app);
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    let far = egui::pos2(5000.0, 5000.0);
+    let press = egui::RawInput {
+        events: vec![
+            egui::Event::PointerMoved(far),
+            egui::Event::PointerButton { pos: far, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() },
+        ],
+        ..Default::default()
+    };
+    ctx.run_ui(Default::default(), |ui| panel(&mut app, ui, true)).textures_delta.clear();
+    assert_eq!(app.ui.ai_gen.regions.editor, Some(ids[0]), "no press, still open");
+    ctx.run_ui(press, |ui| panel(&mut app, ui, true)).textures_delta.clear();
+    assert_eq!(app.ui.ai_gen.regions.editor, None);
+}

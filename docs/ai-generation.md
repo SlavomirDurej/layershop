@@ -128,7 +128,8 @@ each with what goes in it, and the model is told both.
 - **On the canvas.** While the tab is in front the boxes are drawn over the picture: an outline in
   the region's colour, its fill, a label with its depth and type, and its description. Opening
   the tab gives the pointer to them (it picks the Move tool): drag on empty canvas to draw a
-  box, drag a box to move it, drag a corner of the selected box to resize it. A new box opens
+  box (shown as you drag, in the colour it will get, with its size), drag a box to move it,
+  drag a corner of the selected box to resize it. A new box opens
   for typing at once; double-click a box to type its description again (Esc or Ctrl+Enter
   ends). Picking any other tool hands the pointer back to it; the boxes stay in view until the
   tab is left.
@@ -136,7 +137,8 @@ each with what goes in it, and the model is told both.
   Under it, **Regions (N)**: **?** says how it works, then copy, clear all and add. Each row
   is a region, front to back: drag a row up or down to change its depth (the top row is in
   front), the pencil opens its **Type** (Object, Character, Text), the **Words** of a text
-  region, its **Colour** and its **Fill** and fill opacity, and the bin removes it.
+  region, its **Colour** and its **Fill** and fill opacity, one per line under the row (it
+  closes when another region is selected or on a click outside it), and the bin removes it.
 - **Copy** puts on the clipboard exactly what Generate would send the chosen model: its layout
   format, for the selection's bounds (or the canvas).
 - **Kept with the document.** The regions are saved in `.pcraft` files and in PSD and PSB files
