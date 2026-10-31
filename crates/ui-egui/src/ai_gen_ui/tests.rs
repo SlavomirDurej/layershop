@@ -1120,13 +1120,13 @@ fn editing_from_the_panel_picks_a_source_references_and_a_quality() {
     // The layer keeps its own document's layer as one (what a saved file keeps).
     assert_eq!(made.references, [photocraft_doc::GenerationSource::Document(doc).into(), photocraft_doc::GenerationSource::Layer(background).into()]);
     assert_eq!((made.quality, made.prompt.as_str()), (GenerationQuality::Draft, "make the sky stormy"));
-    // Load Prompt puts the edit's prompt back, and only that: the tab, model, source,
+    // Load Prompt puts the edit's prompt and model back, and only those: the tab, source,
     // references and quality stay as they are.
     let layer = r["layer"].as_u64().unwrap();
     (app.ui.ai_gen.prompt, app.ui.ai_gen.mode, app.ui.ai_gen.edit_model) = ("something else".into(), Mode::Create, "z".into());
     let kept = app.ui.ai_gen.clone();
     assert!(load_prompt(&mut app, layer));
-    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "make the sky stormy".into(), ..kept });
+    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "make the sky stormy".into(), edit_model: "q21".into(), ..kept });
     (app.ui.ai_gen.mode, app.ui.ai_gen.edit_model) = (Mode::Edit, "q21".into());
     draw_panel(&mut app);
     // A cloud model edits too (its quality is its own setting); so does every tab's draw.
@@ -1400,27 +1400,28 @@ fn generated_layers(app: &mut PhotocraftApp) -> [u64; 4] {
 }
 
 #[test]
-fn load_prompt_puts_a_generated_layers_prompt_in_the_box_and_nothing_else() {
+fn load_prompt_puts_a_generated_layers_prompt_and_model_back_and_nothing_else() {
     let mut app = app();
     let [background, txt, img, inpaint] = generated_layers(&mut app);
-    // Something else in the panel: only its prompt is replaced.
+    // Something else in the panel: only its prompt and model are replaced.
     let other = AiGenUi { mode: Mode::Create, model: "z".into(), edit_model: "z".into(), prompt: "something else".into(), ..Default::default() };
     app.ui.ai_gen = other.clone();
     // A layer that was not generated, and one that is not there, change nothing.
     assert!(!load_prompt(&mut app, background));
     assert!(!load_prompt(&mut app, u64::MAX));
     assert_eq!(app.ui.ai_gen, other);
-    // A fill, a restyle and a creation: the prompt, and the tab, task, model and settings stay.
-    for (layer, prompt) in [(inpaint, "a pond"), (img, "as a watercolour"), (txt, "a green field")] {
+    // A fill (Change's model), a restyle and a creation (the other): the prompt and the model it
+    // was made with; the tab, task and settings stay.
+    for (layer, prompt, model, edit_model) in [(inpaint, "a pond", "z", "z2"), (img, "as a watercolour", "z", "z2"), (txt, "a green field", "z2", "z2")] {
         assert!(load_prompt(&mut app, layer));
-        assert_eq!(app.ui.ai_gen, AiGenUi { prompt: prompt.into(), ..other.clone() });
+        assert_eq!(app.ui.ai_gen, AiGenUi { prompt: prompt.into(), model: model.into(), edit_model: edit_model.into(), ..other.clone() });
     }
     draw_panel(&mut app);
-    assert_eq!((app.ui.ai_gen.mode, app.ui.ai_gen.model.as_str()), (Mode::Create, "z"));
+    assert_eq!((app.ui.ai_gen.mode, app.ui.ai_gen.model.as_str()), (Mode::Create, "z2"));
     // The command does the same, for the active layer when none is named.
     app.ui.ai_gen = other.clone();
     assert_eq!(menu(&mut app, LOAD_PROMPT, &json!({"layer": inpaint})), Some(Ok(json!({"loaded": true}))));
-    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "a pond".into(), ..other.clone() });
+    assert_eq!(app.ui.ai_gen, AiGenUi { prompt: "a pond".into(), edit_model: "z2".into(), ..other.clone() });
     app.run("layer.select", json!({"layer": txt})).unwrap();
     assert_eq!(menu(&mut app, LOAD_PROMPT, &json!({})), Some(Ok(json!({"loaded": true}))));
     assert_eq!(app.ui.ai_gen.prompt, "a green field");
@@ -1438,7 +1439,10 @@ mod clicks {
     use super::*;
     use crate::layer_row_ui::recorded;
     use egui::{Modifiers, PointerButton, Pos2, vec2};
-    use egui_kittest::{Harness, kittest::Queryable};
+    use egui_kittest::{
+        Harness,
+        kittest::{NodeT, Queryable},
+    };
 
     fn click(h: &mut Harness<'_, PhotocraftApp>, at: Pos2) {
         h.hover_at(at);
@@ -1450,9 +1454,41 @@ mod clicks {
     }
 
     #[test]
+    fn a_double_click_on_a_region_row_opens_its_editor() {
+        let mut app = app();
+        add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+        app.ui.ai_gen.model = "moss".into();
+        app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+        let regions = json!([{"caption": "a cat", "rect": [0, 0, 50, 50]}, {"caption": "an armchair", "rect": [60, 0, 50, 50]}]);
+        app.run("ai.setRegions", json!({"regions": regions})).unwrap();
+        let armchair = app.session.active().unwrap().doc.ai_regions[1].id;
+        app.ui.ai_gen.create_task = CreateTask::Regions;
+        menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+        // Tall enough for the rows to show without scrolling.
+        app.ui.dock.heights.insert(crate::dock::Group::Properties, 760.0);
+        // Steps a frame apart: the default quarter second would part the two clicks of a
+        // double-click by more than egui's 0.3 s.
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            app
+        });
+        h.run_steps(8);
+        let at = h.get_by_label("an armchair").rect().center();
+        // One click selects the row; two open its editor, and it stays open.
+        click(&mut h, at);
+        assert_eq!((h.state().ui.ai_gen.region, h.state().ui.ai_gen.regions.editor), (Some(armchair), None));
+        h.run_steps(30);
+        for pressed in [true, false, true, false] {
+            h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+            h.run_steps(1);
+        }
+        h.run_steps(3);
+        assert_eq!(h.state().ui.ai_gen.regions.editor, Some(armchair));
+    }
+
+    #[test]
     fn clicking_a_generated_layer_leaves_the_panel_and_load_prompt_loads_its_prompt() {
-        const LOAD: &str = "Load the prompt the selected layer was generated with";
-        const NOTHING: &str = "Load prompt: select a layer made with AI Gen";
+        const LOAD: &str = "Load from layer";
         let mut app = app();
         let [background, _, _, inpaint] = generated_layers(&mut app);
         app.ui.ai_gen = AiGenUi { model: "z".into(), prompt: "something else".into(), ..Default::default() };
@@ -1469,16 +1505,17 @@ mod clicks {
         assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(inpaint)));
         let before = h.state().ui.ai_gen.clone();
         assert_eq!((before.mode, before.model.as_str(), before.prompt.as_str()), (Mode::Create, "z", "something else"));
-        // Load Prompt puts its prompt in the box: no other tab, no other model.
+        // Load from layer puts its prompt in the box and chooses its model (Change's, for a
+        // fill): no other tab.
         let at = h.get_by_label(LOAD).rect().center();
         click(&mut h, at);
-        assert_eq!(h.state().ui.ai_gen, AiGenUi { prompt: "a pond".into(), ..before });
+        assert_eq!(h.state().ui.ai_gen, AiGenUi { prompt: "a pond".into(), edit_model: "z2".into(), ..before });
         // A layer that was not generated has no prompt to load: the button is off.
         let at = row(&h, background).name.unwrap().center();
         click(&mut h, at);
         assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(background)));
-        assert!(h.query_by_label(LOAD).is_none());
-        let at = h.get_by_label(NOTHING).rect().center();
+        assert!(h.get_by_label(LOAD).accesskit_node().is_disabled());
+        let at = h.get_by_label(LOAD).rect().center();
         click(&mut h, at);
         assert_eq!(h.state().ui.ai_gen.prompt, "a pond");
     }
@@ -1536,7 +1573,17 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     let lost: Vec<&str> = models.iter().filter(|m| !photocraft_aigen::detect::on_server(&listing, m)).map(|m| m.id.as_str()).collect();
     assert_eq!(
         lost,
-        ["qwen-image-2-1", "krea-2-turbo", "flux-3-klein", "moss-image", "fibo-2-dev", "ideogram-4", "hidream-o1", "ernie-image-turbo", "ming-image-0-1-design"]
+        [
+            "qwen-image-2-1",
+            "krea-2-turbo",
+            "flux-3-klein",
+            "moss-image",
+            "fibo-2-dev",
+            "ideogram-4",
+            "hidream-o1",
+            "ernie-image-turbo",
+            "ming-image-0-1-design"
+        ]
     );
     for x in Filter::ALL {
         f.insert(FILTER.into(), json!(x.key()));
@@ -2062,6 +2109,113 @@ fn a_drag_on_a_box_that_is_not_selected_draws_a_new_one() {
     // The selected box still moves.
     gesture(&mut app, [30.0, 30.0], [40.0, 35.0]);
     assert!(rects(&app).contains(&photocraft_geom::Rect::new(30, 25, 70, 55)), "{:?}", rects(&app));
+}
+
+#[test]
+fn a_box_label_selects_and_moves_its_box_even_behind_another() {
+    use crate::canvas::{ToolEvent, ViewXform};
+    let mut app = app();
+    add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+    app.ui.ai_gen.model = "moss".into();
+    app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    draw_panel(&mut app);
+    // In front, one over the whole canvas; behind it, a smaller one.
+    app.run("ai.setRegions", json!({"regions": [{"rect": [0, 0, 200, 100]}, {"rect": [100, 40, 100, 60]}]})).unwrap();
+    let ids = app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.id).collect::<Vec<_>>();
+    // The canvas at 100%, document pixels on screen points: the labels are where they are drawn.
+    let xf = ViewXform {
+        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 100.0)),
+        zoom: 1.0,
+        center: [100.0, 50.0],
+        flip: false,
+        rotation: 0.0,
+        aspect: 1.0,
+    };
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    for _ in 0..3 {
+        ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter().clone();
+            regions::canvas(&mut app, ui, &painter, &xf);
+        })
+        .textures_delta
+        .clear();
+    }
+    let gesture = |app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2]| {
+        assert!(regions::pointer(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Up { x: to[0], y: to[1] }));
+    };
+    // A click in the box behind lands on the one in front; a click on its label (above it)
+    // selects it.
+    gesture(&mut app, [150.0, 70.0], [150.0, 70.0]);
+    assert_eq!(app.ui.ai_gen.region, Some(ids[0]));
+    gesture(&mut app, [104.0, 36.0], [104.0, 36.0]);
+    assert_eq!(app.ui.ai_gen.region, Some(ids[1]));
+    // Dragging a label moves its box (kept on the canvas), and draws nothing new.
+    app.ui.ai_gen.region = None;
+    gesture(&mut app, [104.0, 36.0], [94.0, 26.0]);
+    let doc = &app.session.active().unwrap().doc;
+    assert_eq!((doc.ai_regions.len(), doc.ai_regions[1].rect), (2, photocraft_geom::Rect::new(90, 30, 190, 90)));
+    assert_eq!(app.ui.ai_gen.region, Some(ids[1]));
+}
+
+#[test]
+fn the_selected_ai_layer_keeps_the_layout_it_is_edited_to() {
+    use crate::canvas::ToolEvent;
+    let mut app = app();
+    add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+    app.ui.ai_gen.model = "moss".into();
+    app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    app.ui.ai_gen.prompt = "a reading nook".into();
+    draw_panel(&mut app);
+    app.run("ai.setRegions", json!({"regions": [{"caption": "an armchair", "rect": [10, 10, 50, 40]}]})).unwrap();
+    let layer = generate(&mut app).unwrap()["layer"].as_u64().unwrap();
+    let kept = |app: &PhotocraftApp| {
+        let g = app.session.active().unwrap().doc.layer(photocraft_doc::LayerId(layer)).unwrap().generation.clone().unwrap();
+        (g.prompt, g.regions)
+    };
+    let doc_regions = |app: &PhotocraftApp| app.session.active().unwrap().doc.ai_regions.clone();
+    draw_panel(&mut app);
+    assert_eq!(regions::linked(&app), Some(layer));
+    // A box moved on the canvas and the scene typed: the layer keeps both.
+    let id = doc_regions(&app)[0].id;
+    app.ui.ai_gen.region = Some(id);
+    assert!(regions::pointer(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }));
+    assert!(regions::pointer(&mut app, ToolEvent::Up { x: 30.0, y: 25.0 }));
+    app.ui.ai_gen.prompt = "a reading nook at dusk".into();
+    regions::keep_scene(&mut app);
+    assert_eq!(kept(&app), ("a reading nook at dusk".to_string(), doc_regions(&app)));
+    assert_eq!(doc_regions(&app)[0].rect, photocraft_geom::Rect::new(20, 15, 70, 55));
+    // So Load Prompt changes nothing.
+    assert!(load_prompt(&mut app, layer));
+    assert_eq!((app.ui.ai_gen.prompt.as_str(), doc_regions(&app)[0].rect), ("a reading nook at dusk", photocraft_geom::Rect::new(20, 15, 70, 55)));
+    // Coming back to the tab with the layer selected brings its scene and regions.
+    app.ui.ai_gen.create_task = CreateTask::Prompt;
+    draw_panel(&mut app);
+    app.ui.ai_gen.prompt.clear();
+    app.run("ai.setRegions", json!({"regions": []})).unwrap();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    draw_panel(&mut app);
+    assert_eq!((app.ui.ai_gen.prompt.clone(), doc_regions(&app)), kept(&app));
+    // Load from layer chooses the model the layer was made with again.
+    add_model(&mut app, z_image("z"));
+    app.ui.ai_gen.model = "z".into();
+    assert!(load_prompt(&mut app, layer));
+    assert_eq!((app.ui.ai_gen.model.as_str(), app.ui.ai_gen.create_task), ("moss", CreateTask::Regions));
+    // With another layer selected the edits stay the document's.
+    app.run("layer.new.layer", json!({})).unwrap();
+    draw_panel(&mut app);
+    assert_eq!(regions::linked(&app), None);
+    app.run("ai.setRegions", json!({"regions": []})).unwrap();
+    app.ui.ai_gen.prompt = "elsewhere".into();
+    regions::keep_scene(&mut app);
+    assert_eq!(kept(&app).0, "a reading nook at dusk");
+    assert_eq!(kept(&app).1.len(), 1);
 }
 
 #[test]

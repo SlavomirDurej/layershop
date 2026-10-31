@@ -8,14 +8,18 @@
 //!   a run of them into one History step).
 //! - `ai.layoutPrompt` is what `ai.generate` would send a model for them: the panel's copy
 //!   button.
+//! - `ai.setLayerPrompt` changes the prompt an AI layer keeps (what Load Prompt brings back).
 //!
-//! `ai.generate` with `"regions": true` sends the document's ([`layout`]).
+//! `ai.generate` with `"regions": true` sends the document's ([`layout`]). `ai.setRegions` and
+//! `ai.region.set` with `"layer"` change that AI layer's regions to match in the same History
+//! step: the panel keeps the selected layer's layout up to date as it is edited.
 
 use photocraft_aigen::{LayoutFormat, Model, Region, RegionKind, layout_prompt};
-use photocraft_doc::{AiRegion, AiRegionKind};
+use photocraft_doc::{AiRegion, AiRegionKind, LayerId};
 use photocraft_geom::Rect;
 use serde_json::{Value, json};
 
+use crate::ai_cmds::MAX_PROMPT;
 use crate::commands::CommandSpec;
 use crate::{EngineError, Result, Session};
 
@@ -66,17 +70,23 @@ fn color(cmd: &str, v: &Value) -> Result<[u8; 3]> {
     Ok([byte(0)?, byte(2)?, byte(4)?])
 }
 
-fn text(cmd: &str, key: &str, v: &Value) -> Result<String> {
+fn text(cmd: &str, key: &str, v: &Value, max: usize) -> Result<String> {
     let t = v.as_str().ok_or_else(|| bad(cmd, format!("`{key}` must be a string")))?;
-    if t.chars().count() > MAX_TEXT {
-        return Err(bad(cmd, format!("`{key}` is longer than {MAX_TEXT} characters")));
+    if t.chars().count() > max {
+        return Err(bad(cmd, format!("`{key}` is longer than {max} characters")));
     }
     Ok(t.to_string())
 }
 
 fn rect(cmd: &str, v: &Value) -> Result<Rect> {
     let msg = || bad(cmd, "`rect` must be [x, y, width, height] in pixels, with a width and height of 1 or more");
-    let nums: Vec<i64> = v.as_array().into_iter().flatten().map(|x| x.as_f64().filter(|x| x.is_finite() && x.abs() <= MAX_COORD as f64).map(|x| x.round() as i64)).collect::<Option<_>>().ok_or_else(msg)?;
+    let nums: Vec<i64> = v
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|x| x.as_f64().filter(|x| x.is_finite() && x.abs() <= MAX_COORD as f64).map(|x| x.round() as i64))
+        .collect::<Option<_>>()
+        .ok_or_else(msg)?;
     let [x, y, w, h] = nums[..] else { return Err(msg()) };
     if w < 1 || h < 1 {
         return Err(msg());
@@ -90,23 +100,61 @@ fn patched(cmd: &str, mut r: AiRegion, p: &Value) -> Result<AiRegion> {
     let o = p.as_object().ok_or_else(|| bad(cmd, "each region is an object"))?;
     for (key, v) in o {
         match key.as_str() {
-            "id" | "coalesce" => {}
+            "id" | "coalesce" | "layer" => {}
             "kind" => r.kind = v.as_str().and_then(AiRegionKind::from_key).ok_or_else(|| bad(cmd, "`kind` must be object|character|text"))?,
-            "caption" => r.caption = text(cmd, key, v)?,
-            "text" => r.text = text(cmd, key, v)?,
+            "caption" => r.caption = text(cmd, key, v, MAX_TEXT)?,
+            "text" => r.text = text(cmd, key, v, MAX_TEXT)?,
             "rect" => r.rect = rect(cmd, v)?,
             "color" => r.color = color(cmd, v)?,
             "fill" => r.fill = v.as_bool().ok_or_else(|| bad(cmd, "`fill` must be true or false"))?,
-            "fillOpacity" => r.fill_opacity = v.as_f64().filter(|x| (0.0..=1.0).contains(x)).ok_or_else(|| bad(cmd, "`fillOpacity` must be a number from 0 to 1"))? as f32,
+            "fillOpacity" => {
+                r.fill_opacity = v.as_f64().filter(|x| (0.0..=1.0).contains(x)).ok_or_else(|| bad(cmd, "`fillOpacity` must be a number from 0 to 1"))? as f32
+            }
             other => return Err(bad(cmd, format!("a region has no `{other}`"))),
         }
     }
     Ok(r)
 }
 
+/// `p["layer"]`: an AI layer (one with a generation record) whose regions follow the edit.
+fn follower(s: &Session, cmd: &str, p: &Value) -> Result<Option<LayerId>> {
+    let Some(v) = p.get("layer").filter(|v| !v.is_null()) else { return Ok(None) };
+    let id = LayerId(v.as_u64().ok_or_else(|| bad(cmd, "`layer` must be a layer id"))?);
+    let d = s.active().ok_or(EngineError::NoDocument)?;
+    let l = d.doc.layer(id).ok_or_else(|| bad(cmd, format!("the document has no layer {}", id.0)))?;
+    if l.generation.is_none() {
+        return Err(bad(cmd, format!("layer {} was not made with AI Gen", id.0)));
+    }
+    Ok(Some(id))
+}
+
+/// Does `layer`'s generation record keep other regions than `regions`?
+fn layer_differs(s: &Session, layer: Option<LayerId>, regions: &[AiRegion]) -> bool {
+    layer.is_some_and(|id| s.active().and_then(|d| d.doc.layer(id)).and_then(|l| l.generation.as_ref()).is_some_and(|g| g.regions != regions))
+}
+
+/// The document's regions become `regions`, and `layer`'s too.
+fn store(s: &mut Session, label: &str, regions: Vec<AiRegion>, layer: Option<LayerId>) -> Result<()> {
+    s.edit(label, |doc, _| {
+        if let Some(g) = layer.and_then(|id| doc.layer_mut(id)).and_then(|l| l.generation.as_mut()) {
+            g.regions = regions.clone();
+        }
+        doc.ai_regions = regions;
+        Ok(())
+    })
+}
+
 /// The colours new regions are given in turn, told apart in lightness as well as hue.
-pub const PALETTE: [[u8; 3]; 8] =
-    [[0xf2, 0xb3, 0x3d], [0x4f, 0xd1, 0xc5], [0xa9, 0x9b, 0xff], [0xf2, 0x8b, 0xb5], [0x9f, 0xd3, 0x56], [0x6c, 0xb6, 0xff], [0xff, 0x8a, 0x65], [0xe0, 0xe0, 0xe0]];
+pub const PALETTE: [[u8; 3]; 8] = [
+    [0xf2, 0xb3, 0x3d],
+    [0x4f, 0xd1, 0xc5],
+    [0xa9, 0x9b, 0xff],
+    [0xf2, 0x8b, 0xb5],
+    [0x9f, 0xd3, 0x56],
+    [0x6c, 0xb6, 0xff],
+    [0xff, 0x8a, 0x65],
+    [0xe0, 0xe0, 0xe0],
+];
 
 fn set_regions(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ai.setRegions";
@@ -114,6 +162,7 @@ fn set_regions(s: &mut Session, p: &Value) -> Result<Value> {
     if list.len() > MAX_REGIONS {
         return Err(bad(cmd, format!("a document keeps {MAX_REGIONS} regions at most")));
     }
+    let layer = follower(s, cmd, p)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let old = &d.doc.ai_regions;
     // New ids follow the highest there is, so an id is never reused within the document's life
@@ -150,11 +199,8 @@ fn set_regions(s: &mut Session, p: &Value) -> Result<Value> {
         }
         kept.push(patched(cmd, base, entry)?);
     }
-    if s.active().is_some_and(|d| d.doc.ai_regions != kept) {
-        s.edit("AI Regions", |doc, _| {
-            doc.ai_regions = kept;
-            Ok(())
-        })?;
+    if s.active().is_some_and(|d| d.doc.ai_regions != kept) || layer_differs(s, layer, &kept) {
+        store(s, "AI Regions", kept, layer)?;
     }
     Ok(listing(s))
 }
@@ -162,18 +208,31 @@ fn set_regions(s: &mut Session, p: &Value) -> Result<Value> {
 fn set_region(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ai.region.set";
     let id = p.get("id").and_then(Value::as_u64).and_then(|i| u32::try_from(i).ok()).ok_or_else(|| bad(cmd, "`id` must be a region's id"))?;
+    let layer = follower(s, cmd, p)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
     let r = d.doc.ai_regions.iter().find(|r| r.id == id).cloned().ok_or_else(|| bad(cmd, format!("the document has no region {id}")))?;
     let changed = patched(cmd, r.clone(), p)?;
-    if changed != r {
-        s.edit("AI Region", |doc, _| {
-            if let Some(slot) = doc.ai_regions.iter_mut().find(|r| r.id == id) {
-                *slot = changed.clone();
+    let all: Vec<AiRegion> = d.doc.ai_regions.iter().map(|r| if r.id == id { changed.clone() } else { r.clone() }).collect();
+    if changed != r || layer_differs(s, layer, &all) {
+        store(s, "AI Region", all, layer)?;
+    }
+    Ok(json!({"region": region_json(&changed)}))
+}
+
+fn set_layer_prompt(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "ai.setLayerPrompt";
+    let layer = follower(s, cmd, p)?.ok_or_else(|| bad(cmd, "`layer` must be a layer id"))?;
+    let prompt = p.get("prompt").ok_or_else(|| bad(cmd, "`prompt` must be a string")).and_then(|v| text(cmd, "prompt", v, MAX_PROMPT))?;
+    let same = s.active().and_then(|d| d.doc.layer(layer)).and_then(|l| l.generation.as_ref()).is_some_and(|g| g.prompt == prompt);
+    if !same {
+        s.edit("AI Layer Prompt", |doc, _| {
+            if let Some(g) = doc.layer_mut(layer).and_then(|l| l.generation.as_mut()) {
+                g.prompt = prompt.clone();
             }
             Ok(())
         })?;
     }
-    Ok(json!({"region": region_json(&changed)}))
+    Ok(json!({"layer": layer.0, "prompt": prompt}))
 }
 
 /// The regions in `p["regions"]` (`true`: the document's), each as the document keeps it.
@@ -227,7 +286,7 @@ pub(crate) fn format_of(model: &Model, settings: &photocraft_aigen::Settings) ->
 
 fn layout_prompt_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ai.layoutPrompt";
-    let scene = p.get("prompt").map(|v| text(cmd, "prompt", v)).transpose()?.unwrap_or_default();
+    let scene = p.get("prompt").map(|v| text(cmd, "prompt", v, MAX_PROMPT)).transpose()?.unwrap_or_default();
     let settings = crate::ai_cmds::settings(s);
     let id = p.get("model").and_then(Value::as_str).unwrap_or("");
     let model = settings.model(id).ok_or_else(|| bad(cmd, if id.is_empty() { "no AI model is set up".to_string() } else { format!("no AI model `{id}`") }))?;
@@ -260,7 +319,7 @@ pub fn specs() -> Vec<CommandSpec> {
             shortcut: None,
             params: Box::leak(
                 format!(
-                    "{{\"regions\":[{REGION_PARAMS},…] ({MAX_REGIONS} at most, front to back)}} → as ai.regions: replace the active document's regions (saved with it in PSD and .pcraft files). An entry with the id of a region there changes it by the fields it gives; one without an id is new (it needs a rect, and gets the next colour). Order is depth: the first is in front. One History step"
+                    "{{\"regions\":[{REGION_PARAMS},…] ({MAX_REGIONS} at most, front to back)}} → as ai.regions: replace the active document's regions (saved with it in PSD and .pcraft files). An entry with the id of a region there changes it by the fields it gives; one without an id is new (it needs a rect, and gets the next colour). Order is depth: the first is in front. \"layer\":id? also gives that AI layer these regions (what Load Prompt brings back). One History step"
                 )
                 .into_boxed_str(),
             ),
@@ -273,7 +332,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set AI Region",
             menu: &[],
             shortcut: None,
-            params: Box::leak(format!("{REGION_PARAMS} with \"id\" required → {{region}}: change one region; \"coalesce\":key merges a run into one History step").into_boxed_str()),
+            params: Box::leak(format!("{REGION_PARAMS} with \"id\" required, \"layer\":id? → {{region}}: change one region (and give that AI layer the document's regions); \"coalesce\":key merges a run into one History step").into_boxed_str()),
             enabled: has_doc,
             run: set_region,
             journal: true,
@@ -287,6 +346,16 @@ pub fn specs() -> Vec<CommandSpec> {
             enabled: has_doc,
             run: layout_prompt_cmd,
             journal: false,
+        },
+        CommandSpec {
+            id: "ai.setLayerPrompt",
+            label: "Set AI Layer Prompt",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"layer":id,"prompt":str,"coalesce":key?} → {layer,prompt}: change the prompt an AI layer keeps (its generation record: what Load Prompt brings back). Refused for a layer not made with AI Gen"##,
+            enabled: has_doc,
+            run: set_layer_prompt,
+            journal: true,
         },
     ]
 }
@@ -319,7 +388,10 @@ mod tests {
             )
             .unwrap();
         assert_eq!(ids(&s), [1, 2, 3]);
-        assert_eq!(v["regions"][0], json!({"id": 1, "kind": "character", "caption": "a cat", "text": "", "rect": [10, 10, 50, 40], "color": "#4fd1c5", "fill": true, "fillOpacity": 0.12f32}));
+        assert_eq!(
+            v["regions"][0],
+            json!({"id": 1, "kind": "character", "caption": "a cat", "text": "", "rect": [10, 10, 50, 40], "color": "#4fd1c5", "fill": true, "fillOpacity": 0.12f32})
+        );
         assert_eq!((&v["regions"][1]["fill"], &v["regions"][2]["color"]), (&json!(false), &json!("#00ff80")));
         // Reordered (depth) and one dropped: ids stay, and a new one never takes a used id.
         s.execute("ai.setRegions", json!({"regions": [{"id": 3}, {"id": 1}, {"rect": [1, 1, 2, 2]}]})).unwrap();
@@ -365,17 +437,55 @@ mod tests {
             assert!(s.execute("ai.setRegions", p.clone()).is_err(), "{p}");
         }
         assert_eq!(ids(&s), [1], "a refused list changes nothing");
-        for p in [json!({}), json!({"id": 9}), json!({"id": 1, "rect": "big"}), json!({"id": 1, "fill": 1})] {
+        let plain = s.active().unwrap().active_layer.unwrap().0;
+        for p in [
+            json!({}),
+            json!({"id": 9}),
+            json!({"id": 1, "rect": "big"}),
+            json!({"id": 1, "fill": 1}),
+            json!({"id": 1, "layer": plain}),
+            json!({"id": 1, "layer": "x"}),
+        ] {
             assert!(s.execute("ai.region.set", p.clone()).is_err(), "{p}");
+        }
+        assert!(s.execute("ai.setRegions", json!({"regions": [], "layer": 99_999})).is_err());
+        for p in [json!({}), json!({"layer": plain, "prompt": "x"}), json!({"layer": 99_999, "prompt": "x"}), json!({"layer": plain, "prompt": 5})] {
+            assert!(s.execute("ai.setLayerPrompt", p.clone()).is_err(), "{p}");
         }
     }
 
     #[test]
+    fn an_ai_layer_keeps_the_regions_and_prompt_it_is_edited_with() {
+        let mut s = session();
+        s.execute("ai.setRegions", json!({"regions": [{"caption": "a cat", "rect": [10, 10, 50, 40]}]})).unwrap();
+        let layer = s.active().unwrap().active_layer.unwrap();
+        let regions = s.active().unwrap().doc.ai_regions.clone();
+        s.edit("AI", |doc, _| {
+            doc.layer_mut(layer).unwrap().generation = Some(Box::new(photocraft_doc::Generation { prompt: "a room".into(), regions, ..Default::default() }));
+            Ok(())
+        })
+        .unwrap();
+        let kept = |s: &Session| s.active().unwrap().doc.layer(layer).unwrap().generation.as_ref().map(|g| (g.prompt.clone(), g.regions.clone())).unwrap();
+        // A change with the layer named reaches it; one without leaves it alone.
+        s.execute("ai.region.set", json!({"id": 1, "caption": "a ginger cat", "layer": layer.0})).unwrap();
+        assert_eq!(kept(&s).1[0].caption, "a ginger cat");
+        s.execute("ai.setRegions", json!({"regions": [{"rect": [0, 0, 5, 5]}, {"id": 1}], "layer": layer.0})).unwrap();
+        assert_eq!(kept(&s).1, s.active().unwrap().doc.ai_regions);
+        s.execute("ai.setRegions", json!({"regions": []})).unwrap();
+        assert_eq!(kept(&s).1.len(), 2);
+        // The prompt, typed: one History step, undone with the layer's regions untouched.
+        for prompt in ["a r", "a reading", "a reading nook"] {
+            s.execute("ai.setLayerPrompt", json!({"layer": layer.0, "prompt": prompt, "coalesce": "scene"})).unwrap();
+        }
+        assert_eq!(kept(&s).0, "a reading nook");
+        s.execute("edit.undo", json!({})).unwrap();
+        assert_eq!((kept(&s).0.as_str(), kept(&s).1.len()), ("a room", 2));
+    }
+
+    #[test]
     fn the_layout_is_relative_to_the_area_and_cut_by_it() {
-        let regions = [
-            AiRegion { rect: Rect::new(50, 25, 150, 75), ..AiRegion::default() },
-            AiRegion { rect: Rect::new(-50, -50, 0, 0), ..AiRegion::default() },
-        ];
+        let regions =
+            [AiRegion { rect: Rect::new(50, 25, 150, 75), ..AiRegion::default() }, AiRegion { rect: Rect::new(-50, -50, 0, 0), ..AiRegion::default() }];
         let l = layout(&regions, Rect::new(50, 0, 250, 100));
         assert_eq!(l[0].bounds, [0.0, 0.25, 0.5, 0.75]);
         // Wholly outside: the writer leaves it out.

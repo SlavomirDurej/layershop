@@ -41,10 +41,11 @@ back end you set up, and places the answer on a new layer.
 4. A generated layer **remembers what it was made with**: the model, the prompt, what was
    done (created, a selection filled, changed by instruction, restyled) and its settings
    (strength, context, the source picture, alpha), and the seed. Select the layer and click
-   **Load Prompt** (the icon in the prompt box's top right corner) to put the prompt it was made with in
-   the prompt box, in place of what is there. Only the text is loaded: the tab, the task, the
-   model and the other settings stay as they are, so the prompt can be tried on another model
-   or another task. Selecting a layer by itself loads nothing. The button is off for a layer
+   **Load from layer** (beside the model; just its icon in a narrow panel) to put the prompt it was made with in
+   the prompt box, in place of what is there, and choose the model it was made with again
+   (Change's model for a fill or a change, the other one for a creation or a restyle), when
+   that model is still offered. The tab, the task and the other settings stay as they are.
+   Selecting a layer by itself loads nothing (except on the Regions tab, below). The button is off for a layer
    that was not generated, and while a generation is running. The settings are saved in `.pcraft` files, in PSD and PSB files and in
    layered TIFFs, and copied with the layer (Duplicate Layer); flat formats (PNG, JPEG…) don't
    keep them. In a PSD they are one item (`pcGn`, JSON) of the layer's `shmd` metadata block,
@@ -127,8 +128,9 @@ each with what goes in it, and the model is told both.
   choice of tab is kept: pick a model that takes regions and they are back as they were.
 - **On the canvas.** While the tab is in front the boxes are drawn over the picture: an outline in
   the region's colour, its fill, a label with its depth and type, and its description. Opening
-  the tab gives the pointer to them (it picks the Move tool): click a box to select it, drag
-  the selected box to move it and its corners to resize it. A drag anywhere else draws a new
+  the tab gives the pointer to them (it picks the Move tool): click a box or its label to
+  select it (the label reaches a box behind others; labels are drawn over every box), drag a
+  label or the selected box to move it, and the selected box's corners to resize it. A drag anywhere else draws a new
   box (shown as you drag, in the colour it will get, with its size), over other boxes too, so
   a canvas they already cover still takes one. A new box opens
   for typing at once; double-click a box to type its description again (Esc or Ctrl+Enter
@@ -137,7 +139,8 @@ each with what goes in it, and the model is told both.
 - **In the panel.** **Scene** is the prompt: the whole picture, its setting, light and style.
   Under it, **Regions (N)**: **?** says how it works, then copy, clear all and add. Each row
   is a region, front to back: drag a row up or down to change its depth (the top row is in
-  front), the pencil opens its **Type** (Object, Character, Text), the **Words** of a text
+  front), the pencil (or a double-click on the row) opens its **Prompt** (what goes in the
+  box), **Type** (Object, Character, Text), the **Words** of a text
   region, its **Colour** and its **Fill** and fill opacity, one per line under the row (it
   closes when another region is selected or on a click outside it), and the bin removes it.
 - **Copy** puts on the clipboard exactly what Generate would send the chosen model: its layout
@@ -145,7 +148,14 @@ each with what goes in it, and the model is told both.
 - **Kept with the document.** The regions are saved in `.pcraft` files and in PSD and PSB files
   (an image resource of PhotoCraft's own, 4001 `pcRG`, beside the references' 4000, which other
   programs step over), and every change is a History step. A layer generated from them keeps
-  them too: **Load Prompt** on it puts the scene and the regions back, with the Regions tab.
+  them too: **Load from layer** on it puts the scene, the regions and the model back, with the
+  Regions tab.
+- **The selected layer's layout.** With a layer made with regions selected, the Regions tab
+  shows its scene and regions (on opening the tab, and on selecting another such layer while
+  it is open), and changes to them, the scene typed included, are kept in that layer in the
+  same History step: Load from layer then brings back the layout as last edited, not the one
+  the pixels were made from. With any other layer selected the regions are the document's
+  alone.
 - **The area.** Boxes are in document pixels. A generation is made into the selection's bounds
   (or the canvas): the boxes are taken relative to that area, a box is cut where it leaves it,
   and one wholly outside it is left out.
@@ -856,7 +866,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it (and, with `img2img` in place of the rectangle, image to image) against a real server without the app |
 | `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
-| `window.panel.aiGen.loadPrompt {"layer"?: id}` → `{loaded}` | a shell command (the running app): put the prompt a generated layer was made with into the panel's prompt box, like its Load Prompt button (the text only; tab, model and settings stay); the active layer without `layer`. `loaded` is false for a layer that was not generated or has no prompt, and while a generation runs |
+| `window.panel.aiGen.loadPrompt {"layer"?: id}` → `{loaded}` | a shell command (the running app): put the prompt a generated layer was made with into the panel's prompt box, like its Load from layer button (the prompt and the model it was made with, when still offered; a layer laid out in regions brings them back too; tab and settings stay); the active layer without `layer`. `loaded` is false for a layer that was not generated or has no prompt, and while a generation runs |
 | `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint, or to scope an edit, instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself, for `inpaint` and for `imgEdit` |
 | `ai.generate {"prompt", "mode": "imgEdit", "source"?, "references"?: [{"layer": id} or {"document": id}, …], "quality"?: "draft"/"standard"/"detail", "context"?, …}` | change a picture following the prompt as an instruction, onto a new layer; with a selection only the part around it is sent, and the layer is masked by it. `--example ai_inpaint` runs it with `edit` or `edit:x,y,w,h` in place of the rectangle |
 | `ai.sources {"mode"?: "img2img"/"imgEdit"}` | what img2img (or an edit, and its references) can start from now: the active document's layers with pixels, the other open documents, for an edit also the active document itself, and which is the default |
@@ -864,6 +874,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.regions` / `ai.setRegions {"regions": [{"id"?, "kind"?, "caption"?, "text"?, "rect"?: [x, y, w, h], "color"?, "fill"?, "fillOpacity"?}, …]}` | the active document's regions, front to back / replace them (an entry with an id changes that region, one without is new and needs a `rect`; order is depth). One History step |
 | `ai.region.set {"id", …fields}` | change one region; `"coalesce"` merges a run (typing) into one step |
 | `ai.layoutPrompt {"prompt", "model"?, "regions"?, "rect"?}` → `{text, format, area}` | what `ai.generate {"regions": true}` would send that model: the panel's copy button |
+| `ai.setLayerPrompt {"layer", "prompt", "coalesce"?}` → `{layer, prompt}` | change the prompt an AI layer keeps (what Load from layer brings back); refused for a layer not made with AI Gen. `ai.setRegions` and `ai.region.set` take `"layer"` too: that AI layer gets the document's regions in the same History step |
 | `ai.generate {"prompt", "regions": true or [...], …}` | a text to image laid out in the document's regions (or those given), with a model trained on boxes; `modelPrompt` in the result is the layout sent |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |

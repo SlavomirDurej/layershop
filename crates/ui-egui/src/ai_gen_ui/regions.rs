@@ -31,9 +31,10 @@ const ROW_HEIGHT: f32 = 24.0;
 
 const HELP: &str = "Placing things with regions\n\n\
 1. Describe the whole picture in the Scene box.\n\
-2. Drag on the canvas to draw a box, then type what goes in it (double-click a box to type again). Click a box to select it; drag the selected box to move it, its corners to resize it. A drag anywhere else draws a new box, over other boxes too.\n\
+2. Drag on the canvas to draw a box, then type what goes in it (double-click a box to type again). Click a box or its label to select it; drag a label or the selected box to move it, a corner to resize it. A drag anywhere else draws a new box, over other boxes too.\n\
 3. The pencil sets a region's type (Object, Character, Text), colour and fill. A Text region renders the exact words you give it.\n\
 4. Drag rows to set depth: the top row is in front.\n\n\
+With a layer made with regions selected, the tab shows its scene and regions, and your changes are kept in that layer (Load Prompt brings them back).\n\n\
 Boxes guide the model, they don't clip it, and very small boxes may be dropped. Where boxes overlap, say how in the description: \u{201c}cat asleep on the armchair cushion\u{201d}.";
 
 /// The Regions tab's own state (not saved: the regions themselves are the document's).
@@ -52,6 +53,11 @@ pub struct RegionsUi {
     pub(super) editor: Option<u32>,
     /// A row being dragged to another depth: its region and where it would drop.
     row_drag: Option<(u32, usize)>,
+    /// The AI layer whose layout the tab shows ([`linked`]), once it was loaded.
+    loaded: Option<u64>,
+    /// Each box's label on the canvas as last drawn, front first: its corners in document
+    /// pixels (a turned view turns them), for a press on it to select and move the box.
+    chips: Vec<(u32, [[f64; 2]; 4])>,
 }
 
 /// A pointer gesture on the canvas, in document pixels.
@@ -102,18 +108,62 @@ pub(super) fn arm(app: &mut PhotocraftApp) {
 }
 
 /// Once a frame from the panel: arm the canvas when the tab comes to the front, and let go of it
-/// when another tool was picked.
+/// when another tool was picked. The selected AI layer's layout comes with the tab, and with
+/// selecting another one while it is open.
 pub(super) fn follow(app: &mut PhotocraftApp) {
     let open = tab_open(app);
-    if open && !app.ui.ai_gen.regions.was_open {
+    let opened = open && !app.ui.ai_gen.regions.was_open;
+    if opened {
         arm(app);
     }
     app.ui.ai_gen.regions.was_open = open;
+    let layer = if open { linked(app) } else { None };
+    if (opened || layer != app.ui.ai_gen.regions.loaded) && layer.is_none_or(|l| load(app, l)) {
+        app.ui.ai_gen.regions.loaded = layer;
+    }
     let r = &mut app.ui.ai_gen.regions;
     if !open || r.armed.is_some_and(|t| t != app.ui.tool) {
         r.armed = None;
         r.drag = None;
         r.typing = None;
+    }
+}
+
+/// The selected layer, when it was made laid out in regions: the tab shows its layout, and
+/// changes to the regions and the scene are kept in it (so Load Prompt brings them back).
+pub(super) fn linked(app: &PhotocraftApp) -> Option<u64> {
+    let d = app.session.active()?;
+    let id = d.active_layer?;
+    d.doc.layer(id)?.generation.as_ref().filter(|g| !g.regions.is_empty()).map(|_| id.0)
+}
+
+/// Show `layer`'s layout: its scene and its regions. False while a generation runs (the panel
+/// shows that one); try again later.
+fn load(app: &mut PhotocraftApp, layer: u64) -> bool {
+    if super::running(app).is_some() {
+        return false;
+    }
+    let kept = app
+        .session
+        .active()
+        .and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer)))
+        .and_then(|l| l.generation.as_ref())
+        .map(|g| (g.prompt.clone(), g.regions.clone()));
+    if let Some((scene, regions)) = kept {
+        app.ui.ai_gen.prompt = scene;
+        if !regions.is_empty() && regions_of(app) != regions {
+            restore(app, &regions);
+        }
+    }
+    true
+}
+
+/// The scene was typed: the selected AI layer keeps it too (one History step for the run).
+pub(super) fn keep_scene(app: &mut PhotocraftApp) {
+    let Some(layer) = linked(app) else { return };
+    let params = json!({"layer": layer, "prompt": app.ui.ai_gen.prompt, "coalesce": format!("ai-scene-{layer}")});
+    if let Err(e) = app.run("ai.setLayerPrompt", params) {
+        crate::notices::error(app, format!("{}: {e}", tr("Regions")));
     }
 }
 
@@ -147,6 +197,9 @@ fn set(app: &mut PhotocraftApp, id: u32, mut fields: Value, coalesce: Option<Str
     if let Some(key) = coalesce {
         fields["coalesce"] = json!(key);
     }
+    if let Some(layer) = linked(app) {
+        fields["layer"] = json!(layer);
+    }
     if let Err(e) = app.run("ai.region.set", fields) {
         crate::notices::error(app, format!("{}: {e}", tr("Regions")));
     }
@@ -154,7 +207,15 @@ fn set(app: &mut PhotocraftApp, id: u32, mut fields: Value, coalesce: Option<Str
 
 /// Replace the regions (`ai.setRegions`); `entries` name the ones kept by id. Returns the list.
 fn set_all(app: &mut PhotocraftApp, entries: Vec<Value>) -> Option<Value> {
-    match app.run("ai.setRegions", json!({"regions": entries})) {
+    let mut params = json!({"regions": entries});
+    if let Some(layer) = linked(app) {
+        params["layer"] = json!(layer);
+    }
+    run_set_all(app, params)
+}
+
+fn run_set_all(app: &mut PhotocraftApp, params: Value) -> Option<Value> {
+    match app.run("ai.setRegions", params) {
         Ok(v) => Some(v),
         Err(e) => {
             crate::notices::error(app, format!("{}: {e}", tr("Regions")));
@@ -260,9 +321,10 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
     let row_drag = app.ui.ai_gen.regions.row_drag;
     let mut line_at: Option<f32> = None;
     let mut tops: Vec<(f32, f32)> = Vec::with_capacity(regions.len());
-    // The open editor and its row's pencil: a press anywhere else closes it.
+    // The open editor and its region's row (the pencil, a double-click): a press anywhere else
+    // closes it.
     let mut editor_rect = None;
-    let mut pencil_rect = None;
+    let mut editor_row = None;
     for (i, r) in regions.iter().enumerate() {
         let mut edit = false;
         let mut delete = false;
@@ -295,6 +357,7 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
                 _ if r.caption.is_empty() => tr("Untitled region").to_string(),
                 _ => r.caption.clone(),
             };
+            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, !busy, &label));
             let text_rect = Rect::from_min_max(egui::pos2(chip.right() + 26.0, rect.top()), rect.right_bottom() - vec2(4.0, 0.0));
             let galley = ui.painter().layout(label.replace('\n', " "), egui::FontId::proportional(12.0), t.text.gamma_multiply(fade), f32::INFINITY);
             ui.painter().with_clip_rect(text_rect).galley(egui::pos2(text_rect.left(), rect.center().y - galley.size().y / 2.0), galley, t.text);
@@ -304,6 +367,11 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
                     arm(app);
                 }
             }
+            // A double-click opens its properties.
+            if resp.double_clicked() {
+                app.ui.ai_gen.region = Some(r.id);
+                app.ui.ai_gen.regions.editor = Some(r.id);
+            }
             if resp.drag_started() {
                 app.ui.ai_gen.regions.row_drag = Some((r.id, i));
                 app.ui.ai_gen.region = Some(r.id);
@@ -311,15 +379,11 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             if resp.drag_stopped() {
                 stopped = Some(r.id);
             }
-            let tip = if busy { "" } else { "Drag to change depth: the top row is in front" };
+            let tip = if busy { "" } else { "Drag to change depth: the top row is in front. Double-click to edit" };
             let _ = resp.on_hover_text(tr(tip));
             ui.add_enabled_ui(!busy, |ui| {
                 let open = app.ui.ai_gen.regions.editor == Some(r.id);
-                let pencil = crate::icons::button(ui, "pencil", 22.0, open, tr("Edit region"));
-                if open {
-                    pencil_rect = Some(pencil.rect);
-                }
-                edit = pencil.clicked();
+                edit = crate::icons::button(ui, "pencil", 22.0, open, tr("Edit region")).clicked();
                 delete = crate::icons::button(ui, "trash", 22.0, false, tr("Remove region")).clicked();
             });
             rect
@@ -337,14 +401,15 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             return;
         }
         if app.ui.ai_gen.regions.editor == Some(r.id) {
+            editor_row = Some(row.response.rect);
             editor_rect = Some(editor(app, ui, r, busy, width));
         }
     }
     // The editor belongs to the selected region: it closes when another is selected, or on a
-    // press outside it (not in a colour popup it opened, nor on its pencil, which toggles it).
+    // press outside it (not in a colour popup it opened, nor on its row, whose pencil toggles it).
     if let Some(id) = app.ui.ai_gen.regions.editor {
         let press = ui.input(|i| if i.pointer.any_pressed() { i.pointer.press_origin() } else { None });
-        let outside = press.is_some_and(|p| !editor_rect.is_some_and(|r: Rect| r.contains(p)) && !pencil_rect.is_some_and(|r: Rect| r.contains(p)));
+        let outside = press.is_some_and(|p| ![editor_rect, editor_row].into_iter().flatten().any(|r: Rect| r.contains(p)));
         if app.ui.ai_gen.region != Some(id) || (outside && !egui::Popup::is_any_open(ui.ctx())) {
             app.ui.ai_gen.regions.editor = None;
         }
@@ -386,8 +451,8 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
     }
 }
 
-/// A region's properties, under its row, one per line: type, the words of a text region,
-/// colour, fill. `width` is the section's. Returns the editor's rect.
+/// A region's properties, under its row, one per line: its prompt (the description), type, the
+/// words of a text region, colour, fill. `width` is the section's. Returns the editor's rect.
 fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, width: f32) -> Rect {
     let t = Tokens::get(ui.ctx());
     let label_w = 52.0;
@@ -408,6 +473,21 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, 
                     ui.vertical(|ui| {
                         ui.set_width(inner_w);
                         ui.spacing_mut().item_spacing.y = 6.0;
+                        ui.horizontal_top(|ui| {
+                            label(ui, "Prompt");
+                            let mut caption = r.caption.clone();
+                            let field = ui.add(
+                                egui::TextEdit::multiline(&mut caption)
+                                    .id(egui::Id::unique("ai-region-caption").with(r.id))
+                                    .hint_text(tr("What goes in this box"))
+                                    .char_limit(photocraft_engine::ai_regions_cmds::MAX_TEXT)
+                                    .desired_rows(2)
+                                    .desired_width(f32::INFINITY),
+                            );
+                            if field.changed() {
+                                set(app, r.id, json!({"caption": caption}), Some(format!("ai-region-caption-{}", r.id)));
+                            }
+                        });
                         ui.horizontal(|ui| {
                             label(ui, "Type");
                             // Three equal cells in the width left, drawn here so no label can widen
@@ -518,10 +598,10 @@ pub(super) fn rows(app: &PhotocraftApp) -> usize {
         return 0;
     }
     let n = app.session.active().map_or(0, |d| d.doc.ai_regions.len());
-    // The heading, the rows (or the hint), an open editor (type, colour, fill and its margins;
-    // the words too for a text region).
+    // The heading, the rows (or the hint), an open editor (its two-line prompt, type, colour,
+    // fill and its margins; the words too for a text region).
     let words = |id: u32| app.session.active().is_some_and(|d| d.doc.ai_regions.iter().any(|r| r.id == id && r.kind == AiRegionKind::Text));
-    1 + n.max(1) + app.ui.ai_gen.regions.editor.map_or(0, |id| 4 + usize::from(words(id)))
+    1 + n.max(1) + app.ui.ai_gen.regions.editor.map_or(0, |id| 6 + usize::from(words(id)))
 }
 
 fn screen_rect(xf: &ViewXform, r: photocraft_geom::Rect) -> Rect {
@@ -582,6 +662,18 @@ fn contains(r: photocraft_geom::Rect, x: f64, y: f64) -> bool {
     x >= f64::from(r.x0) && x < f64::from(r.x1) && y >= f64::from(r.y0) && y < f64::from(r.y1)
 }
 
+/// Is `(x, y)` inside the quad `q` (its corners in turn, either way round)?
+fn in_quad(q: &[[f64; 2]; 4], x: f64, y: f64) -> bool {
+    let side = |a: [f64; 2], b: [f64; 2]| (b[0] - a[0]) * (y - a[1]) - (b[1] - a[1]) * (x - a[0]);
+    let s: Vec<f64> = (0..4).map(|i| side(q[i], q[(i + 1) % 4])).collect();
+    s.iter().all(|v| *v >= 0.0) || s.iter().all(|v| *v <= 0.0)
+}
+
+/// The region whose label on the canvas is at `(x, y)` (document pixels), the front one first.
+fn chip_at(app: &PhotocraftApp, regions: &[AiRegion], x: f64, y: f64) -> Option<u32> {
+    app.ui.ai_gen.regions.chips.iter().find(|(id, q)| in_quad(q, x, y) && regions.iter().any(|r| r.id == *id)).map(|(id, _)| *id)
+}
+
 /// Pointer input on the canvas while the boxes are being edited ([`editing`]). Returns true
 /// when the event was theirs: then no tool sees it.
 pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
@@ -596,14 +688,19 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
         ToolEvent::Down { x, y, .. } => {
             let st = &mut app.ui.ai_gen.regions;
             st.typing = None;
-            // A corner of the selected box resizes it, a press in it moves it; anywhere else a
-            // drag draws a new box, over other boxes too (so a canvas full of them still takes
-            // one), and a click selects the box under it (the front one first).
+            // A corner of the selected box resizes it; a box's label selects it and moves it, as
+            // does a press in the selected box. Anywhere else a drag draws a new box, over other
+            // boxes too (so a canvas full of them still takes one), and a click selects the box
+            // under it (the front one first).
             let selected = app.ui.ai_gen.region.and_then(|id| regions.iter().find(|r| r.id == id));
             let reach = f64::from(HANDLE_REACH) / zoom;
             let grabbed = selected.and_then(|r| corner_near(r.rect, x, y, reach).map(|c| (r, c)));
+            let labelled = chip_at(app, &regions, x, y).and_then(|id| regions.iter().find(|r| r.id == id));
             let drag = if let Some((r, corner)) = grabbed {
                 Drag::Resize { id: r.id, corner, start: [x, y], cur: [x, y], rect: r.rect }
+            } else if let Some(r) = labelled {
+                app.ui.ai_gen.region = Some(r.id);
+                Drag::Move { id: r.id, start: [x, y], cur: [x, y], rect: r.rect }
             } else if let Some(r) = selected.filter(|r| contains(r.rect, x, y)) {
                 Drag::Move { id: r.id, start: [x, y], cur: [x, y], rect: r.rect }
             } else {
@@ -666,6 +763,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
     let selected = app.ui.ai_gen.region;
     let typing = app.ui.ai_gen.regions.typing.filter(|_| editing);
     let clip = painter.clip_rect();
+    let mut chips = Vec::with_capacity(regions.len());
+    let mut labels = Vec::with_capacity(regions.len());
     // Back to front, so the one in front is drawn last.
     for (i, r) in regions.iter().enumerate().rev() {
         let rect = match moving {
@@ -684,8 +783,8 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
         let chip_size = chip_text.size() + vec2(10.0, 6.0);
         let inside = sr.top() - chip_size.y < clip.top();
         let chip = Rect::from_min_size(if inside { sr.left_top() + vec2(2.0, 2.0) } else { sr.left_top() - vec2(0.0, chip_size.y) }, chip_size);
-        painter.rect_filled(chip, 3.0, color);
-        painter.galley(chip.min + vec2(5.0, 3.0), chip_text, Color32::from_gray(20));
+        labels.push((chip, color, chip_text));
+        chips.push((r.id, [chip.left_top(), chip.right_top(), chip.right_bottom(), chip.left_bottom()].map(|p| xf.to_doc(p))));
         let inner = painter.with_clip_rect(sr.shrink(1.0).intersect(clip));
         let top = if inside { chip.bottom() + 4.0 } else { sr.top() + 5.0 };
         if r.kind == AiRegionKind::Text && !r.text.is_empty() {
@@ -708,6 +807,14 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
             }
         }
     }
+    // The labels over every box, so one is never hidden by a box in front of its own, and a
+    // press on one is on the label that shows (the front one where labels overlap).
+    for (chip, color, text) in labels {
+        painter.rect_filled(chip, 3.0, color);
+        painter.galley(chip.min + vec2(5.0, 3.0), text, Color32::from_gray(20));
+    }
+    chips.reverse();
+    app.ui.ai_gen.regions.chips = chips;
     // A box being drawn: in the colour it will get (the engine's next one), dashed light over
     // dark so it shows on any picture, white canvas included, with its size.
     if let Some((None, rect)) = moving {
@@ -740,7 +847,7 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
         let icon = match sel.and_then(|r| corner_at(screen_rect(xf, r.rect), p)) {
             Some([-1, -1] | [1, 1]) => egui::CursorIcon::ResizeNwSe,
             Some(_) => egui::CursorIcon::ResizeNeSw,
-            None if sel.is_some_and(|r| contains(r.rect, d[0], d[1])) => egui::CursorIcon::Move,
+            None if chip_at(app, &regions, d[0], d[1]).is_some() || sel.is_some_and(|r| contains(r.rect, d[0], d[1])) => egui::CursorIcon::Move,
             None => egui::CursorIcon::Crosshair,
         };
         ui.ctx().set_cursor_icon(icon);
@@ -794,8 +901,9 @@ fn type_caption(app: &mut PhotocraftApp, ctx: &egui::Context, xf: &ViewXform, r:
 /// Load Prompt of a layer made with regions: they become the document's again, and the tab
 /// comes to the front.
 pub(super) fn restore(app: &mut PhotocraftApp, regions: &[AiRegion]) {
+    // Not kept in the selected layer: a layer's own Load Prompt leaves another's alone.
     let entries: Vec<Value> = regions.iter().map(photocraft_engine::ai_regions_cmds::region_json).collect();
-    if set_all(app, entries).is_some() {
+    if run_set_all(app, json!({"regions": entries})).is_some() {
         app.ui.ai_gen.mode = Mode::Create;
         app.ui.ai_gen.create_task = CreateTask::Regions;
         app.ui.ai_gen.region = None;

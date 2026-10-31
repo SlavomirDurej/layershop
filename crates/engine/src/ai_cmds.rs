@@ -72,7 +72,7 @@ pub const DEFAULT_CONTEXT: f64 = 0.25;
 /// what it paints is composed inside the selection and joins the picture without a seam.
 const MASK_FADE: f64 = 0.12;
 /// Longest prompt accepted (characters).
-const MAX_PROMPT: usize = 20_000;
+pub(crate) const MAX_PROMPT: usize = 20_000;
 
 /// The names the Hugging Face sign-in is stored under, beside the providers' keys: the access
 /// token, and for Sign in with Hugging Face what renews it, when it expires, whose it is, and how

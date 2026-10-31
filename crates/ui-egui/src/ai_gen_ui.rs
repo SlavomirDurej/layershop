@@ -859,8 +859,9 @@ fn layer_prompt(app: &PhotocraftApp, layer: u64) -> Option<&str> {
     Some(g.prompt.as_str()).filter(|p| !p.trim().is_empty())
 }
 
-/// Put the prompt `layer` was generated with into the prompt box, in place of what is there.
-/// Only the text: the tab, the task, the model and the other settings stay as they are. `false`,
+/// Put the prompt `layer` was generated with into the prompt box, in place of what is there,
+/// and choose the model it was made with again (when it is still offered). A layer
+/// laid out in regions brings them back with the Regions tab; the other settings stay. `false`,
 /// and nothing changes, for a layer that was not generated (or has no prompt) and while a
 /// generation runs (the panel shows that one).
 pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
@@ -879,6 +880,17 @@ pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
         .filter(|r| !r.is_empty());
     if let Some(laid_out) = laid_out {
         regions::restore(app, &laid_out);
+    }
+    // The model it was made with, when it is still offered: Change's own choice for a change
+    // (a fill or an edit), the other one for a creation or a restyle.
+    let made =
+        app.session.active().and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer))).and_then(|l| l.generation.as_ref()).map(|g| (g.mode, g.model.clone()));
+    if let Some((mode, model)) = made {
+        let changing = matches!(mode, GenerationMode::Inpaint | GenerationMode::ImgEdit);
+        let offered = app.session.prefs().integrations.ai.listed().into_iter().any(|m| m.id == model && fits(m, changing) && usable(app, m));
+        if offered {
+            *(if changing { &mut app.ui.ai_gen.edit_model } else { &mut app.ui.ai_gen.model }) = model;
+        }
     }
     true
 }
@@ -916,8 +928,32 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
     }
 }
 
-/// Room the prompt's text leaves on its right for Load Prompt, in the box's corner.
-const LOAD_PROMPT_GAP: i8 = 34;
+/// Load from layer's width: the icon, and `label` beside it when there is room.
+fn load_button_width(ui: &egui::Ui, label: Option<&str>) -> f32 {
+    let text = label.map_or(0.0, |l| 6.0 + ui.painter().layout_no_wrap(l.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE).size().x);
+    8.0 + 16.0 + text + 8.0
+}
+
+/// Load from layer, beside the model: a button with a frame, the import icon and `label` (only
+/// named, for screen readers and tests, without `words`).
+fn load_button(ui: &mut egui::Ui, label: &str, words: bool) -> egui::Response {
+    let t = Tokens::get(ui.ctx());
+    let shown = words.then_some(label);
+    let size = vec2(load_button_width(ui, shown), ui.spacing().interact_size.y.max(24.0));
+    let (rect, resp) = ui.allocate_exact_size(size, egui::Sense::click());
+    let on = ui.is_enabled();
+    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, on, label));
+    let fill = if on && resp.hovered() { t.hover } else { t.field };
+    ui.painter().rect_filled(rect, t.radius_sm, fill);
+    ui.painter().rect_stroke(rect, t.radius_sm, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
+    let color = if on { t.text } else { t.text_faint };
+    let icon = egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0));
+    crate::icons::paint(ui, icon, "import", 14.0, color);
+    if let Some(label) = shown {
+        ui.painter().text(icon.right_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), color);
+    }
+    resp
+}
 /// Height of the prompt box when the panel has no height of its own to fill.
 const PROMPT_HEIGHT: f32 = 84.0;
 /// Height of the scene box on the Regions tab: a few lines, the regions take the rest.
@@ -1303,20 +1339,42 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     }
     let width = ui.available_width();
 
-    // Model, and the shortcut to its settings.
+    // Model, Load from layer, and the shortcut to the model's settings.
     let mut settings = false;
+    let mut load = false;
+    // Load from layer: what the selected layer was generated with. Its words go when the panel is
+    // narrow, so the model keeps room for its name.
+    let source_layer = active_layer(app).filter(|l| layer_prompt(app, *l).is_some());
+    let load_label = tr("Load from layer");
+    let full = load_button_width(ui, Some(load_label));
+    let compact = width - 34.0 - full < 170.0;
+    let load_w = load_button_width(ui, (!compact).then_some(load_label));
     ui.horizontal(|ui| {
         let options: Vec<(String, &str)> = models.iter().map(|m| (m.id.clone(), m.name.as_str())).collect();
         let headings = model_headings(&models);
+        let spacing = ui.spacing().item_spacing.x;
         ui.add_enabled_ui(!busy, |ui| {
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), &mut chosen, &options, &headings, (width - 34.0).max(80.0));
+            let model_w = (width - 34.0 - load_w - spacing).max(80.0);
+            widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), &mut chosen, &options, &headings, model_w);
         });
+        let tip = if source_layer.is_some() {
+            "Load the prompt and model the selected layer was generated with (and its regions)"
+        } else {
+            "Load from layer: select a layer made with AI Gen"
+        };
+        load = ui.add_enabled_ui(!busy && source_layer.is_some(), |ui| load_button(ui, load_label, !compact)).inner.on_hover_text(tr(tip)).clicked();
         settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
     });
     app.ui.ai_gen.chosen_mut().clone_from(&chosen);
     if settings {
         open_settings(app, &chosen);
+    }
+    if let Some(layer) = source_layer.filter(|_| load) {
+        load_prompt(app, layer);
+        if let Some(model) = models.iter().find(|m| m.id == app.ui.ai_gen.chosen()) {
+            chosen.clone_from(&model.id);
+        }
     }
     ui.add_space(6.0);
     let current = models.iter().find(|m| m.id == chosen).cloned().unwrap_or_default();
@@ -1408,6 +1466,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         ui.label(RichText::new(tr("Scene")).color(t.text_dim).size(11.5));
     }
     let mut submit = false;
+    let mut typed = false;
     ui.add_enabled_ui(!busy, |ui| {
         let below = BELOW_PROMPT + rows_below(&app.ui.ai_gen, Some(&current), kind) as f32 * (ROW + line_gap);
         let height = match room {
@@ -1423,7 +1482,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         if edit {
             refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
         }
-        let area = egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+        egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             let font = egui::TextStyle::Body.resolve(ui.style());
             let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
@@ -1441,8 +1500,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 }))
                 .desired_width(width)
                 .min_size(vec2(width, height))
-                // The text keeps clear of Load Prompt, in the box's corner.
-                .margin(egui::Margin { left: 4, right: LOAD_PROMPT_GAP, top: 2, bottom: 2 });
+                .margin(egui::Margin::symmetric(4, 2));
             if edit {
                 // While names are offered for an `@`, Tab takes the first instead of moving on.
                 let tab = refs::offering(ui.ctx());
@@ -1454,22 +1512,17 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 });
             }
             let output = edit_box.show(ui);
+            typed = output.response.changed();
             submit = output.response.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
             if edit {
                 refs::after_prompt(ui, &output, &app.ui.ai_gen.prompt, &names);
             }
         });
-        // Load Prompt, in the box's top right corner (clear of the scroll bar): the prompt the
-        // selected layer was generated with, the text only (the tab, model and settings stay).
-        let layer = active_layer(app).filter(|l| layer_prompt(app, *l).is_some());
-        let corner = egui::Rect::from_min_size(egui::pos2(area.inner_rect.right() - 24.0 - 8.0, area.inner_rect.top() + 2.0), vec2(24.0, 24.0));
-        let mut button = ui.new_child(egui::UiBuilder::new().max_rect(corner));
-        let tip = if layer.is_some() { "Load the prompt the selected layer was generated with" } else { "Load prompt: select a layer made with AI Gen" };
-        let load = button.add_enabled_ui(layer.is_some(), |ui| crate::icons::button(ui, "import", 24.0, false, tr(tip))).inner;
-        if let Some(layer) = layer.filter(|_| load.clicked()) {
-            load_prompt(app, layer);
-        }
     });
+    // The scene of the selected layer made with regions is kept in it as it is typed.
+    if laying_out && typed {
+        regions::keep_scene(app);
+    }
     ui.add_space(6.0);
 
     // Create › Regions: the boxes the scene is laid out in.
