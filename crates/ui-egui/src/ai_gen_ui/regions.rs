@@ -55,6 +55,9 @@ pub struct RegionsUi {
     row_drag: Option<(u32, usize)>,
     /// The AI layer whose layout the tab shows ([`linked`]), once it was loaded.
     loaded: Option<u64>,
+    /// The boxes are hidden on the canvas (the eye in the heading); drawing a new one shows
+    /// them again.
+    pub(super) hidden: bool,
     /// Each box's label on the canvas as last drawn, front first: its corners in document
     /// pixels (a turned view turns them), for a press on it to select and move the box.
     chips: Vec<(u32, [[f64; 2]; 4])>,
@@ -306,6 +309,13 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
                 }
                 if crate::icons::button(ui, "copy", 22.0, false, tr("Click to copy JSON output")).clicked() {
                     copy_prompt(app, ui.ctx(), model);
+                }
+                let hidden = app.ui.ai_gen.regions.hidden;
+                let (icon, tip) = if hidden { ("eye-off", "Show regions on the canvas") } else { ("eye", "Hide regions on the canvas") };
+                if crate::icons::button(ui, icon, 22.0, hidden, tr(tip)).clicked() {
+                    let st = &mut app.ui.ai_gen.regions;
+                    st.hidden = !hidden;
+                    st.typing = None;
                 }
             });
         });
@@ -601,7 +611,9 @@ pub(super) fn rows(app: &PhotocraftApp) -> usize {
     // The heading, the rows (or the hint), an open editor (its two-line prompt, type, colour,
     // fill and its margins; the words too for a text region).
     let words = |id: u32| app.session.active().is_some_and(|d| d.doc.ai_regions.iter().any(|r| r.id == id && r.kind == AiRegionKind::Text));
-    1 + n.max(1) + app.ui.ai_gen.regions.editor.map_or(0, |id| 6 + usize::from(words(id)))
+    // FIBO 2's note above the scene, two lines.
+    let note = if super::current_model(app).and_then(|m| m.layout()) == Some(photocraft_aigen::LayoutFormat::Fibo) { 2 } else { 0 };
+    1 + n.max(1) + note + app.ui.ai_gen.regions.editor.map_or(0, |id| 6 + usize::from(words(id)))
 }
 
 fn screen_rect(xf: &ViewXform, r: photocraft_geom::Rect) -> Rect {
@@ -692,11 +704,15 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
             // does a press in the selected box. Anywhere else a drag draws a new box, over other
             // boxes too (so a canvas full of them still takes one), and a click selects the box
             // under it (the front one first).
-            let selected = app.ui.ai_gen.region.and_then(|id| regions.iter().find(|r| r.id == id));
+            // Hidden, the boxes take no presses: a drag draws a new one (and shows them again).
+            let hidden = app.ui.ai_gen.regions.hidden;
+            let selected = app.ui.ai_gen.region.and_then(|id| regions.iter().find(|r| r.id == id)).filter(|_| !hidden);
             let reach = f64::from(HANDLE_REACH) / zoom;
             let grabbed = selected.and_then(|r| corner_near(r.rect, x, y, reach).map(|c| (r, c)));
-            let labelled = chip_at(app, &regions, x, y).and_then(|id| regions.iter().find(|r| r.id == id));
-            let drag = if let Some((r, corner)) = grabbed {
+            let labelled = chip_at(app, &regions, x, y).and_then(|id| regions.iter().find(|r| r.id == id)).filter(|_| !hidden);
+            let drag = if hidden {
+                Drag::New { start: [x, y], cur: [x, y], hit: None }
+            } else if let Some((r, corner)) = grabbed {
                 Drag::Resize { id: r.id, corner, start: [x, y], cur: [x, y], rect: r.rect }
             } else if let Some(r) = labelled {
                 app.ui.ai_gen.region = Some(r.id);
@@ -708,10 +724,20 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
             };
             app.ui.ai_gen.regions.drag = Some(drag);
         }
-        ToolEvent::Move { x, y, .. } => match &mut app.ui.ai_gen.regions.drag {
-            Some(Drag::New { cur, .. } | Drag::Move { cur, .. } | Drag::Resize { cur, .. }) => *cur = [x, y],
-            None => {}
-        },
+        ToolEvent::Move { x, y, .. } => {
+            let st = &mut app.ui.ai_gen.regions;
+            match &mut st.drag {
+                Some(Drag::New { start, cur, .. }) => {
+                    *cur = [x, y];
+                    // Drawing a box shows them all again.
+                    if (cur[0] - start[0]).abs().max((cur[1] - start[1]).abs()) * zoom >= f64::from(MIN_DRAG) {
+                        st.hidden = false;
+                    }
+                }
+                Some(Drag::Move { cur, .. } | Drag::Resize { cur, .. }) => *cur = [x, y],
+                None => {}
+            }
+        }
         ToolEvent::Up { x, y } => {
             let Some(mut drag) = app.ui.ai_gen.regions.drag.take() else { return true };
             let (Drag::New { cur, .. } | Drag::Move { cur, .. } | Drag::Resize { cur, .. }) = &mut drag;
@@ -720,6 +746,7 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
                 (Drag::New { start, cur, hit }, Some((_, rect))) => {
                     let far = (cur[0] - start[0]).abs().max((cur[1] - start[1]).abs()) * zoom >= f64::from(MIN_DRAG);
                     if far && rect.width() >= 1 && rect.height() >= 1 {
+                        app.ui.ai_gen.regions.hidden = false;
                         add(app, rect);
                     } else {
                         // A click: the box under it selected, or none on empty canvas.
@@ -738,7 +765,7 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
 
 /// A double-click on the canvas: on a box being edited, type its description.
 pub fn double_click(app: &mut PhotocraftApp, x: f64, y: f64) -> bool {
-    if !editing(app) {
+    if !editing(app) || app.ui.ai_gen.regions.hidden {
         return false;
     }
     let Some(id) = regions_of(app).iter().find(|r| contains(r.rect, x, y)).map(|r| r.id) else { return false };
@@ -749,9 +776,10 @@ pub fn double_click(app: &mut PhotocraftApp, x: f64, y: f64) -> bool {
     true
 }
 
-/// The boxes over the canvas while the Regions tab is in front, the gesture in progress, the
-/// description being typed, and the pointer's shape over them.
-pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painter, xf: &ViewXform) {
+/// The boxes over the canvas while the Regions tab is in front (unless hidden), the gesture in
+/// progress, the description being typed, and the pointer's shape over them. `hover`: where the
+/// pointer is over the canvas itself (none when a dialog, menu or window covers it).
+pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painter, xf: &ViewXform, hover: Option<egui::Pos2>) {
     if !on_canvas(app) {
         return;
     }
@@ -761,12 +789,13 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
     let drag = app.ui.ai_gen.regions.drag;
     let moving = drag.as_ref().and_then(|d| dragged(d, canvas));
     let selected = app.ui.ai_gen.region;
-    let typing = app.ui.ai_gen.regions.typing.filter(|_| editing);
+    let hidden = app.ui.ai_gen.regions.hidden;
+    let typing = app.ui.ai_gen.regions.typing.filter(|_| editing && !hidden);
     let clip = painter.clip_rect();
     let mut chips = Vec::with_capacity(regions.len());
     let mut labels = Vec::with_capacity(regions.len());
     // Back to front, so the one in front is drawn last.
-    for (i, r) in regions.iter().enumerate().rev() {
+    for (i, r) in regions.iter().enumerate().rev().filter(|_| !hidden) {
         let rect = match moving {
             Some((Some(id), rect)) if id == r.id => rect,
             _ => r.rect,
@@ -840,14 +869,14 @@ pub fn canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, painter: &egui::Painte
     // The pointer's shape: what a press there would do.
     if editing
         && drag.is_none()
-        && let Some(p) = ui.ctx().pointer_hover_pos().filter(|p| xf.rect.contains(*p))
+        && let Some(p) = hover.filter(|p| xf.rect.contains(*p))
     {
         let d = xf.to_doc(p);
-        let sel = selected.and_then(|id| regions.iter().find(|r| r.id == id));
+        let sel = selected.and_then(|id| regions.iter().find(|r| r.id == id)).filter(|_| !hidden);
         let icon = match sel.and_then(|r| corner_at(screen_rect(xf, r.rect), p)) {
             Some([-1, -1] | [1, 1]) => egui::CursorIcon::ResizeNwSe,
             Some(_) => egui::CursorIcon::ResizeNeSw,
-            None if chip_at(app, &regions, d[0], d[1]).is_some() || sel.is_some_and(|r| contains(r.rect, d[0], d[1])) => egui::CursorIcon::Move,
+            None if (!hidden && chip_at(app, &regions, d[0], d[1]).is_some()) || sel.is_some_and(|r| contains(r.rect, d[0], d[1])) => egui::CursorIcon::Move,
             None => egui::CursorIcon::Crosshair,
         };
         ui.ctx().set_cursor_icon(icon);

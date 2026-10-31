@@ -137,7 +137,8 @@ each with what goes in it, and the model is told both.
   ends). Picking any other tool hands the pointer back to it; the boxes stay in view until the
   tab is left.
 - **In the panel.** **Scene** is the prompt: the whole picture, its setting, light and style.
-  Under it, **Regions (N)**: **?** says how it works, then copy, clear all and add. Each row
+  Under it, **Regions (N)**: **?** says how it works, then the eye (hides the boxes on the
+  canvas, to see the picture; drawing a new box shows them again), copy, clear all and add. Each row
   is a region, front to back: drag a row up or down to change its depth (the top row is in
   front), the pencil (or a double-click on the row) opens its **Prompt** (what goes in the
   box), **Type** (Object, Character, Text), the **Words** of a text
@@ -172,11 +173,14 @@ comes last, as the vendors advise for overlaps; saying how they overlap in the d
 | FLUX 3 Image, FLUX.3 Klein | the scene citing each box as `<obj_N>`, a space, then a JSON array of `{"id", "bbox", "desc"}` rows; text quoted in `desc` (`text reading "…"`) | as Ideogram's |
 | FIBO 2 | Bria's VGL: `short_description`, `objects` and `text_render` | `[x, y, width, height]`, 0–1 from the top left |
 
-Not yet tried against the models themselves (ComfyUI was not installed when this was built,
-2026-10-30). Each format follows its vendor's documentation, and these are still to check with
-a render:
+Tried with renders on 2026-10-31: MOSS Image, FLUX.3 Klein and Ideogram 4 follow the boxes
+well. FIBO 2 follows them only roughly (the sky and the sun in place, a lake and a boat well off
+their boxes), so the Regions tab says so under the model for it: regions are experimental with
+FIBO 2. The caption format the open FIBO 2.0 is trained on (Bria's `bria_vgl`, and diffusers'
+examples) places objects in words, `location` and `relative_size`, with no box field; only
+Bria's VGL page lists `bounding_box`, "normalized", without saying which model reads it. Still
+to check with a render:
 
-- FIBO 2's VGL documents normalised boxes but neither their range nor their origin.
 - ComfyUI's own Ideogram 4 layout node builds a dictionary, not text; whether the same JSON as
   text through the text encoder is followed as well is to be seen.
 - FLUX.3 Klein runs here without its prompt upsampler, which Black Forest Labs say layouts are

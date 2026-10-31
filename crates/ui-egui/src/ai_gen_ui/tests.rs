@@ -2138,7 +2138,7 @@ fn a_box_label_selects_and_moves_its_box_even_behind_another() {
     for _ in 0..3 {
         ctx.run_ui(Default::default(), |ui| {
             let painter = ui.painter().clone();
-            regions::canvas(&mut app, ui, &painter, &xf);
+            regions::canvas(&mut app, ui, &painter, &xf, None);
         })
         .textures_delta
         .clear();
@@ -2160,6 +2160,56 @@ fn a_box_label_selects_and_moves_its_box_even_behind_another() {
     let doc = &app.session.active().unwrap().doc;
     assert_eq!((doc.ai_regions.len(), doc.ai_regions[1].rect), (2, photocraft_geom::Rect::new(90, 30, 190, 90)));
     assert_eq!(app.ui.ai_gen.region, Some(ids[1]));
+    // The pointer's shape is the boxes' over the canvas only: not with a dialog, menu or window
+    // over it (no hover on the canvas).
+    let cursor = |app: &mut PhotocraftApp, hover: Option<egui::Pos2>| {
+        let out = ctx.run_ui(Default::default(), |ui| {
+            let painter = ui.painter().clone();
+            regions::canvas(app, ui, &painter, &xf, hover);
+        });
+        out.platform_output.cursor_icon
+    };
+    assert_eq!(cursor(&mut app, Some(egui::pos2(20.0, 80.0))), egui::CursorIcon::Crosshair);
+    assert_eq!(cursor(&mut app, None), egui::CursorIcon::Default);
+    // Hidden, a press on a label or the selected box draws instead, and drawing shows them again;
+    // a click selects nothing and leaves them hidden.
+    app.ui.ai_gen.regions.hidden = true;
+    gesture(&mut app, [100.0, 60.0], [100.0, 60.0]);
+    assert_eq!((app.ui.ai_gen.region, app.ui.ai_gen.regions.hidden), (None, true));
+    assert!(!regions::double_click(&mut app, 100.0, 60.0));
+    app.ui.ai_gen.region = Some(ids[1]);
+    assert!(regions::pointer(&mut app, ToolEvent::Down { x: 100.0, y: 60.0, pressure: 1.0 }));
+    assert!(regions::pointer(&mut app, ToolEvent::Move { x: 140.0, y: 90.0, pressure: 1.0 }));
+    assert!(!app.ui.ai_gen.regions.hidden, "shown as soon as a box is being drawn");
+    assert!(regions::pointer(&mut app, ToolEvent::Up { x: 140.0, y: 90.0 }));
+    let doc = &app.session.active().unwrap().doc;
+    assert_eq!((doc.ai_regions.len(), doc.ai_regions[0].rect), (3, photocraft_geom::Rect::new(100, 60, 140, 90)));
+}
+
+#[test]
+fn fibo_2_says_it_places_regions_roughly() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = app();
+    add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
+    add_model(&mut app, Model { id: "fibo".into(), ..Family::Fibo2.preset() });
+    app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
+    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    app.ui.ai_gen.create_task = CreateTask::Regions;
+    app.ui.ai_gen.model = "moss".into();
+    let without = regions::rows(&app);
+    app.ui.ai_gen.model = "fibo".into();
+    assert_eq!(regions::rows(&app), without + 2, "the note's lines count in the panel's height");
+    let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
+        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+        app
+    });
+    h.run_steps(8);
+    let note = "Regions are experimental with FIBO 2: it places them roughly and may not follow the boxes exactly.";
+    assert!(h.query_by_label(note).is_some());
+    // MOSS Image was trained on boxes: no note.
+    h.state_mut().ui.ai_gen.model = "moss".into();
+    h.run_steps(4);
+    assert!(h.query_by_label(note).is_none());
 }
 
 #[test]

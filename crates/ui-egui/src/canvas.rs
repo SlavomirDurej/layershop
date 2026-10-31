@@ -1321,8 +1321,10 @@ fn paint_primary_overlays(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut
 
     draw_canvas_tool_cursor(app, ui, input, resizing);
     // AI Gen › Create › Regions: the boxes, over everything the tools draw, and the pointer's
-    // shape over them (after the tool's, so it wins).
-    crate::ai_gen_ui::regions::canvas(app, ui, painter, xf);
+    // shape over them (after the tool's, so it wins), only where the canvas itself is hovered.
+    let hover =
+        input.response.hover_pos().filter(|_| !crate::tool_cursor::pointer_elsewhere(input.ctx, &crate::panel_docking::native_viewports(app, input.ctx)));
+    crate::ai_gen_ui::regions::canvas(app, ui, painter, xf, hover);
 }
 
 fn draw_canvas_tool_cursor(app: &mut PhotocraftApp, ui: &mut egui::Ui, input: &CanvasOverlayInput<'_>, resizing: bool) {

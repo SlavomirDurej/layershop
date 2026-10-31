@@ -15,8 +15,10 @@
 //! - **FLUX 3** (Image and Klein): the caption citing each box as `<obj_N>`, a space, then a JSON
 //!   array of `{"id", "bbox", "desc"}` rows, boxes as Ideogram's. Text is quoted in `desc`.
 //! - **FIBO 2**: Bria's VGL, `objects` and `text_render` with `bounding_box` `[x, y, width,
-//!   height]`, normalised. Bria doesn't document the range or the origin: 0–1 from the top left
-//!   is assumed here until a render confirms it.
+//!   height]`, normalised, 0–1 from the top left (Bria's VGL page gives neither range nor
+//!   origin). The open FIBO 2.0 was trained on captions without boxes (`location` and
+//!   `relative_size` words, in `bria_vgl`), and a render follows them only roughly: the panel
+//!   calls regions experimental with it.
 //!
 //! No format has a depth field. Every one is written back to front (the last region first), so
 //! what is in front comes last, as the vendors advise for overlaps.

@@ -1462,6 +1462,17 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     // Prompt. ⌘/Ctrl+Return generates. Laying out regions, it is the scene, a box of a few lines
     // with the regions under it.
     let laying_out = regions::tab_open(app);
+    // FIBO 2's open model was trained on captions that place things in words, not boxes: it
+    // follows a layout roughly. Said before the scene, so nobody expects MOSS Image's precision.
+    if laying_out && current.layout() == Some(photocraft_aigen::LayoutFormat::Fibo) {
+        ui.horizontal_top(|ui| {
+            let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
+            crate::icons::paint(ui, icon, "triangle-alert", 13.0, t.warning);
+            let note = "Regions are experimental with FIBO 2: it places them roughly and may not follow the boxes exactly.";
+            ui.add(egui::Label::new(RichText::new(tr(note)).color(t.text_dim).size(11.5)).wrap());
+        });
+        ui.add_space(2.0);
+    }
     if laying_out {
         ui.label(RichText::new(tr("Scene")).color(t.text_dim).size(11.5));
     }

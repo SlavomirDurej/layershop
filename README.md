@@ -37,6 +37,7 @@ https://github.com/user-attachments/assets/476dd370-8cc9-4476-8401-1771848b3de3
 LayerShop is a native image editor (layers, masks, adjustment layers, layer styles, type, vector shapes, real PSD files) with one new panel, **AI Gen**:
 
 - **Create** makes a new picture from a prompt and puts it on a new layer.
+- **Regions** lay a new picture out before it is made: draw boxes on the canvas and say what goes in each (an object, a character, or exact words to render), then describe the whole scene. Models trained on boxes place things where you drew them: MOSS Image, Ideogram 4, FLUX.3 Klein and FLUX 3; FIBO 2 follows them roughly. The layer keeps its layout, so **Load from layer** brings the boxes, the scene and the model back to try again.
 - **Edit** changes only the part you select. A lasso, Select Sky or a painted mask says where; Canvas Size makes room; an alpha channel gives you a cutout. Outside the selection, not a pixel moves.
 - **References.** Turn a layer from this or any open document into a named reference (`@Hat`, `@Scarf`) and use it in the prompt. References are saved with the document.
 - **Restyle** repaints a layer in another style at a strength you choose.
@@ -56,7 +57,7 @@ LayerShop does not ship its own model. It drives [ComfyUI](https://github.com/co
 
 - **Setup wizard.** The first time you open AI Gen, a five-step wizard checks your PC and sets up local AI: it installs a private ComfyUI with its own Python and downloads the models you pick. It uses built-in ComfyUI nodes only, so there are no custom nodes to maintain.
 - **Already run ComfyUI?** Point LayerShop at your server and your models. A server it did not start is never stopped.
-- **Local models** (run on your GPU, work offline once installed): Qwen Image 2.1 (the default for editing), FLUX.3 Klein, FLUX.2 Klein 9B, Z-Image Turbo, MOSS Image (small, suited to weaker cards), Krea 2 Turbo, Ideogram 4, HiDream O1, Ernie Image Turbo and Ming Image 0.1 Design.
+- **Local models** (run on your GPU, work offline once installed): Qwen Image 2.1 (the default for editing), FLUX.3 Klein, FLUX.2 Klein 9B, Z-Image Turbo, MOSS Image (small, suited to weaker cards), Krea 2 Turbo, Ideogram 4, FIBO 2 Dev (creates and edits), HiDream O1, Ernie Image Turbo and Ming Image 0.1 Design.
 - **Cloud models** (optional, with your own API key, billed by the provider): OpenAI GPT Image, Google Nano Banana, Black Forest Labs FLUX 3, xAI Grok Imagine and Meta Muse Image.
 - **Model manager.** Preferences › Generative AI scans your server, takes your own model files, tunes the sampler, and takes custom ComfyUI workflows in API format.
 
@@ -100,9 +101,9 @@ PhotoCraft's own status is early alpha: it is **not yet a Photoshop replacement 
 
 ## How this relates to PhotoCraft
 
-LayerShop is a fork of PhotoCraft by the [ArtCraft](https://getartcraft.com/) team and its contributors, used under its MIT / Apache-2.0 licence (this preview includes PhotoCraft 0.10.0). What LayerShop adds:
+LayerShop is a fork of PhotoCraft by the [ArtCraft](https://getartcraft.com/) team and its contributors, used under its MIT / Apache-2.0 licence (this preview includes PhotoCraft 0.17.0). What LayerShop adds:
 
-- the AI Gen panel (Create, Edit, Restyle and references),
+- the AI Gen panel (Create, Regions, Edit, Restyle and references),
 - the local setup wizard and ComfyUI management,
 - the model manager and the supported-model workflows,
 - the Windows installer and the website.
