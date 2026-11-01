@@ -10,11 +10,12 @@
 //! ```
 //!
 //! The second form renders the detected model with that number at the given selection size and
-//! writes the image.
+//! writes the image. `PHOTOCRAFT_LORAS=file:strength,file:strength` stacks LoRAs from the
+//! server's `loras` on it, and `PHOTOCRAFT_SEED` fixes the seed (to compare with and without).
 
 use std::time::Duration;
 
-use photocraft_aigen::{Control, Job, Settings, Source, UreqTransport, comfy_models, detect::detect, generate, random_seed};
+use photocraft_aigen::{Control, Job, LoraUse, Settings, Source, UreqTransport, comfy_models, detect::detect, generate, random_seed};
 
 fn main() {
     if let Err(e) = run() {
@@ -98,6 +99,16 @@ fn run() -> Result<(), String> {
     // says (the Edit tab's Change with an edit model), only where the mask is transparent if one
     // is given.
     let mode = args.get(4).map(String::as_str);
+    let seed = std::env::var("PHOTOCRAFT_SEED").ok().and_then(|v| v.parse().ok()).unwrap_or_else(random_seed);
+    let loras: Vec<LoraUse> = std::env::var("PHOTOCRAFT_LORAS")
+        .unwrap_or_default()
+        .split(',')
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| match l.rsplit_once(':') {
+            Some((file, strength)) => LoraUse { file: file.trim().into(), strength: strength.trim().parse().unwrap_or(1.0) },
+            None => LoraUse { file: l.trim().into(), strength: 1.0 },
+        })
+        .collect();
     let job = if mode == Some("inpaint") || mode == Some("edit") {
         let edit = mode == Some("edit");
         let read = |i: usize| {
@@ -114,13 +125,14 @@ fn run() -> Result<(), String> {
             prompt,
             width,
             height,
-            seed: random_seed(),
+            seed,
             alpha: false,
             source: Some(Source { image, mask, width, height, strength, edit, references: Vec::new(), shown: Vec::new() }),
+            loras: loras.clone(),
         }
     } else {
         // A further `alpha` asks for a transparent background (the panel's Alpha Channel box).
-        Job { prompt, width: size(4), height: size(5), seed: random_seed(), alpha: args.get(6).map(String::as_str) == Some("alpha"), source: None }
+        Job { prompt, width: size(4), height: size(5), seed, alpha: args.get(6).map(String::as_str) == Some("alpha"), source: None, loras: loras.clone() }
     };
     let settings = Settings { comfy_url: url, ..Settings::default() };
     let control = Control { cancelled: &|| false, progress: &|f, m| eprintln!("{:>3.0}%  {m}", f * 100.0), sleep: &|d: Duration| std::thread::sleep(d) };

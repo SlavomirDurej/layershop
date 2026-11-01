@@ -7,8 +7,9 @@ use photocraft_aigen::Launch;
 use photocraft_aigen::launch::join_args;
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{FOLDERS, Manifest, split_key};
+use crate::manifest::{FOLDERS, LEGACY_FOLDERS, Manifest, split_key};
 use crate::plan::{Layout, MARKER, PART};
+pub use crate::plan::{has_model_folders, models_root};
 use crate::{Error, Result};
 
 /// The first port tried for the engine. Not 8188 (the portable build's default) and not 8000
@@ -63,24 +64,103 @@ fn yaml_quoted(text: &str) -> String {
 }
 
 /// ComfyUI's "extra model paths" file for `models_dir`: every model folder of it, searched
-/// first (`is_default`), so what the wizard downloads is what the engine lists.
-pub fn model_paths_yaml(models_dir: &Path) -> String {
+/// first (`is_default`), so what the wizard downloads is what the engine lists. Then the user's
+/// own models folders (`extra`), read after it, with the older folder names they may use.
+pub fn model_paths_yaml(models_dir: &Path, extra: &[PathBuf]) -> String {
     let mut out = String::from("# Written by the Local AI setup: where this engine finds its models.\nlayershop:\n");
     out.push_str(&format!("    base_path: {}\n    is_default: true\n", yaml_quoted(&models_dir.to_string_lossy())));
     for folder in FOLDERS {
         out.push_str(&format!("    {folder}: {folder}\n"));
     }
+    for (i, dir) in extra.iter().enumerate() {
+        out.push_str(&format!("yours{}:\n    base_path: {}\n", i + 1, yaml_quoted(&dir.to_string_lossy())));
+        for folder in FOLDERS.iter().copied().chain(LEGACY_FOLDERS.iter().map(|(_, old)| *old)) {
+            out.push_str(&format!("    {folder}: {folder}\n"));
+        }
+    }
     out
 }
 
-/// Write the model paths file, and make the folders it names (ComfyUI lists a missing one as
-/// empty, but a download into it should not have to create it under a running server).
+/// Write the model paths file, and make the folders it names in the setup's own models folder
+/// (ComfyUI lists a missing one as empty, but a download into it should not have to create it
+/// under a running server). Nothing is made in the user's own folders.
 pub fn write_model_paths(layout: &Layout) -> Result<()> {
     for folder in FOLDERS {
         let dir = layout.models_dir.join(folder);
         std::fs::create_dir_all(&dir).map_err(|e| disk(&dir, "create the folder", &e))?;
     }
-    std::fs::write(&layout.model_paths, model_paths_yaml(&layout.models_dir)).map_err(|e| disk(&layout.model_paths, "write", &e))
+    std::fs::write(&layout.model_paths, model_paths_yaml(&layout.models_dir, &layout.extra_models)).map_err(|e| disk(&layout.model_paths, "write", &e))
+}
+
+/// The file types ComfyUI lists as models (its `supported_pt_extensions`). Others in a models
+/// folder (`.gguf`, which needs a custom node) are not offered.
+const MODEL_EXTENSIONS: [&str; 8] = ["safetensors", "sft", "ckpt", "pt", "pt2", "pth", "bin", "pkl"];
+
+/// The model files in one of the user's own models folders, by folder, named as the engine lists
+/// them: in subfolders too (`sub\name` on Windows), with what an older folder name holds
+/// (`unet`) listed under the folder it stands for, and only the file types ComfyUI loads.
+pub fn list_linked_models(root: &Path) -> BTreeMap<String, Vec<String>> {
+    const DEPTH: usize = 8;
+    const MAX_FILES: usize = 20_000;
+    let mut out = BTreeMap::new();
+    for folder in FOLDERS {
+        let older = LEGACY_FOLDERS.iter().filter(|(now, _)| *now == folder).map(|(_, old)| *old);
+        let mut names: Vec<String> = Vec::new();
+        for source in std::iter::once(folder).chain(older) {
+            // Folders to read, each with the name it adds in front of what is in it.
+            let mut stack = vec![(root.join(source), String::new(), 0usize)];
+            // Bounded: a models folder has tens of subfolders, not thousands.
+            let mut visited = 0usize;
+            while let Some((dir, prefix, depth)) = stack.pop() {
+                visited += 1;
+                if visited > 5_000 {
+                    break;
+                }
+                let Ok(entries) = std::fs::read_dir(&dir) else { continue };
+                for entry in entries.flatten().take(MAX_FILES) {
+                    let Ok(name) = entry.file_name().into_string() else { continue };
+                    // Followed through links, as ComfyUI does.
+                    let Ok(meta) = std::fs::metadata(entry.path()) else { continue };
+                    let shown = if prefix.is_empty() { name.clone() } else { format!("{prefix}{}{name}", std::path::MAIN_SEPARATOR) };
+                    if meta.is_dir() {
+                        if depth < DEPTH && name != ".git" {
+                            stack.push((entry.path(), shown, depth + 1));
+                        }
+                    } else if name.rsplit_once('.').is_some_and(|(_, ext)| MODEL_EXTENSIONS.iter().any(|e| ext.eq_ignore_ascii_case(e)))
+                        && names.len() < MAX_FILES
+                        && !names.contains(&shown)
+                    {
+                        names.push(shown);
+                    }
+                }
+            }
+        }
+        names.sort();
+        if !names.is_empty() {
+            out.insert(folder.to_string(), names);
+        }
+    }
+    out
+}
+
+/// The model files the installed engine has, by folder, as it lists them: those in the setup's
+/// own models folder, then those in the user's own folders (`extra`) that it doesn't have.
+pub fn list_all_models(models_dir: &Path, extra: &[PathBuf]) -> BTreeMap<String, Vec<String>> {
+    let mut out = list_models(models_dir);
+    for root in extra {
+        for (folder, names) in list_linked_models(root) {
+            let have = out.entry(folder).or_default();
+            for name in names {
+                if !have.contains(&name) {
+                    have.push(name);
+                }
+            }
+        }
+    }
+    for names in out.values_mut() {
+        names.sort();
+    }
+    out
 }
 
 /// How the installed engine is started: the portable build's own command line (its
@@ -227,7 +307,7 @@ pub fn remove_models(manifest: &Manifest, models_dir: &Path, ids: &[String], kee
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan::{Choices, MODEL_PATHS};
+    use crate::plan::{Choices, MODEL_PATHS, same_folder};
     use photocraft_aigen::launch::split_args;
 
     fn manifest() -> &'static Manifest {
@@ -264,7 +344,7 @@ mod tests {
 
     #[test]
     fn the_model_paths_file_survives_any_folder_name() {
-        let yaml = model_paths_yaml(Path::new("D:\\My \"AI\" models\\ünï: # stuff"));
+        let yaml = model_paths_yaml(Path::new("D:\\My \"AI\" models\\ünï: # stuff"), &[]);
         assert!(yaml.contains("    base_path: \"D:\\\\My \\\"AI\\\" models\\\\ünï: # stuff\"\n"), "{yaml}");
         assert!(yaml.contains("    is_default: true\n") && yaml.starts_with("# "));
         for folder in FOLDERS {
@@ -276,6 +356,75 @@ mod tests {
         std::fs::create_dir_all(&layout.engine_root).unwrap();
         write_model_paths(&layout).unwrap();
         assert!(layout.model_paths.is_file() && layout.models_dir.join("text_encoders").is_dir());
+    }
+
+    #[test]
+    fn the_users_own_models_folders_are_read_after_the_setups_and_never_made() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut layout = layout(dir.path());
+        let (mine, theirs) = (dir.path().join("ComfyUIModels").join("models"), dir.path().join("old drive"));
+        layout.extra_models = vec![mine.clone(), theirs.clone()];
+        std::fs::create_dir_all(&layout.engine_root).unwrap();
+        std::fs::create_dir_all(mine.join("loras")).unwrap();
+        write_model_paths(&layout).unwrap();
+        let yaml = std::fs::read_to_string(&layout.model_paths).unwrap();
+        // Only one folder is where ComfyUI saves: the setup's own.
+        assert_eq!(yaml.matches("is_default").count(), 1, "{yaml}");
+        assert!(yaml.contains(&format!("yours1:\n    base_path: {}\n", yaml_quoted(&mine.to_string_lossy()))), "{yaml}");
+        assert!(yaml.contains("yours2:") && yaml.contains("    unet: unet\n") && yaml.contains("    clip: clip\n"), "{yaml}");
+        assert!(!theirs.exists() && !mine.join("vae").exists(), "nothing is made in the user's folders");
+        // The app reads the file the way ComfyUI does: its own folder first, then the user's.
+        let launch = launch(manifest(), &layout, false);
+        let found = photocraft_aigen::launch::models_folders(&launch, &|p| std::fs::read_to_string(p).ok(), &|p| p.is_dir());
+        let at = |p: &Path| found.iter().position(|f| same_folder(Path::new(f), p));
+        assert!(at(&layout.models_dir) < at(&mine) && at(&mine).is_some(), "{found:?}");
+    }
+
+    #[test]
+    fn a_linked_folder_lists_what_comfyui_would() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        for file in [
+            "loras/style.safetensors",
+            "loras/qwen/lightning.safetensors",
+            "loras/notes.txt",
+            "unet/old_style.safetensors",
+            "diffusion_models/z_image_turbo_bf16.safetensors",
+            "diffusion_models/ltx-q4.gguf",
+            "clip/t5.SAFETENSORS",
+            "loras/.git/objects/x.pt",
+        ] {
+            let path = file.split('/').fold(root.to_path_buf(), |p, part| p.join(part));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, b"x").unwrap();
+        }
+        let sub = format!("qwen{}lightning.safetensors", std::path::MAIN_SEPARATOR);
+        let listed = list_linked_models(root);
+        assert_eq!(listed["loras"], vec![sub, "style.safetensors".to_string()]);
+        assert_eq!(listed["diffusion_models"], vec!["old_style.safetensors".to_string(), "z_image_turbo_bf16.safetensors".to_string()]);
+        assert_eq!(listed["text_encoders"], vec!["t5.SAFETENSORS".to_string()]);
+        assert!(!listed.contains_key("vae") && list_linked_models(&root.join("missing")).is_empty());
+
+        // Beside the setup's own folder: each name once.
+        let own = dir.path().join("own");
+        std::fs::create_dir_all(own.join("loras")).unwrap();
+        std::fs::write(own.join("loras").join("style.safetensors"), b"x").unwrap();
+        std::fs::write(own.join("loras").join("mine.safetensors"), b"x").unwrap();
+        let all = list_all_models(&own, &[root.to_path_buf()]);
+        assert_eq!(all["loras"].len(), 3, "{all:?}");
+        assert!(all["loras"].contains(&"mine.safetensors".to_string()));
+    }
+
+    #[test]
+    fn a_comfyui_folder_stands_for_the_models_folder_in_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let comfy = dir.path().join("ComfyUI");
+        std::fs::create_dir_all(comfy.join("models").join("checkpoints")).unwrap();
+        assert_eq!(models_root(&comfy), comfy.join("models"));
+        assert_eq!(models_root(&comfy.join("models")), comfy.join("models"));
+        // Nothing to go by: what was picked.
+        assert_eq!(models_root(dir.path()), dir.path().to_path_buf());
+        assert!(has_model_folders(&comfy.join("models")) && !has_model_folders(&comfy));
     }
 
     #[test]

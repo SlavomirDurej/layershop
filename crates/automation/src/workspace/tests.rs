@@ -45,6 +45,7 @@ fn automation_may_look_at_the_local_ai_setup_but_not_run_it() {
         ("ai.setup.plan", json!({"models": ["qwen-image-2-1"]})),
         ("ai.setup.hfStatus", json!({})),
         ("ai.setup.hfAccess", json!({"models": ["flux-3-klein"]})),
+        ("ai.setup.modelFolders", json!({})),
     ] {
         assert!(authorize_engine_command(id, &params).is_ok(), "{id} {params}");
         assert!(authorize_desktop_engine_command(id, &params).is_ok(), "{id} {params}");
@@ -63,6 +64,9 @@ fn automation_may_look_at_the_local_ai_setup_but_not_run_it() {
         ("ai.setup.plan", json!({"models": [], "modelsDir": "C:\\Windows"})),
         ("ai.setup.plan", json!({"engineDir": null})),
         ("ai.setup.plan", json!({"serverFiles": {}})),
+        ("ai.setup.plan", json!({"extraModelsDirs": ["C:/Users"]})),
+        ("ai.setup.manifest", json!({"extraModelsDirs": []})),
+        ("ai.setup.modelFolders", json!({"folders": []})),
     ] {
         let e = authorize_engine_command(id, &params).unwrap_err().to_string();
         assert!(e.contains(id) && e.contains("the user's to do"), "{id} {params}: {e}");
@@ -582,6 +586,8 @@ fn registry_filesystem_path_params_are_classified() {
         "input": "/outside/photocraft-input",
         "output": "/outside/photocraft-output",
         "paths": ["/outside/photocraft-probe.psd"],
+        "folders": ["/outside/photocraft-models"],
+        "extraModelsDirs": ["/outside/photocraft-models"],
     });
     let preference_probe = serde_json::json!({"path": ".scriptEvents", "value": {}});
     let unclassified: Vec<_> = photocraft_engine::command_specs()

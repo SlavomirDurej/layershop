@@ -550,6 +550,51 @@ pub const FIBO2_NEGATIVE: &str = r#"{"short_description":"","objects":[{"descrip
 /// `references`, the Edit tab's rows).
 pub const MAX_REFERENCES: usize = 3;
 
+/// The most LoRAs one generation stacks (`ai.generate`'s `loras`, the panel's Advanced rows).
+pub const MAX_LORAS: usize = 5;
+/// The strengths a LoRA may be given: a slider runs 0..=2, a typed value this far.
+pub const LORA_STRENGTHS: std::ops::RangeInclusive<f64> = -4.0..=4.0;
+
+/// A LoRA a local model offers the AI Gen panel ([`Model::loras`]): set up once in the model's
+/// settings, then added to a generation with a strength of its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Lora {
+    /// The file, as ComfyUI names it under `models/loras` (with its subfolder, if any).
+    pub file: String,
+    /// Shown in the panel; empty: [`Lora::label`] makes one from the file.
+    pub name: String,
+    /// The strength it starts at when added to a generation.
+    pub strength: f64,
+    /// Words the LoRA was trained to answer to, added to the prompt while it is used.
+    pub trigger: String,
+}
+
+impl Default for Lora {
+    fn default() -> Self {
+        Lora { file: String::new(), name: String::new(), strength: 1.0, trigger: String::new() }
+    }
+}
+
+impl Lora {
+    /// Its name, or one made from its file: no folder or extension, `_` and `-` as spaces
+    /// (`styles/ghibli_style-v2.safetensors` is "ghibli style v2").
+    pub fn label(&self) -> String {
+        label_of(&self.name, &self.file)
+    }
+}
+
+/// A LoRA's name, or one made from its file ([`Lora::label`]).
+pub fn label_of(name: &str, file: &str) -> String {
+    let name = name.trim();
+    if !name.is_empty() {
+        return name.to_string();
+    }
+    let base = file.trim().rsplit(['/', '\\']).next().unwrap_or("");
+    let stem = base.rsplit_once('.').filter(|(stem, ext)| !stem.is_empty() && !ext.contains(' ')).map_or(base, |(stem, _)| stem);
+    stem.split(['_', '-']).filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ")
+}
+
 /// The model an edit runs when the user chose none, among `offered` (in the panel's order): a
 /// local Qwen Image 2.1, the recommended edit model (the user's call, 2026-10-16), ahead of the
 /// cloud models listed first; else the first offered.
@@ -588,9 +633,13 @@ pub struct Model {
     pub vae: String,
     /// ControlNet file (`models/controlnet`): the inpainting ControlNet of [`Family::QwenInpaint`].
     pub controlnet: String,
-    /// Optional LoRA file (`models/loras`) and its strength.
+    /// Optional LoRA file (`models/loras`) and its strength, always applied: the speed LoRA a
+    /// few-step schedule needs (Qwen's Lightning), which `steps` and `cfg` are set for.
     pub lora: String,
     pub lora_strength: f64,
+    /// The LoRAs the AI Gen panel offers for this model, each added to a generation with its
+    /// own strength ([`crate::Job::loras`]). Not for checkpoint-less custom workflows.
+    pub loras: Vec<Lora>,
     /// HiDream O1, text to image: a text encoder that can write (Gemma 4, `models/text_encoders`).
     /// It rewrites the prompt as the one descriptive paragraph the model was trained on before
     /// the picture is rendered. Empty: the prompt goes in as typed.
@@ -659,6 +708,7 @@ impl Default for Model {
             controlnet: String::new(),
             lora: String::new(),
             lora_strength: 1.0,
+            loras: Vec::new(),
             enhancer: String::new(),
             refiner: String::new(),
             refiner_clip: String::new(),
@@ -724,6 +774,19 @@ impl Model {
             Provider::Bfl if self.api_model.trim().starts_with("flux-3") => Some(crate::layout::LayoutFormat::Flux3),
             Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => None,
         }
+    }
+
+    /// LoRAs can be added to its generations ([`Model::loras`]): a local model whose graph is
+    /// built here and loads a diffusion model or an all-in-one checkpoint of its own (not a
+    /// custom workflow, and not the checkpoint families with graphs of their own).
+    pub fn takes_loras(&self) -> bool {
+        self.provider.is_local() && self.family != Family::Custom && (!self.family.uses_checkpoint() || self.family == Family::Checkpoint)
+    }
+
+    /// The LoRA of [`Model::loras`] that `wanted` names, by file or by name (ignoring case).
+    pub fn lora(&self, wanted: &str) -> Option<&Lora> {
+        let wanted = wanted.trim();
+        self.loras.iter().find(|l| l.file.trim() == wanted).or_else(|| self.loras.iter().find(|l| l.label().eq_ignore_ascii_case(wanted)))
     }
 
     /// How many reference pictures an edit with this model takes ([`MAX_REFERENCES`] at most).
@@ -955,6 +1018,33 @@ impl Settings {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_lora_is_named_after_its_file_until_it_is_given_a_name() {
+        let lora = |name: &str, file: &str| Lora { name: name.into(), file: file.into(), ..Lora::default() };
+        assert_eq!(lora("", "styles/ghibli_style-v2.safetensors").label(), "ghibli style v2");
+        assert_eq!(lora("", r"sub\Qwen-Image-Lightning-4steps-V1.0.safetensors").label(), "Qwen Image Lightning 4steps V1.0");
+        assert_eq!(lora("  Ghibli ", "x.safetensors").label(), "Ghibli");
+        assert_eq!((lora("", "").label(), lora("", ".hidden").label(), lora("", "a__b").label()), (String::new(), ".hidden".into(), "a b".into()));
+        assert_eq!(Lora::default().strength, 1.0);
+        // Found by file, else by name.
+        let m = Model { loras: vec![lora("Ink", "ink_v1.safetensors"), lora("", "oil_paint.safetensors")], ..Model::default() };
+        assert_eq!(m.lora("ink_v1.safetensors").map(Lora::label), Some("Ink".into()));
+        assert_eq!(m.lora("OIL PAINT").map(|l| l.file.as_str()), Some("oil_paint.safetensors"));
+        assert!(m.lora("watercolour").is_none());
+        // Settings saved before LoRA lists existed load with none.
+        let old: Model = serde_json::from_str(r#"{"id":"q","lora":"l.safetensors"}"#).unwrap();
+        assert!(old.loras.is_empty() && old.lora == "l.safetensors");
+        let saved = serde_json::to_value(&m).unwrap();
+        assert_eq!(saved["loras"][0], serde_json::json!({"file": "ink_v1.safetensors", "name": "Ink", "strength": 1.0, "trigger": ""}));
+    }
+
+    #[test]
+    fn loras_are_for_the_local_graphs_built_here() {
+        assert!(Family::QwenImage21.preset().takes_loras() && Family::Checkpoint.preset().takes_loras());
+        assert!(!Family::Custom.preset().takes_loras() && !Family::HidreamO1.preset().takes_loras());
+        assert!(!Model::cloud(Provider::Openai, "GPT", "gpt-image-2", false).takes_loras());
+    }
 
     #[test]
     fn settings_round_trip_and_tolerate_missing_and_unknown_keys() {

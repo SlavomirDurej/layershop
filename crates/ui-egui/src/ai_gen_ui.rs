@@ -188,6 +188,8 @@ pub struct AiGenUi {
     pub seed: Option<u64>,
     /// The Advanced section is open.
     pub advanced: bool,
+    /// The LoRAs added to each local model's generations (Advanced › LoRAs), by model id.
+    pub loras: std::collections::BTreeMap<String, Vec<loras::PanelLora>>,
     /// The seed the last generation was rendered with, to keep for the next (Advanced).
     pub last_seed: Option<u64>,
     /// What the last generation cost in US dollars, when the provider reported it (OpenAI).
@@ -235,6 +237,7 @@ impl Default for AiGenUi {
             alpha: false,
             seed: None,
             advanced: false,
+            loras: Default::default(),
             last_seed: None,
             last_cost: None,
             floating: false,
@@ -828,6 +831,9 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
     if let Some(seed) = ui.seed() {
         params["seed"] = json!(seed);
     }
+    if let Some(list) = loras::param(app, &model) {
+        params["loras"] = list;
+    }
     let result = crate::jobs_ui::run(app, GENERATE, params)?;
     // Inline (no background jobs): the result is here already. A job reports through `finished`.
     if result.get("pending").is_none() {
@@ -860,8 +866,9 @@ fn layer_prompt(app: &PhotocraftApp, layer: u64) -> Option<&str> {
 }
 
 /// Put the prompt `layer` was generated with into the prompt box, in place of what is there,
-/// and choose the model it was made with again (when it is still offered). A layer
-/// laid out in regions brings them back with the Regions tab; the other settings stay. `false`,
+/// and choose the model it was made with again (when it is still offered), with the LoRAs it
+/// was made with. A layer laid out in regions brings them back with the Regions tab; the other
+/// settings stay. `false`,
 /// and nothing changes, for a layer that was not generated (or has no prompt) and while a
 /// generation runs (the panel shows that one).
 pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
@@ -883,12 +890,18 @@ pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
     }
     // The model it was made with, when it is still offered: Change's own choice for a change
     // (a fill or an edit), the other one for a creation or a restyle.
-    let made =
-        app.session.active().and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer))).and_then(|l| l.generation.as_ref()).map(|g| (g.mode, g.model.clone()));
-    if let Some((mode, model)) = made {
+    let made = app
+        .session
+        .active()
+        .and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer)))
+        .and_then(|l| l.generation.as_ref())
+        .map(|g| (g.mode, g.model.clone(), g.loras.clone()));
+    if let Some((mode, model, lora_list)) = made {
         let changing = matches!(mode, GenerationMode::Inpaint | GenerationMode::ImgEdit);
         let offered = app.session.prefs().integrations.ai.listed().into_iter().any(|m| m.id == model && fits(m, changing) && usable(app, m));
         if offered {
+            // And the LoRAs it was made with, as it was made: none, if it had none.
+            loras::restore(app, &model, &lora_list);
             *(if changing { &mut app.ui.ai_gen.edit_model } else { &mut app.ui.ai_gen.model }) = model;
         }
     }
@@ -994,7 +1007,7 @@ fn rows_above(ui: &AiGenUi, kind: GenerationMode, references: usize) -> usize {
 /// The rows between the prompt and Generate: the mask tools of a change, the Advanced heading
 /// and, open, its rows.
 fn rows_below(ui: &AiGenUi, model: Option<&Model>, kind: GenerationMode) -> usize {
-    usize::from(ui.changing()) + 1 + if ui.advanced { advanced_rows(model, kind) } else { 0 }
+    usize::from(ui.changing()) + 1 + if ui.advanced { advanced_rows(model, kind) + loras::rows(ui, model) } else { 0 }
 }
 
 /// The height the panel's content wants in the dock (`panel_docking`'s `dock_heights`): the
@@ -1562,6 +1575,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
             change_row(app, ui, &current, inpaint, width, !busy);
         }
         seed_row(app, ui, &current, !busy);
+        loras::section(app, ui, &current, !busy);
     }
 
     // One row, so the button stays in view in a short dock group: an option on the left,
@@ -2260,6 +2274,60 @@ fn status_line(ui: &mut egui::Ui, f: &Map<String, Value>, hint: &str, width: f32
     });
 }
 
+/// The engine PhotoCraft installed: models folders the user already has, which it reads too.
+/// Adding or removing one is done at once (`ai.setup.modelFolders`), then scanned like Scan Server.
+fn own_folders(ui: &mut egui::Ui, setup: &Value, f: &mut Map<String, Value>, busy: bool) {
+    let t = Tokens::get(ui.ctx());
+    widgets::section_label(ui, tr("Your models folders"));
+    ui.add_space(2.0);
+    let dirs: Vec<String> =
+        setup.get("extraModelsDirs").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    ui.scope(|ui| {
+        ui.set_max_width(520.0);
+        for (i, dir) in dirs.iter().enumerate() {
+            ui.horizontal(|ui| {
+                let room = ui.available_width() - 70.0;
+                ui.add_sized([room, 20.0], egui::Label::new(RichText::new(dir).font(crate::theme::mono(12.0)).color(t.text_dim)).truncate()).on_hover_text(dir);
+                let remove = ui.add_enabled(!busy, egui::Label::new(RichText::new(tr("Remove")).color(t.text_faint).size(11.5).underline()).sense(egui::Sense::click()));
+                if remove.clicked() {
+                    f.insert(ACTION.into(), json!(format!("{FOLDER_REMOVE}{i}")));
+                }
+            });
+        }
+        let full = dirs.len() >= photocraft_aisetup::plan::MAX_EXTRA_MODELS_DIRS;
+        if ui.add_enabled_ui(!busy && !full, |ui| widgets::secondary_button(ui, tr("Add Folder…"), 120.0)).inner.clicked() {
+            f.insert(ACTION.into(), json!(FOLDER_ADD));
+        }
+        ui.add_space(3.0);
+        ui.add(
+            egui::Label::new(
+                RichText::new(tr(
+                    "Models folders you already have, such as another ComfyUI's. The engine reads them too: their models and LoRAs are listed beside its own, and nothing in them is changed or deleted.",
+                ))
+                .color(t.text_faint)
+                .size(11.5),
+            )
+            .wrap(),
+        );
+    });
+}
+
+const FOLDER_ADD: &str = "ownFolderAdd";
+const FOLDER_REMOVE: &str = "ownFolderRemove:";
+
+/// The user's own models folders changed to `folders`: saved, then the page scans as Scan Server
+/// does, so the models and LoRAs in them are listed (and the engine started on the new folders).
+fn own_folders_changed(app: &mut PhotocraftApp, f: &mut Map<String, Value>, folders: &[String]) {
+    match crate::ai_setup_ui::set_own_folders(app, folders) {
+        Ok(_) => {
+            f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
+            f.insert(STATUS.into(), json!({"error": false, "text": tr("Reading the models folders…")}));
+            f.insert(ACTION.into(), json!("detect"));
+        }
+        Err(e) => failed(f, &e),
+    }
+}
+
 /// Local Server: where local models run, and how PhotoCraft starts it.
 fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>) {
     let t = Tokens::get(ui.ctx());
@@ -2299,6 +2367,10 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                 f.insert(ACTION.into(), json!("setupRemove"));
             }
         });
+        if setup.get("managed").and_then(Value::as_bool) == Some(true) {
+            ui.add_space(10.0);
+            own_folders(ui, &setup, f, busy);
+        }
         ui.add_space(10.0);
         widgets::section_label(ui, tr("Server"));
         ui.add_space(2.0);
@@ -3064,11 +3136,14 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
                     file_row(ui, m, "controlnet", "ControlNet", folder("controlnet"), false);
                 }
             }
-            if family != Family::Custom && (!family.uses_checkpoint() || family == Family::Checkpoint) {
-                file_row(ui, m, "lora", "LoRA", folder("loras"), true);
+            let takes_loras = family != Family::Custom && (!family.uses_checkpoint() || family == Family::Checkpoint);
+            if takes_loras {
+                file_row(ui, m, "lora", "Speed LoRA", folder("loras"), true);
                 if !text_of(m, "lora").is_empty() {
-                    number_row(ui, m, "loraStrength", "LoRA strength", -4.0..=4.0, false, "");
+                    number_row(ui, m, "loraStrength", "Speed LoRA strength", -4.0..=4.0, false, "Always applied: a few-step LoRA (Qwen's Lightning) that the steps and CFG are set for");
                 }
+                group(ui, "LoRAs");
+                loras::library(ui, m, folder("loras"));
             }
 
             group(ui, "Sampling");
@@ -3317,6 +3392,37 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
             Err(e) => launch_status(f, true, &e.to_string()),
         },
         "browsePython" | "browseScript" => browse(app, f, action == "browsePython"),
+        FOLDER_ADD => {
+            let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: None }, |app, answer| {
+                let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer else { return Ok(Value::Null) };
+                let mut folders = app.ui.ai_setup.extra_models_dirs.clone();
+                let picked = crate::ai_setup_ui::own_folder(&path);
+                let Some(d) = app.ui.dialogs.iter().position(|d| crate::prefs_ui::is_preferences(&d.fields)) else { return Ok(Value::Null) };
+                let mut fields = std::mem::take(&mut app.ui.dialogs[d].fields);
+                match picked {
+                    Ok(dir) => {
+                        folders.push(dir);
+                        own_folders_changed(app, &mut fields, &folders);
+                    }
+                    Err(why) => failed(&mut fields, &why),
+                }
+                if let Some(dialog) = app.ui.dialogs.get_mut(d) {
+                    dialog.fields = fields;
+                }
+                Ok(Value::Null)
+            });
+            if let Err(e) = asked {
+                failed(f, &format!("{}: {e}", tr("Could not open the folder dialog")));
+            }
+        }
+        _ if action.starts_with(FOLDER_REMOVE) => {
+            let at: usize = action.trim_start_matches(FOLDER_REMOVE).parse().unwrap_or(usize::MAX);
+            let mut folders = app.ui.ai_setup.extra_models_dirs.clone();
+            if at < folders.len() {
+                folders.remove(at);
+                own_folders_changed(app, f, &folders);
+            }
+        }
         // The wizard is a window: the dialog is confirmed first, then it opens (see `ai_setup_ui`).
         "setup" => crate::ai_setup_ui::request_from_prefs(app, "open"),
         "setupRepair" => crate::ai_setup_ui::request_from_prefs(app, "repair"),
@@ -3418,6 +3524,7 @@ pub fn load_keys(app: &mut PhotocraftApp) {
     }
 }
 
+mod loras;
 mod refs;
 pub mod regions;
 #[cfg(test)]

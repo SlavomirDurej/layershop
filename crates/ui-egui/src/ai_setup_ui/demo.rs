@@ -450,6 +450,24 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
     Some(root)
 }
 
+/// After [`pretend_installed`]: Z-Image Turbo's model file is not in the setup's folder but in
+/// the user's own (`ComfyUIModels\models`, under the older folder name, with two LoRAs), which
+/// the engine is pointed at. Returns that folder.
+pub fn own_models_folder(app: &mut PhotocraftApp, dir: &Path) -> Option<std::path::PathBuf> {
+    let manifest = small_manifest()?;
+    let key = manifest.files.keys().find(|k| k.starts_with("diffusion_models/z_image"))?.clone();
+    let name = key.rsplit('/').next()?.to_string();
+    std::fs::remove_file(dir.join("models").join("diffusion_models").join(&name)).ok()?;
+    let mine = dir.join("ComfyUIModels").join("models");
+    for (folder, file, bytes) in [("unet", name.as_str(), contents(&key)), ("loras", "pixel_art_style_z_image_turbo.safetensors", b"lora".to_vec())] {
+        std::fs::create_dir_all(mine.join(folder)).ok()?;
+        std::fs::write(mine.join(folder).join(file), bytes).ok()?;
+    }
+    std::fs::write(mine.join("loras").join("krea2_darkbrush.safetensors"), b"lora").ok()?;
+    super::set_own_folders(app, &[mine.to_string_lossy().into_owned()]).ok()?;
+    Some(mine)
+}
+
 /// Put one of the wizard's screens in front of `app`, as it looks in use: `pc`, `location`,
 /// `models`, `install` (a setup under way) or `ready` (one that has just finished); `installed`
 /// and `installed-models` are the first screen and the Models screen of a setup that is there
@@ -458,6 +476,9 @@ pub fn pretend_installed(app: &PhotocraftApp, dir: &Path) -> Option<std::path::P
 /// `models-hf`, `models-licence` and `models-ready` the Models screen with
 /// FLUX.3 Klein ticked (signed out; signed in without its licence accepted; ready),
 /// `models-moved` and `sign-in-moved` signed in with FLUX.3 Klein's file moved by its maker,
+/// `installed-own`, `installed-location-own` and `installed-models-own` those (and the Location
+/// screen) with a models folder of the user's own beside the setup's, `installed-prefs-own` the
+/// Local Server preferences page that lists it,
 /// `models-light` the Models screen on an 8 GB card (the Light preset, MOSS Image first),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
 /// asks while a setup runs; `aigen-empty` the AI Gen panel with nothing set up and no ComfyUI
@@ -597,15 +618,33 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         }
         return true;
     }
-    // A setup that is there already: its first screen, or its models with what can be deleted.
+    // A setup that is there already: its first screen, or its models with what can be deleted;
+    // `-own`: with a models folder of the user's own that has one of the models.
     if let Some(screen) = page.strip_prefix("installed") {
         install(app, dir, Scale::Small);
         app.ui.ai_setup.probe = Some(probe(dir));
         if pretend_installed(app, dir).is_none() {
             return false;
         }
+        let own = screen.ends_with("-own");
+        if own && own_models_folder(app, dir).is_none() {
+            return false;
+        }
+        // The Preferences page that adds and removes them, not the wizard.
+        if screen == "-prefs-own" {
+            super::refresh_status(app);
+            let id = crate::prefs_ui::open_preferences(app, "generativeAi");
+            if let Some(d) = app.ui.dialog_mut(id) {
+                d.fields.insert("__aiPage".into(), json!("server"));
+            }
+            return true;
+        }
         super::open(app);
-        app.ui.ai_setup.page = if screen == "-models" { Page::Models } else { Page::Pc };
+        app.ui.ai_setup.page = match screen.trim_end_matches("-own") {
+            "-models" => Page::Models,
+            "-location" => Page::Location,
+            _ => Page::Pc,
+        };
         return true;
     }
     // A small drive: the engine fits, the recommended models don't, and Next still goes on to

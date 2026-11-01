@@ -2,8 +2,9 @@
 //! queue, history and file answers.
 //!
 //! The workflows follow ComfyUI's own text-to-image templates for each family and use only nodes
-//! that ship with ComfyUI. Anything else (LoRA stacks, prompt enhancers, custom samplers) goes
-//! through [`Family::Custom`]: the user's own workflow with placeholders.
+//! that ship with ComfyUI, with the generation's LoRAs chained after the model ([`Job::loras`]).
+//! Anything else (prompt enhancers, custom samplers) goes through [`Family::Custom`]: the user's
+//! own workflow with placeholders.
 
 use serde_json::{Map, Value, json};
 
@@ -263,19 +264,19 @@ pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value>
 
 /// Can `model` edit a picture? The error says what to fix.
 pub fn check_edit(model: &Model) -> Result<()> {
-    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new() };
     build_edit(model, &job, &Edit { image: "image", mask: None, shown: None, references: &[] }).map(|_| ())
 }
 
 /// Can `model` run at all (and, with `inpainting`, repaint an image)? The error says what to fix.
 pub fn check(model: &Model, inpainting: bool) -> Result<()> {
-    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new() };
     build(model, &job, inpainting.then_some(&Inpaint { image: "image", mask: Some("mask"), denoise: 1.0 })).map(|_| ())
 }
 
 /// Can `model` redraw a picture (image to image)? The error says what to fix.
 pub fn check_img2img(model: &Model) -> Result<()> {
-    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None };
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new() };
     build(model, &job, Some(&Inpaint { image: "image", mask: None, denoise: 0.5 })).map(|_| ())
 }
 
@@ -298,7 +299,7 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         return Err(Error::Config(format!("{name} is an edit model: it changes a picture following an instruction (the Edit tab) and does nothing else")));
     }
     let mut g = Graph::default();
-    let (mut unet, clip, vae) = loaders(&mut g, model)?;
+    let (mut unet, clip, vae) = loaders(&mut g, model, job)?;
     let cfg = finite(model.cfg, 1.0);
     // HiDream O1's prompt writer and refining pass are for a picture made from a prompt alone.
     let polished = f == Family::HidreamO1 && inpaint.is_none();
@@ -442,11 +443,11 @@ fn refined(g: &mut Graph, model: &Model, job: &Job, image: &Link, text: &Value) 
     Ok(g.node("VAEDecode", json!({"samples": samples, "vae": vae})))
 }
 
-/// The nodes that load `model`'s files: the diffusion model (through its LoRA and its sampling
+/// The nodes that load `model`'s files: the diffusion model (through its LoRAs and its sampling
 /// shift), the text encoder and the VAE.
-fn loaders(g: &mut Graph, model: &Model) -> Result<(Link, Link, Link)> {
+fn loaders(g: &mut Graph, model: &Model, job: &Job) -> Result<(Link, Link, Link)> {
     let f = model.family;
-    let (mut unet, clip, vae) = if f.uses_checkpoint() {
+    let (mut unet, mut clip, vae) = if f.uses_checkpoint() {
         let id = g.add("CheckpointLoaderSimple", json!({"ckpt_name": file(&model.checkpoint, "a checkpoint file", model)?}));
         (json!([id, 0]), json!([id, 1]), json!([id, 2]))
     } else {
@@ -473,6 +474,24 @@ fn loaders(g: &mut Graph, model: &Model) -> Result<(Link, Link, Link)> {
     };
     if !model.lora.trim().is_empty() {
         unet = g.node("LoraLoaderModelOnly", json!({"model": unet, "lora_name": model.lora.trim(), "strength_model": finite(model.lora_strength, 1.0)}));
+    }
+    // The generation's own LoRAs, chained after it. Their changes to the weights add up, so the
+    // order doesn't matter. A checkpoint's LoRAs were trained on its text encoder too (SD and
+    // SDXL); the newer models' LoRAs change the diffusion model alone.
+    if model.takes_loras() {
+        for lora in job.loras.iter().take(crate::MAX_LORAS) {
+            let strength = finite(lora.strength, 1.0).clamp(*crate::LORA_STRENGTHS.start(), *crate::LORA_STRENGTHS.end());
+            let name = lora.file.trim();
+            if name.is_empty() || strength == 0.0 {
+                continue;
+            }
+            if f == Family::Checkpoint {
+                let id = g.add("LoraLoader", json!({"model": unet, "clip": clip, "lora_name": name, "strength_model": strength, "strength_clip": strength}));
+                (unet, clip) = (json!([id, 0]), json!([id, 1]));
+            } else {
+                unet = g.node("LoraLoaderModelOnly", json!({"model": unet, "lora_name": name, "strength_model": strength}));
+            }
+        }
     }
     let shift = finite(model.shift, 0.0);
     if f.has_shift() && shift > 0.0 {
@@ -603,7 +622,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
         return Err(Error::Config(format!("{name} takes {} reference pictures at most, not {}", f.max_references(), edit.references.len())));
     }
     let mut g = Graph::default();
-    let (mut unet, clip, vae) = loaders(&mut g, model)?;
+    let (mut unet, clip, vae) = loaders(&mut g, model, job)?;
     let cfg = finite(model.cfg, 1.0);
     // The picture to edit first: it is "image 1" to the model, the references follow. With a
     // mask the model may be shown less of it than it paints over, but not FIBO 2: it scales a
@@ -962,7 +981,7 @@ mod tests {
     use crate::model::MOSS_NEGATIVE;
 
     fn job() -> Job {
-        Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false, source: None }
+        Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false, source: None, loras: Vec::new() }
     }
 
     fn classes(w: &Value) -> Vec<String> {
@@ -1116,6 +1135,60 @@ mod tests {
         // Another sampler chosen for Dev is sampled as any other model is.
         let w = workflow(&Model { sampler: "euler".into(), ..dev }, &job()).unwrap();
         assert!(has(&w, "KSampler") && !has(&w, "SamplerCustom"));
+    }
+
+    #[test]
+    fn a_generations_loras_chain_after_the_speed_lora() {
+        let use_ = |file: &str, strength: f64| crate::LoraUse { file: file.into(), strength };
+        let mut m = Family::QwenImage21.preset();
+        m.lora = "lightning.safetensors".into();
+        let stacked = Job { loras: vec![use_("a.safetensors", 0.8), use_(" ", 1.0), use_("off.safetensors", 0.0), use_("b.safetensors", 9.0)], ..job() };
+        let w = workflow(&m, &stacked).unwrap();
+        let loras = nodes_with(&w, "LoraLoaderModelOnly");
+        // The speed LoRA, then the two that do something: an empty file and a strength of 0 are
+        // left out, and an absurd strength is brought into range.
+        let names: Vec<_> = loras.iter().map(|n| (n["inputs"]["lora_name"].clone(), n["inputs"]["strength_model"].clone())).collect();
+        assert_eq!(names, [(json!("lightning.safetensors"), json!(1.0)), (json!("a.safetensors"), json!(0.8)), (json!("b.safetensors"), json!(4.0))]);
+        // Each takes the model from the one before it.
+        let fed_by = |name: &str| {
+            let node = loras.iter().find(|n| n["inputs"]["lora_name"] == name).unwrap();
+            w[node["inputs"]["model"][0].as_str().unwrap()]["inputs"]["lora_name"].clone()
+        };
+        assert_eq!((fed_by("a.safetensors"), fed_by("b.safetensors")), (json!("lightning.safetensors"), json!("a.safetensors")));
+        assert_well_formed(&w);
+        // An edit is given them too.
+        let source = crate::Source {
+            image: b"P".to_vec(),
+            mask: Vec::new(),
+            width: 1024,
+            height: 768,
+            strength: 1.0,
+            edit: true,
+            references: Vec::new(),
+            shown: Vec::new(),
+        };
+        let edit = Edit { image: "p.png", mask: None, references: &[], shown: None };
+        let e = edit_workflow(&m, &Job { source: Some(source), ..stacked.clone() }, &edit).unwrap();
+        assert_eq!(nodes_with(&e, "LoraLoaderModelOnly").len(), 3);
+
+        // No more than five, whatever is asked.
+        let many = Job { loras: (0..9).map(|i| use_(&format!("{i}.safetensors"), 1.0)).collect(), ..job() };
+        assert_eq!(nodes_with(&workflow(&Family::ZImage.preset(), &many).unwrap(), "LoraLoaderModelOnly").len(), crate::MAX_LORAS);
+
+        // A checkpoint's LoRA changes its text encoder as well, which the prompt is encoded with.
+        let w = workflow(
+            &Model { checkpoint: "sd_xl_base.safetensors".into(), ..Family::Checkpoint.preset() },
+            &Job { loras: vec![use_("sdxl.safetensors", 0.5)], ..job() },
+        )
+        .unwrap();
+        let lora = nodes_with(&w, "LoraLoader");
+        assert_eq!((lora.len(), &lora[0]["inputs"]["strength_clip"]), (1, &json!(0.5)));
+        let lora_id = w.as_object().unwrap().iter().find(|(_, n)| n["class_type"] == "LoraLoader").map(|(id, _)| json!(id)).unwrap();
+        assert!(nodes_with(&w, "CLIPTextEncode").iter().all(|n| n["inputs"]["clip"] == json!([lora_id, 1])));
+
+        // A custom workflow is the user's own graph: nothing is added to it.
+        let custom = Model { family: Family::Custom, workflow: r#"{"1":{"class_type":"SaveImage","inputs":{"t":"%prompt%"}}}"#.into(), ..Model::default() };
+        assert!(nodes_with(&workflow(&custom, &many).unwrap(), "LoraLoaderModelOnly").is_empty());
     }
 
     #[test]

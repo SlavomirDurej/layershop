@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::manifest::{Manifest, ModelEntry, split_key};
+use crate::manifest::{LEGACY_FOLDERS, Manifest, ModelEntry, split_key};
 use crate::{Error, Result};
 
 /// Written into the engine folder when the runtime is unpacked whole: its presence is what
@@ -19,6 +19,8 @@ use crate::{Error, Result};
 pub const MARKER: &str = "layershop-engine.json";
 /// ComfyUI's list of extra model folders, pointing it at the models folder.
 pub const MODEL_PATHS: &str = "layershop-models.yaml";
+/// The note of an Install screen row whose file is in one of the user's own models folders.
+pub const LINKED_NOTE: &str = "in your models folder";
 /// A download in progress, beside where the finished file goes.
 pub const PART: &str = ".part";
 /// Room kept free on a drive beyond what the plan needs.
@@ -48,6 +50,10 @@ pub struct Choices {
     pub engine_dir: String,
     /// Where model files go: a ComfyUI `models` directory.
     pub models_dir: String,
+    /// Managed: models folders the user already has (another ComfyUI's `models`), which the
+    /// engine reads too. They are only read: a file the setup needs that is in one is not
+    /// downloaded, and nothing is ever written into them or deleted from them.
+    pub extra_models_dirs: Vec<String>,
     /// Managed: the build for the graphics card (a key of the manifest's assets).
     pub variant: String,
     /// Managed: no graphics card the engine can use, and the user installs anyway. The engine
@@ -62,6 +68,24 @@ pub struct Choices {
     pub server_files: Option<BTreeMap<String, Vec<String>>>,
     /// Render a test image at the end.
     pub test_image: bool,
+}
+
+impl Choices {
+    /// The user's own models folders the engine reads ([`Layout::extra_models`]), for what is
+    /// read back from a record: an entry that is not a full path is left out instead of failing.
+    pub fn extra_models(&self) -> Vec<PathBuf> {
+        if self.route != Route::Managed {
+            return Vec::new();
+        }
+        let own = PathBuf::from(self.models_dir.trim());
+        let mut out: Vec<PathBuf> = Vec::new();
+        for dir in self.extra_models_dirs.iter().take(MAX_EXTRA_MODELS_DIRS).filter_map(|d| folder(d, "models").ok()) {
+            if !same_folder(&dir, &own) && !out.iter().any(|d| same_folder(d, &dir)) {
+                out.push(dir);
+            }
+        }
+        out
+    }
 }
 
 /// One thing a setup does.
@@ -117,6 +141,10 @@ pub struct Planned {
     pub recheck: bool,
     /// Why the step is left out (a gated file without a sign-in), when it is.
     pub skipped: Option<String>,
+    /// A file that is not downloaded because one of the user's own models folders has it: that
+    /// folder.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linked: Option<String>,
 }
 
 /// A model of the selection, and whether the plan can install it.
@@ -182,7 +210,12 @@ pub struct Layout {
     pub python: PathBuf,
     pub script: PathBuf,
     pub models_dir: PathBuf,
+    /// Managed: the user's own models folders the engine reads too ([`Choices::extra_models_dirs`]).
+    pub extra_models: Vec<PathBuf>,
 }
+
+/// How many models folders of their own a user can add.
+pub const MAX_EXTRA_MODELS_DIRS: usize = 16;
 
 impl Layout {
     pub fn new(manifest: &Manifest, choices: &Choices) -> Result<Layout> {
@@ -205,6 +238,10 @@ impl Layout {
             Route::Existing => String::new(),
         };
         let inside = |rel: &str| rel.split('/').fold(engine_root.clone(), |p, part| p.join(part));
+        let extra_models = match choices.route {
+            Route::Managed => extra_folders(&choices.extra_models_dirs, &models_dir)?,
+            Route::Existing => Vec::new(),
+        };
         Ok(Layout {
             archive: engine_dir.join(archive_name),
             marker: engine_root.join(MARKER),
@@ -214,6 +251,7 @@ impl Layout {
             engine_dir,
             engine_root,
             models_dir,
+            extra_models,
         })
     }
 
@@ -222,6 +260,49 @@ impl Layout {
         let (folder, name) = split_key(key).ok_or_else(|| Error::Config(format!("`{key}` is not a model file")))?;
         Ok(self.models_dir.join(folder).join(name))
     }
+
+    /// Where the user's own models folders would have the file `name` of `folder`, each with the
+    /// folder it is in: under the folder's name, and under its older name too (`unet`).
+    pub fn linked_files(&self, folder: &str, name: &str) -> Vec<(PathBuf, &Path)> {
+        let older = LEGACY_FOLDERS.iter().filter(|(now, _)| *now == folder).map(|(_, old)| *old);
+        let names: Vec<&str> = std::iter::once(folder).chain(older).collect();
+        self.extra_models.iter().flat_map(|root| names.iter().map(move |f| (root.join(f).join(name), root.as_path()))).collect()
+    }
+}
+
+/// Does `dir` look like a models folder: one of the model folders ComfyUI reads is in it?
+pub fn has_model_folders(dir: &Path) -> bool {
+    crate::manifest::FOLDERS.iter().copied().chain(LEGACY_FOLDERS.iter().map(|(_, old)| *old)).any(|f| dir.join(f).is_dir())
+}
+
+/// The models folder a folder the user picked stands for: itself, or the `models` folder in it
+/// when that was a ComfyUI folder (`ComfyUI`, with `models` inside).
+pub fn models_root(picked: &Path) -> PathBuf {
+    let inside = picked.join("models");
+    if !has_model_folders(picked) && has_model_folders(&inside) { inside } else { picked.to_path_buf() }
+}
+
+/// Two folders are the same, whatever their case and slashes (Windows paths are not case-sensitive).
+pub fn same_folder(a: &Path, b: &Path) -> bool {
+    let key = |p: &Path| p.to_string_lossy().replace('\\', "/").trim_end_matches('/').to_lowercase();
+    key(a) == key(b)
+}
+
+/// The user's own models folders, checked as [`folder`] checks a folder, each once, without the
+/// setup's own models folder.
+pub fn extra_folders(list: &[String], own: &Path) -> Result<Vec<PathBuf>> {
+    let list: Vec<&String> = list.iter().filter(|d| !d.trim().is_empty()).collect();
+    if list.len() > MAX_EXTRA_MODELS_DIRS {
+        return Err(Error::Config(format!("at most {MAX_EXTRA_MODELS_DIRS} models folders of your own can be added")));
+    }
+    let mut out: Vec<PathBuf> = Vec::new();
+    for text in list {
+        let dir = folder(text, "models")?;
+        if !same_folder(&dir, own) && !out.iter().any(|d| same_folder(d, &dir)) {
+            out.push(dir);
+        }
+    }
+    Ok(out)
 }
 
 /// `path` with [`PART`] appended to its file name.
@@ -294,6 +375,7 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
             done: fetched,
             recheck: false,
             skipped: None,
+            linked: None,
         });
         out.steps.push(Planned {
             step: Step::UnpackRuntime,
@@ -303,6 +385,7 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
             done: installed,
             recheck: false,
             skipped: None,
+            linked: None,
         });
         if !installed {
             // The archive is deleted once it is unpacked, but both are on the drive for a while.
@@ -325,7 +408,13 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
         // On the user's own server, a file it lists is there, wherever its folder is.
         let on_server = choices.server_files.as_ref().is_some_and(|list| has_file(list, folder, name));
         let there = disk.len(&path) == Some(file.size);
-        let done = on_server || (there && !choices.recheck);
+        // One of the user's own models folders has it: used where it is, never downloaded or
+        // checked (it is not the setup's).
+        let linked = (!there && !on_server)
+            .then(|| layout.linked_files(folder, name).into_iter().find(|(p, _)| disk.len(p) == Some(file.size)))
+            .flatten()
+            .map(|(_, root)| root.to_string_lossy().into_owned());
+        let done = on_server || (there && !choices.recheck) || linked.is_some();
         let have = if done || there { 0 } else { disk.len(&part_of(&path)).unwrap_or(0).min(file.size) };
         if !done && !there && skipped.is_none() {
             let left = file.size.saturating_sub(have);
@@ -340,10 +429,11 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
             done,
             recheck: there && choices.recheck && !on_server,
             skipped,
+            linked,
         });
     }
 
-    let cheap = |step: Step, label: &str| Planned { step, label: label.into(), bytes: 0, have: 0, done: false, recheck: false, skipped: None };
+    let cheap = |step: Step, label: &str| Planned { step, label: label.into(), bytes: 0, have: 0, done: false, recheck: false, skipped: None, linked: None };
     if managed {
         out.steps.push(cheap(Step::WriteModelPaths, "Point the engine at your models"));
     }
@@ -550,6 +640,45 @@ mod tests {
         );
         assert_eq!(p.steps.iter().map(|s| s.done).collect::<Vec<_>>(), [true, false, true, false, false]);
         assert_eq!((p.download_bytes, p.engine_bytes), (m.files["text_encoders/qwen3vl_8b_fp8_scaled.safetensors"].size, 0));
+    }
+
+    #[test]
+    fn a_file_in_the_users_own_models_folder_is_not_downloaded_again() {
+        let m = manifest();
+        let (unet, encoder, vae) = (
+            "diffusion_models/qwen_image_2.1_int8_convrot.safetensors",
+            "text_encoders/qwen3vl_8b_fp8_scaled.safetensors",
+            "vae/qwen_image_2.1_vae_bf16.safetensors",
+        );
+        let (mine, other) = (root("mine"), root("other"));
+        // Each folder once, the setup's own left out, blanks ignored.
+        let c =
+            Choices { extra_models_dirs: vec![mine.clone(), " ".into(), mine.to_uppercase(), root("models"), other.clone()], ..choices(&["qwen-image-2-1"]) };
+        let layout = Layout::new(m, &c).unwrap();
+        assert_eq!(layout.extra_models, [PathBuf::from(&mine), PathBuf::from(&other)]);
+        let mut disk = Fake::default();
+        // The diffusion model under the older folder name, the encoder in the second folder, and
+        // the VAE there too but not the same file (another size).
+        let name = |key: &str| key.rsplit('/').next().unwrap().to_string();
+        disk.0.insert(PathBuf::from(&mine).join("unet").join(name(unet)), m.files[unet].size);
+        disk.0.insert(PathBuf::from(&other).join("text_encoders").join(name(encoder)), m.files[encoder].size);
+        disk.0.insert(PathBuf::from(&other).join("vae").join(name(vae)), 1234);
+        let p = plan(m, &Choices { recheck: true, ..c.clone() }, &disk).unwrap();
+        let by = |key: &str| p.steps.iter().find(|s| s.step.key() == format!("file:{key}")).unwrap().clone();
+        assert_eq!((by(unet).done, by(unet).linked.as_deref(), by(unet).recheck), (true, Some(mine.as_str()), false));
+        assert_eq!((by(encoder).done, by(encoder).linked.as_deref()), (true, Some(other.as_str())));
+        assert_eq!((by(vae).done, by(vae).linked), (false, None));
+        assert_eq!(p.models_bytes, m.files[vae].size);
+        // The setup's own copy comes first.
+        disk.0.insert(layout.model_file(unet).unwrap(), m.files[unet].size);
+        assert_eq!(plan(m, &c, &disk).unwrap().steps.iter().find(|s| s.step.key() == format!("file:{unet}")).unwrap().linked, None);
+        // Only the engine this app installs reads them.
+        let existing = Choices { route: Route::Existing, ..c.clone() };
+        assert!(Layout::new(m, &existing).unwrap().extra_models.is_empty());
+        // A folder that is not a full path, or too many, can't be planned.
+        assert!(plan(m, &Choices { extra_models_dirs: vec!["models".into()], ..c.clone() }, &disk).is_err());
+        let many: Vec<String> = (0..=MAX_EXTRA_MODELS_DIRS).map(|i| root(&format!("m{i}"))).collect();
+        assert!(plan(m, &Choices { extra_models_dirs: many, ..c }, &disk).is_err());
     }
 
     #[test]

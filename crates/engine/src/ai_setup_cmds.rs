@@ -61,9 +61,10 @@ fn fit(model: &photocraft_aisetup::manifest::ModelEntry, vram_gb: Option<u64>) -
 }
 
 /// What the wizard offers, with sizes: `{comfy, models, presets, suggested}`. `installed`
-/// (manifest ids) marks the models that are there already. A small card is offered the light
-/// preset, its models listed first.
-fn manifest_value(m: &Manifest, installed: &[String], vram_gb: Option<u64>) -> Value {
+/// (manifest ids) marks the models that are there already, and `linked` those of them that are
+/// there only because the user's own models folders have their files (they are not the setup's
+/// to delete). A small card is offered the light preset, its models listed first.
+fn manifest_value(m: &Manifest, installed: &[String], linked: &[String], vram_gb: Option<u64>) -> Value {
     let models: Vec<Value> = m
         .offered(vram_gb)
         .into_iter()
@@ -75,7 +76,7 @@ fn manifest_value(m: &Manifest, installed: &[String], vram_gb: Option<u64>) -> V
                 "licence": {"name": model.licence.name, "url": model.licence.url, "commercial": model.licence.commercial},
                 "page": model.page, "gated": model.gated, "minVramGb": model.min_vram_gb, "testedVramGb": model.tested_vram_gb,
                 "bytes": m.download_bytes(std::slice::from_ref(&model.id)), "files": files,
-                "installed": installed.contains(&model.id), "fit": fit(model, vram_gb), "minComfy": model.min_comfy,
+                "installed": installed.contains(&model.id), "linked": linked.contains(&model.id), "fit": fit(model, vram_gb), "minComfy": model.min_comfy,
             })
         })
         .collect();
@@ -390,6 +391,12 @@ mod native {
             models,
             engine_dir: or_default(text_param(p, "engineDir", cmd)?, &record.choices.engine_dir, &env.engine_dir),
             models_dir: or_default(text_param(p, "modelsDir", cmd)?, &record.choices.models_dir, &env.models_dir),
+            // Only the engine this app installs is pointed at them; a ComfyUI of the user's own
+            // reads what its own settings say.
+            extra_models_dirs: match route {
+                Route::Managed => folders_param(p, "extraModelsDirs", cmd)?.unwrap_or_else(|| record.choices.extra_models_dirs.clone()),
+                Route::Existing => Vec::new(),
+            },
             variant,
             // Not given (Continue Setup): as the last setup ran, like the variant.
             cpu: route == Route::Managed && flag_param(p, "cpu", record.choices.cpu, cmd)?,
@@ -400,16 +407,73 @@ mod native {
         })
     }
 
-    /// The models of the manifest that are installed whole in the record's models folder.
-    fn installed_now(s: &Session) -> Vec<String> {
-        let record = s.ai_setup.record();
-        let (Ok(m), false) = (manifest(s), record.choices.models_dir.trim().is_empty()) else { return Vec::new() };
-        configure::installed(&m, &runtime::list_models(Path::new(&record.choices.models_dir)))
+    /// `{key: [folder, …]}`: the user's own models folders, as typed or picked. A ComfyUI folder
+    /// stands for the `models` folder in it. Absent or null: `None`.
+    fn folders_param(p: &Value, key: &str, cmd: &str) -> Result<Option<Vec<String>>> {
+        let Some(v) = p.get(key).filter(|v| !v.is_null()) else { return Ok(None) };
+        let list = v
+            .as_array()
+            .filter(|l| l.len() <= plan::MAX_EXTRA_MODELS_DIRS)
+            .ok_or_else(|| bad(cmd, format!("`{key}` must be a list of at most {} folders", plan::MAX_EXTRA_MODELS_DIRS)))?;
+        let mut out = Vec::new();
+        for dir in list {
+            let dir = dir.as_str().map(str::trim).ok_or_else(|| bad(cmd, format!("`{key}` must be a list of folders (full paths)")))?;
+            if dir.len() > 1024 || dir.chars().any(char::is_control) {
+                return Err(bad(cmd, format!("`{key}` must be a list of folders (full paths)")));
+            }
+            if !dir.is_empty() {
+                out.push(runtime::models_root(Path::new(dir)).to_string_lossy().into_owned());
+            }
+        }
+        Ok(Some(out))
     }
 
+    /// The model files the engine of `choices` has, by folder: those in its models folder and in
+    /// the user's own folders it reads too.
+    fn files_of(choices: &Choices) -> BTreeMap<String, Vec<String>> {
+        let own = choices.models_dir.trim();
+        // No models folder yet: nothing of the setup's own (an empty path is the working folder).
+        let mut out = if own.is_empty() { BTreeMap::new() } else { runtime::list_models(Path::new(own)) };
+        for (folder, names) in runtime::list_all_models(Path::new(""), &choices.extra_models()) {
+            let have = out.entry(folder).or_default();
+            for name in names {
+                if !have.contains(&name) {
+                    have.push(name);
+                }
+            }
+        }
+        out
+    }
+
+    /// The models of the manifest that are installed whole for the engine of `choices`, and
+    /// those of them that are whole only because the user's own folders have their files.
+    fn installed_for(m: &Manifest, choices: &Choices) -> (Vec<String>, Vec<String>) {
+        let installed = configure::installed(m, &files_of(choices));
+        let own = choices.models_dir.trim();
+        let own = if own.is_empty() { Vec::new() } else { configure::installed(m, &runtime::list_models(Path::new(own))) };
+        let linked = installed.iter().filter(|id| !own.contains(id)).cloned().collect();
+        (installed, linked)
+    }
+
+    /// The models of the manifest that are installed whole, in the record's models folder and the
+    /// user's own folders the engine reads.
+    fn installed_now(s: &Session) -> Vec<String> {
+        let Ok(m) = manifest(s) else { return Vec::new() };
+        installed_for(&m, &s.ai_setup.record().choices).0
+    }
+
+    /// `{vramGb?, extraModelsDirs?}`: the wizard's models, marked installed as the record's
+    /// folders have them, or with `extraModelsDirs` the user's own folders the wizard has chosen.
     pub(super) fn manifest_cmd(s: &mut Session, p: &Value) -> Result<Value> {
-        let vram = vram_param(p, "ai.setup.manifest")?;
-        Ok(manifest_value(&*manifest(s)?, &installed_now(s), vram))
+        let cmd = "ai.setup.manifest";
+        let vram = vram_param(p, cmd)?;
+        let m = manifest(s)?;
+        let mut choices = s.ai_setup.record().choices;
+        if let Some(dirs) = folders_param(p, "extraModelsDirs", cmd)? {
+            (choices.route, choices.extra_models_dirs) = (Route::Managed, dirs);
+        }
+        let (installed, linked) = installed_for(&m, &choices);
+        Ok(manifest_value(&m, &installed, &linked, vram))
     }
 
     pub(super) fn probe(s: &mut Session, _: &Value) -> Result<Value> {
@@ -570,7 +634,7 @@ mod native {
         // The model files of the engine this app installed, by folder: what it will have when it
         // is started, for the model lists to tell what is installed while it isn't running.
         let model_files = match record.choices.route {
-            Route::Managed if !record.choices.models_dir.trim().is_empty() => Some(runtime::list_models(Path::new(&record.choices.models_dir))),
+            Route::Managed if !record.choices.models_dir.trim().is_empty() => Some(files_of(&record.choices)),
             _ => None,
         };
         // What the engine the app started last printed, while a setup runs or after it failed:
@@ -585,7 +649,7 @@ mod native {
             "engine": engine,
             "record": {
                 "phase": record.phase, "route": record.choices.route, "models": record.choices.models, "engineDir": record.choices.engine_dir,
-                "modelsDir": record.choices.models_dir, "variant": record.choices.variant, "cpu": record.choices.cpu, "port": record.port,
+                "modelsDir": record.choices.models_dir, "extraModelsDirs": record.choices.extra_models_dirs, "variant": record.choices.variant, "cpu": record.choices.cpu, "port": record.port,
                 "comfyVersion": record.comfy_version, "installed": record.installed, "error": record.error, "offered": record.offered,
             },
             "engines": engines, "installedNow": installed_now(s), "progress": progress,
@@ -723,8 +787,7 @@ mod native {
         }
         // The settings follow the disk: what can no longer run is unticked, and an engine that
         // is gone is no longer started.
-        let folders = runtime::list_models(Path::new(&record.choices.models_dir));
-        let still = configure::installed(&m, &folders);
+        let still = configure::installed(&m, &files_of(&record.choices));
         s.edit_prefs(|prefs| {
             let ai = &mut prefs.integrations.ai;
             for model in ai.models.iter_mut().filter(|x| x.provider.is_local() && m.model(&x.id).is_some() && !still.contains(&x.id)) {
@@ -746,6 +809,87 @@ mod native {
         }
         s.ai_setup.seq = s.ai_setup.seq.saturating_add(1);
         Ok(json!({"freed": freed, "freedText": photocraft_aisetup::human_bytes(freed), "installed": still, "engine": engine}))
+    }
+
+    /// `ai.setup.modelFolders`: the user's own models folders, which the engine this app
+    /// installed reads beside its own. `{folders: [path, …]}` sets them, writes where the engine
+    /// finds its models, and stops it when this app started it, so it reads them the next time a
+    /// model needs it. With `scan` (the default) the model list then follows the files, as Scan
+    /// Server does: models their files make runnable are added and ticked, and those whose files
+    /// went with a folder are unticked. Without `folders`: what is set.
+    pub(super) fn model_folders(s: &mut Session, p: &Value) -> Result<Value> {
+        let cmd = "ai.setup.modelFolders";
+        let env = env(s)?;
+        let m = manifest(s)?;
+        let mut record = s.ai_setup.record();
+        let Some(asked) = folders_param(p, "folders", cmd)? else {
+            return Ok(json!({"folders": record.choices.extra_models_dirs, "applied": false, "restarted": false}));
+        };
+        if record.choices.route == Route::Existing && record.phase != Phase::None {
+            return Err(EngineError::Other(
+                "Local AI uses your own ComfyUI, which reads the models folders its own settings name: add the folder there, or set up PhotoCraft's engine."
+                    .into(),
+            ));
+        }
+        poll(s);
+        if s.ai_setup.running() {
+            return Err(EngineError::Other("A setup is running. Add the folders when it has finished.".into()));
+        }
+        // Full paths first: a relative one would be looked for in the working folder.
+        let own = PathBuf::from(record.choices.models_dir.trim());
+        let checked = plan::extra_folders(&asked, &own).map_err(|e| bad(cmd, e.to_string()))?;
+        for dir in &asked {
+            let path = Path::new(dir);
+            if !path.is_dir() {
+                return Err(bad(cmd, format!("`{dir}` is not a folder on this computer")));
+            }
+            if !runtime::has_model_folders(path) {
+                return Err(bad(cmd, format!("`{dir}` has no model folders in it (checkpoints, diffusion_models, loras, …): choose a ComfyUI models folder")));
+            }
+        }
+        let server = s.ai.server.clone().filter(|server| server.state() == photocraft_aigen::ServerState::Started);
+        // Stopping it under a render would fail the render.
+        if server.is_some() && s.has_jobs() {
+            return Err(EngineError::Other("The engine is busy. Change the folders when what is running has finished.".into()));
+        }
+        (record.choices.route, record.choices.extra_models_dirs) = (Route::Managed, checked.iter().map(|d| d.to_string_lossy().into_owned()).collect());
+        state::save(&env.state_file, &record).map_err(|e| EngineError::Other(format!("Could not save the setup's record: {e}")))?;
+        // An engine that is installed reads them from now on (each this app installed: the one in
+        // use may be older than the one a setup would install now); one still to come gets them
+        // when it is.
+        let engines = match (record.phase, record.choices.engine_dir.trim(), record.choices.models_dir.trim()) {
+            (Phase::Done, engine_dir, models_dir) if !engine_dir.is_empty() && !models_dir.is_empty() => runtime::installed_engines(Path::new(engine_dir)),
+            _ => Vec::new(),
+        };
+        let (mut restarted, mut configured) = (false, None);
+        if !engines.is_empty() {
+            let yaml = runtime::model_paths_yaml(Path::new(record.choices.models_dir.trim()), &record.choices.extra_models());
+            for (root, _) in &engines {
+                let path = root.join(plan::MODEL_PATHS);
+                std::fs::write(&path, &yaml).map_err(|e| EngineError::Other(format!("Could not write `{}`: {e}", path.display())))?;
+            }
+            restarted = server.is_some_and(|server| server.stop());
+            if flag_param(p, "scan", true, cmd)? {
+                let folders = files_of(&record.choices);
+                s.edit_prefs(|prefs| {
+                    let ai = &mut prefs.integrations.ai;
+                    // Only the model list: how the engine is reached and started stays as it is.
+                    let (url, launch, autostart) = (ai.comfy_url.clone(), ai.comfy_launch.clone(), ai.comfy_autostart);
+                    configured = Some(configure::managed(ai, &m, &url, &launch, &folders));
+                    ai.comfy_autostart = autostart;
+                });
+                // The shell saves the preferences when this moves.
+                s.ai_setup.seq = s.ai_setup.seq.saturating_add(1);
+            }
+        }
+        let files = files_of(&record.choices);
+        let count = |folder: &str| files.get(folder).map_or(0, Vec::len);
+        Ok(json!({
+            "folders": record.choices.extra_models_dirs, "applied": !engines.is_empty(), "restarted": restarted,
+            "diffusionModels": count("diffusion_models") + count("checkpoints"), "loras": count("loras"),
+            "added": configured.as_ref().map(|c| c.added), "unlisted": configured.as_ref().map(|c| c.unlisted),
+            "ready": configured.map(|c| c.ready),
+        }))
     }
 
     pub(super) fn set_token(s: &mut Session, p: &Value) -> Result<Value> {
@@ -932,7 +1076,7 @@ mod web {
 
     pub(super) fn manifest_cmd(_: &mut Session, p: &Value) -> Result<Value> {
         let vram = vram_param(p, "ai.setup.manifest")?;
-        Ok(manifest_value(&*bundled()?, &[], vram))
+        Ok(manifest_value(&*bundled()?, &[], &[], vram))
     }
 
     pub(super) fn status(_: &mut Session, _: &Value) -> Result<Value> {
@@ -960,6 +1104,10 @@ mod web {
     }
 
     pub(super) fn remove(_: &mut Session, _: &Value) -> Result<Value> {
+        Err(unsupported())
+    }
+
+    pub(super) fn model_folders(_: &mut Session, _: &Value) -> Result<Value> {
         Err(unsupported())
     }
 
@@ -1024,7 +1172,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Local AI Models to Install",
             menu: &[],
             shortcut: None,
-            params: r##"{"vramGb":int?} → {comfy:{version,builds},models:[{id,name,about,family,does:[create|edit|fill],licence:{name,url,commercial (true|false|null: read the licence)},page,gated (needs a Hugging Face sign-in),minVramGb,testedVramGb,bytes (downloaded alone),files:[{key,bytes,gated}],installed,fit:tested|untested|tooLarge,minComfy (the first ComfyUI version that runs it)}],presets:{light|starter|recommended|everything:{models,bytes (shared files counted once)}},suggested:light|recommended (the preset to start on: light on a card under 16 GB, its models then listed first)}: what the setup can install"##,
+            params: r##"{"vramGb":int?,"extraModelsDirs":[path,…]? (count these as the engine's, instead of the last setup's)} → {comfy:{version,builds},models:[{id,name,about,family,does:[create|edit|fill],licence:{name,url,commercial (true|false|null: read the licence)},page,gated (needs a Hugging Face sign-in),minVramGb,testedVramGb,bytes (downloaded alone),files:[{key,bytes,gated}],installed,linked (installed only because the user's own models folders have its files: not the setup's to delete),fit:tested|untested|tooLarge,minComfy (the first ComfyUI version that runs it)}],presets:{light|starter|recommended|everything:{models,bytes (shared files counted once)}},suggested:light|recommended (the preset to start on: light on a card under 16 GB, its models then listed first)}: what the setup can install"##,
             enabled: always,
             run: imp::manifest_cmd,
             journal: false,
@@ -1034,7 +1182,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Plan Local AI Setup",
             menu: &[],
             shortcut: None,
-            params: r##"{"models":[id,…]?=the last setup's,"route":"managed|existing"?,"engineDir":str?,"modelsDir":str?,"variant":"nvidia|nvidia_cu126|amd|intel"?,"cpu":bool=false (managed: run the engine on the processor, for a PC with no graphics card it can use),"recheck":bool=false,"serverFiles":{folder:[file,…]}? (existing: what the server has)} → {steps:[{step,label,bytes,have,done,recheck,skipped}],models:[{id,name,skipped}],downloadBytes,engineBytes,modelsBytes,engineFree,modelsFree,problems:[str],folderProblems:[str] (only other folders fix these),modelProblems:[str] (fewer models fix these)}: what a setup would download and the room it needs, given what is already on disk. Changes nothing"##,
+            params: r##"{"models":[id,…]?=the last setup's,"route":"managed|existing"?,"engineDir":str?,"modelsDir":str?,"variant":"nvidia|nvidia_cu126|amd|intel"?,"cpu":bool=false (managed: run the engine on the processor, for a PC with no graphics card it can use),"recheck":bool=false,"serverFiles":{folder:[file,…]}? (existing: what the server has),"extraModelsDirs":[path,…]?=the last setup's (managed: the user's own models folders, see ai.setup.modelFolders)} → {steps:[{step,label,bytes,have,done,recheck,skipped,linked (the user's folder that has the file, so it is not downloaded)?}],models:[{id,name,skipped}],downloadBytes,engineBytes,modelsBytes,engineFree,modelsFree,problems:[str],folderProblems:[str] (only other folders fix these),modelProblems:[str] (fewer models fix these)}: what a setup would download and the room it needs, given what is already on disk. Changes nothing"##,
             enabled: can_install,
             run: imp::plan_cmd,
             journal: false,
@@ -1044,7 +1192,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Local AI Setup Status",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {available,state:none|running|paused|failed|interrupted|done,running,record:{phase,route,models,engineDir,modelsDir,variant,port,comfyVersion,installed,error},engines:[{version,variant,folder}],installedNow:[id],modelFiles:{folder:[file]}? (the installed engine's model files; null for the user's own ComfyUI),progress:{steps:[{key,label,state:pending|active|done|failed|skipped,done,total,note,download}],bytesDone,bytesTotal,speed (bytes/s),etaSeconds,message}?,result:{ok,cancelled,error,installed,skipped,ready,testImage:{model,modelName,seconds,width,height}?,testError}?,engine:{output:[line] (the last 40 lines the engine the app started printed),log (where all of it is)}? (while a setup runs or after it failed),token (a Hugging Face token is stored)}"##,
+            params: r##"{} → {available,state:none|running|paused|failed|interrupted|done,running,record:{phase,route,models,engineDir,modelsDir,extraModelsDirs,variant,port,comfyVersion,installed,error},engines:[{version,variant,folder}],installedNow:[id],modelFiles:{folder:[file]}? (the installed engine's model files, in its own folder and the user's own folders it reads; null for the user's own ComfyUI),progress:{steps:[{key,label,state:pending|active|done|failed|skipped,done,total,note,download}],bytesDone,bytesTotal,speed (bytes/s),etaSeconds,message}?,result:{ok,cancelled,error,installed,skipped,ready,testImage:{model,modelName,seconds,width,height}?,testError}?,engine:{output:[line] (the last 40 lines the engine the app started printed),log (where all of it is)}? (while a setup runs or after it failed),token (a Hugging Face token is stored)}"##,
             enabled: always,
             run: imp::status,
             journal: false,
@@ -1054,7 +1202,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set Up Local AI",
             menu: &[],
             shortcut: None,
-            params: r##"{"route":"managed|existing"="managed" (managed: install a private ComfyUI; existing: use the one at `url`, downloading only missing model files),"models":[id,…],"engineDir":str?,"modelsDir":str?,"variant":str?,"cpu":bool=false (managed: run the engine on the processor; no test image then),"testImage":bool=true,"recheck":bool=false,"url":str? (existing),"launch":{python,folder,args}? (existing),"serverFiles":{folder:[file,…]}? (existing)} → ai.setup.status. Downloads, unpacks and starts a program: the user's to run from the wizard; automation is refused. Continues an interrupted setup from what is on disk"##,
+            params: r##"{"route":"managed|existing"="managed" (managed: install a private ComfyUI; existing: use the one at `url`, downloading only missing model files),"models":[id,…],"engineDir":str?,"modelsDir":str?,"variant":str?,"cpu":bool=false (managed: run the engine on the processor; no test image then),"testImage":bool=true,"recheck":bool=false,"url":str? (existing),"launch":{python,folder,args}? (existing),"serverFiles":{folder:[file,…]}? (existing),"extraModelsDirs":[path,…]? (managed: the user's own models folders, read and never changed)} → ai.setup.status. Downloads, unpacks and starts a program: the user's to run from the wizard; automation is refused. Continues an interrupted setup from what is on disk"##,
             enabled: can_install,
             run: imp::start,
             journal: false,
@@ -1087,6 +1235,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"engine":bool=false,"models":true|[id,…]?} → {freed,freedText,installed,engine}: deletes the engine this app installed and/or model files it lists (a file another installed model uses stays). A ComfyUI the user set up themselves is never touched"##,
             enabled: can_install,
             run: imp::remove,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.modelFolders",
+            label: "Use My Models Folders",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"folders":[path,…]? (at most 16; a ComfyUI folder stands for the models folder in it; [] removes them all),"scan":bool=true} → {folders,applied (the installed engine reads them now),restarted (the engine this app started was stopped, to read them when next needed),diffusionModels,loras (files the engine has now, its own and these),added,unlisted,ready:[model id]? (the model list followed the files, as Scan Server does)}: models folders the user already has, which the engine this app installed reads beside its own. Nothing is ever written to them or deleted from them, and a file a setup needs that one has is not downloaded. Without folders: the ones set. Not for the user's own ComfyUI, whose own settings name its folders"##,
+            enabled: can_install,
+            run: imp::model_folders,
             journal: false,
         },
         CommandSpec {

@@ -104,6 +104,8 @@ pub enum StepState {
     Skipped,
 }
 
+pub use crate::plan::LINKED_NOTE;
+
 /// One row of the Install screen.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -178,7 +180,8 @@ impl Shared {
                 },
                 done: if s.done { s.bytes } else { s.have },
                 total: s.bytes,
-                note: s.skipped.clone().unwrap_or_default(),
+                // A file the user's own models folder has is not downloaded: that says so.
+                note: s.skipped.clone().or_else(|| s.linked.as_ref().map(|_| LINKED_NOTE.to_string())).unwrap_or_default(),
                 download: s.step.is_download(),
             })
             .collect();
@@ -588,7 +591,8 @@ fn run(env: &Env, job: &Job, shared: &Shared) -> Result<Outcome> {
         shared.set(i, StepState::Active, "");
     }
     shared.message("Setting up the models");
-    let mut folders = if managed { runtime::list_models(&layout.models_dir) } else { job.choices.server_files.clone().unwrap_or_default() };
+    let mut folders =
+        if managed { runtime::list_all_models(&layout.models_dir, &layout.extra_models) } else { job.choices.server_files.clone().unwrap_or_default() };
     if !managed {
         // What was just downloaded into the server's models folder is there too.
         for (folder, names) in runtime::list_models(&layout.models_dir) {
@@ -684,8 +688,15 @@ on the processor these models take a very long time per image, if they fit in me
             }
             Some(model) => {
                 shared.note(i, &format!("Rendering a test image with {}", model.name));
-                let job =
-                    photocraft_aigen::Job { prompt: TEST_PROMPT.into(), width: TEST_SIZE, height: TEST_SIZE, seed: TEST_SEED, alpha: false, source: None };
+                let job = photocraft_aigen::Job {
+                    prompt: TEST_PROMPT.into(),
+                    width: TEST_SIZE,
+                    height: TEST_SIZE,
+                    seed: TEST_SEED,
+                    alpha: false,
+                    source: None,
+                    loras: Vec::new(),
+                };
                 let began = Instant::now();
                 match photocraft_aigen::generate(env.transport.as_ref(), &settings, model, "", &job, &control) {
                     Ok(image) => {

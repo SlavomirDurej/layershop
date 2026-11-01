@@ -920,6 +920,7 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
         references: Vec::new(),
         quality: GenerationQuality::Standard,
         regions: Vec::new(),
+        loras: Vec::new(),
     };
     assert_eq!(made(&s), Some(txt.clone()));
     // The layer tree reports it, named as `ai.generate` names its params.
@@ -1588,4 +1589,74 @@ fn regions_lay_out_a_text_to_image_for_a_model_trained_on_boxes() {
     s.execute("ai.setRegions", json!({"regions": []})).unwrap();
     let plain = s.execute("ai.generate", json!({"prompt": "a room", "model": "z", "regions": true, "seed": 1})).unwrap();
     assert_eq!(plain["modelPrompt"], "a room");
+}
+
+#[test]
+fn loras_stack_on_a_local_model_and_stay_with_the_layer() {
+    use photocraft_aigen::Lora;
+    let fake = FakeComfy::new(64, 48, [0, 0, 255, 255]);
+    let mut s = session(&fake);
+    let ink = Lora { file: "styles/ink_v1.safetensors".into(), name: "Ink".into(), strength: 0.7, trigger: "ink drawing".into() };
+    let oil = Lora { file: "oil_paint.safetensors".into(), ..Lora::default() };
+    let z = serde_json::to_value(Model { id: "z".into(), loras: vec![ink, oil], ..Family::ZImage.preset() }).unwrap();
+    let gpt = serde_json::to_value(Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT", "gpt-image-2", false) }).unwrap();
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [z, gpt]})).unwrap();
+    let last_queued = || {
+        let seen = fake.seen.lock().unwrap();
+        let (_, body) = seen.iter().rev().find(|(u, _)| u.ends_with("/prompt")).expect("nothing was queued");
+        serde_json::from_slice::<Value>(body).unwrap()["prompt"].clone()
+    };
+
+    // By name with the strength it starts at, by file with one given, and a file the settings
+    // don't list.
+    let loras = json!([{"lora": "ink"}, {"lora": "oil_paint.safetensors", "strength": 1.5}, "extra/detail.safetensors"]);
+    let v = s.execute("ai.generate", json!({"prompt": "a harbour", "model": "z", "loras": loras, "seed": 3})).unwrap();
+    let workflow = last_queued();
+    let mut stacked: Vec<(String, f64)> = workflow
+        .as_object()
+        .unwrap()
+        .values()
+        .filter(|n| n["class_type"] == "LoraLoaderModelOnly")
+        .map(|n| (n["inputs"]["lora_name"].as_str().unwrap().to_string(), n["inputs"]["strength_model"].as_f64().unwrap()))
+        .collect();
+    stacked.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(stacked, [("extra/detail.safetensors".into(), 1.0), ("oil_paint.safetensors".into(), 1.5), ("styles/ink_v1.safetensors".into(), 0.7)]);
+    // Ink's trigger words go with the prompt the model is given, not the one the layer keeps.
+    assert_eq!(v["modelPrompt"], "a harbour, ink drawing");
+    let d = s.active().unwrap();
+    let made = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.as_deref().cloned().unwrap();
+    assert_eq!(made.prompt, "a harbour");
+    let kept: Vec<_> = made.loras.iter().map(|l| (l.file.as_str(), l.name.as_str(), l.strength)).collect();
+    assert_eq!(kept, [("styles/ink_v1.safetensors", "Ink", 0.7), ("oil_paint.safetensors", "oil paint", 1.5), ("extra/detail.safetensors", "detail", 1.0)]);
+
+    // A trigger already in the prompt isn't added twice; a LoRA at 0 adds neither node nor words.
+    let v = s.execute("ai.generate", json!({"prompt": "an Ink Drawing of a boat", "model": "z", "loras": [{"lora": "Ink"}]})).unwrap();
+    assert_eq!(v["modelPrompt"], "an Ink Drawing of a boat");
+    let v = s.execute("ai.generate", json!({"prompt": "a boat", "model": "z", "loras": [{"lora": "Ink", "strength": 0}]})).unwrap();
+    assert_eq!(v["modelPrompt"], "a boat");
+    assert!(!last_queued().to_string().contains("LoraLoaderModelOnly"));
+
+    // What can't be asked.
+    let six: Vec<Value> = (0..6).map(|i| json!(format!("{i}.safetensors"))).collect();
+    for bad in [
+        json!("ink"),
+        json!([{}]),
+        json!([{"lora": ""}]),
+        json!([{"lora": "Ink", "strength": 9}]),
+        json!([{"lora": "Ink", "strength": "x"}]),
+        json!([7]),
+        json!(six),
+    ] {
+        assert!(s.execute("ai.generate", json!({"prompt": "a boat", "model": "z", "loras": bad})).is_err(), "{bad}");
+    }
+    s.ai.set_key(Provider::Openai, "k");
+    let e = s.execute("ai.generate", json!({"prompt": "a boat", "model": "gpt", "loras": ["Ink"]})).unwrap_err().to_string();
+    assert!(e.contains("takes no LoRAs"), "{e}");
+
+    // ai.models says what each model offers.
+    let models = s.execute("ai.models", json!({})).unwrap();
+    let z = models["models"].as_array().unwrap().iter().find(|m| m["id"] == "z").unwrap();
+    assert_eq!(z["loras"][0], json!({"file": "styles/ink_v1.safetensors", "name": "Ink", "strength": 0.7, "trigger": "ink drawing"}));
+    assert_eq!(z["loras"][1]["name"], "oil paint");
+    assert!(models["models"].as_array().unwrap().iter().find(|m| m["id"] == "gpt").unwrap()["loras"].is_null());
 }

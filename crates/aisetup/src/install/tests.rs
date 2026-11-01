@@ -660,6 +660,48 @@ fn the_users_own_comfyui_gets_the_missing_files_and_nothing_else() {
     assert_eq!((settings.comfy_url.as_str(), settings.comfy_launch.folder.as_str(), settings.comfy_autostart), ("http://127.0.0.1:8000", "C:/comfy", true));
 }
 
+/// The engine this app installs, with the user's own models folder beside its own: what that
+/// folder has is used where it is, and what it lacks comes down into the setup's folder.
+#[test]
+fn the_users_own_models_folder_is_used_and_left_alone() {
+    let rig = Rig::new();
+    let mine = rig.dir.path().join("ComfyUIModels").join("models");
+    let unet = mine.join("unet").join(UNET.rsplit('/').next().unwrap());
+    std::fs::create_dir_all(unet.parent().unwrap()).unwrap();
+    std::fs::write(&unet, vec![7u8; rig.manifest.files[UNET].size as usize]).unwrap();
+    std::fs::create_dir_all(mine.join("loras")).unwrap();
+    std::fs::write(mine.join("loras").join("style.safetensors"), b"lora").unwrap();
+    let choices = Choices { extra_models_dirs: vec![mine.to_string_lossy().into_owned()], ..rig.choices(&["qwen-image-2-1"]) };
+    let (result, progress) = rig.run_job(rig.job(choices), plenty);
+    let done = result.unwrap();
+    assert_eq!(rig.net.served(&rig.manifest, UNET), 0, "their copy is not downloaded again");
+    assert_eq!(rig.net.served(&rig.manifest, ENCODER), rig.manifest.files[ENCODER].size);
+    assert_eq!(done.installed, ["qwen-image-2-1"]);
+    assert!(done.folders["loras"].contains(&"style.safetensors".to_string()));
+    let row = progress.steps.iter().find(|s| s.key == format!("file:{UNET}")).unwrap();
+    assert_eq!((row.state, row.note.as_str()), (StepState::Done, LINKED_NOTE));
+    // Their folder is as it was: nothing added, nothing taken.
+    let mut theirs: Vec<String> = walk(&mine);
+    theirs.sort();
+    assert_eq!(theirs.len(), 2, "{theirs:?}");
+    assert!(!rig.layout().model_file(UNET).unwrap().exists());
+    let yaml = std::fs::read_to_string(&rig.layout().model_paths).unwrap();
+    assert!(yaml.contains(&mine.to_string_lossy().replace('\\', "\\\\")), "{yaml}");
+}
+
+/// Every file under `dir`, as paths.
+fn walk(dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap().flatten() {
+        if entry.file_type().unwrap().is_dir() {
+            out.extend(walk(&entry.path()));
+        } else {
+            out.push(entry.path().to_string_lossy().into_owned());
+        }
+    }
+    out
+}
+
 #[test]
 fn a_setup_that_cannot_be_planned_does_not_start() {
     let rig = Rig::new();

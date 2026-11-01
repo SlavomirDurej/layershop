@@ -922,3 +922,37 @@ fn the_first_look_at_this_pc_shows_its_steps() {
     open(&mut installed);
     assert!(!first_look(&installed));
 }
+
+#[test]
+fn a_models_folder_of_ones_own_is_read_beside_the_setups_and_never_offered_for_deletion() {
+    let (mut app, dir) = app(demo::Scale::Small);
+    assert!(demo::show(&mut app, dir.path(), "installed-models-own"));
+    let c = ctx();
+    draw(&mut app, &c);
+    let mine = dir.path().join("ComfyUIModels").join("models").to_string_lossy().into_owned();
+    assert_eq!(app.ui.ai_setup.extra_models_dirs, std::slice::from_ref(&mine));
+    assert_eq!(summary(&app)["extraModelsDirs"], json!([mine]));
+    // Z-Image Turbo runs from the user's file: there, but theirs.
+    let model =
+        |app: &PhotocraftApp, id: &str| list(app.ui.ai_setup.manifest.as_ref().unwrap(), "/models").iter().find(|m| text(m, "/id") == id).unwrap().clone();
+    assert_eq!((model(&app, "z-image-turbo")["installed"].as_bool(), model(&app, "z-image-turbo")["linked"].as_bool()), (Some(true), Some(true)));
+    assert_eq!(model(&app, "qwen-image-2-1")["linked"], false);
+    // The engine knows its files, LoRAs too, while it isn't running.
+    let files = installed_files(&app).unwrap();
+    assert!(files["loras"].contains(&"pixel_art_style_z_image_turbo.safetensors".to_string()), "{files:?}");
+    // What the wizard sends: the folder, for the engine this app installs only.
+    assert_eq!(params(&app)["extraModelsDirs"], json!([mine]));
+    app.ui.ai_setup.existing = true;
+    assert!(params(&app).get("extraModelsDirs").is_none());
+    app.ui.ai_setup.existing = false;
+    // A folder with no model folders is not taken; a ComfyUI folder is its models folder.
+    let empty = dir.path().join("Downloads");
+    std::fs::create_dir_all(&empty).unwrap();
+    assert!(own_folder(&empty.to_string_lossy()).unwrap_err().contains("no model folders"));
+    assert_eq!(own_folder(&dir.path().join("ComfyUIModels").to_string_lossy()), Ok(mine.clone()));
+    // Taken away again: the model that needed it is no longer there.
+    set_own_folders(&mut app, &[]).unwrap();
+    refresh_manifest(&mut app);
+    assert!(app.ui.ai_setup.extra_models_dirs.is_empty());
+    assert_eq!(model(&app, "z-image-turbo")["installed"], false);
+}

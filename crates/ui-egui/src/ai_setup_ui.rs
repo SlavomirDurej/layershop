@@ -112,6 +112,9 @@ pub struct AiSetupUi {
     pub models: Vec<String>,
     pub engine_dir: String,
     pub models_dir: String,
+    /// The engine this app installs: models folders the user already has, which it reads too
+    /// (`ai.setup.modelFolders`).
+    pub extra_models_dirs: Vec<String>,
     /// Use my ComfyUI: its address.
     pub url: String,
     /// What the engine last said: `ai.setup.probe`, `.manifest`, `.plan` and `.status`.
@@ -188,6 +191,7 @@ impl Default for AiSetupUi {
             models: Vec::new(),
             engine_dir: String::new(),
             models_dir: String::new(),
+            extra_models_dirs: Vec::new(),
             url: String::new(),
             probe: None,
             manifest: None,
@@ -294,8 +298,14 @@ fn refresh_status(app: &mut PhotocraftApp) {
 }
 
 fn refresh_manifest(app: &mut PhotocraftApp) {
-    let vram = app.ui.ai_setup.probe.as_ref().and_then(|p| p.get("vramGb")).cloned().unwrap_or(Value::Null);
-    app.ui.ai_setup.manifest = app.session.execute("ai.setup.manifest", json!({"vramGb": vram})).ok();
+    let s = &app.ui.ai_setup;
+    let vram = s.probe.as_ref().and_then(|p| p.get("vramGb")).cloned().unwrap_or(Value::Null);
+    // The engine this app installs: what the user's own folders chosen here have counts as there.
+    let mut p = json!({"vramGb": vram});
+    if !s.existing {
+        p["extraModelsDirs"] = json!(s.extra_models_dirs);
+    }
+    app.ui.ai_setup.manifest = app.session.execute("ai.setup.manifest", p).ok();
 }
 
 /// The model ids of a preset, from the manifest.
@@ -379,6 +389,9 @@ fn show(app: &mut PhotocraftApp, recall: bool) {
     }
     if s.models_dir.trim().is_empty() {
         s.models_dir = text(&status, "/record/modelsDir").to_string();
+    }
+    if s.extra_models_dirs.is_empty() {
+        s.extra_models_dirs = list(&status, "/record/extraModelsDirs").iter().filter_map(Value::as_str).map(str::to_string).collect();
     }
     let recorded: Vec<String> = list(&status, "/record/models").iter().filter_map(Value::as_str).map(str::to_string).collect();
     let state = text(&status, "/state").to_string();
@@ -519,7 +532,20 @@ pub fn summary(app: &PhotocraftApp) -> Value {
     json!({
         "available": available(app), "text": line, "installed": text(status, "/state") == "done", "managed": !list(status, "/engines").is_empty(),
         "modelFiles": status.get("modelFiles").cloned().unwrap_or(Value::Null), "catalog": catalog(app),
+        "extraModelsDirs": status.pointer("/record/extraModelsDirs").cloned().unwrap_or_else(|| json!([])),
     })
+}
+
+/// The user's own models folders the installed engine reads, as the Preferences page changes
+/// them: saved, and the engine stopped so it reads them when next needed. The page then scans
+/// its own copy of the model list (the dialog's draft would overwrite one made here).
+pub fn set_own_folders(app: &mut PhotocraftApp, folders: &[String]) -> Result<Value, String> {
+    let done = app.session.execute("ai.setup.modelFolders", json!({"folders": folders, "scan": false})).map_err(|e| e.to_string());
+    refresh_status(app);
+    if let Ok(result) = &done {
+        app.ui.ai_setup.extra_models_dirs = list(result, "/folders").iter().filter_map(Value::as_str).map(str::to_string).collect();
+    }
+    done
 }
 
 /// The model files of the engine this app installed, by folder: what that ComfyUI has when it is
@@ -714,6 +740,7 @@ fn params(app: &PhotocraftApp) -> Value {
     } else {
         p["route"] = json!("managed");
         p["engineDir"] = json!(s.engine_dir);
+        p["extraModelsDirs"] = json!(s.extra_models_dirs);
         p["variant"] = json!(s.probe.as_ref().map_or("nvidia", |v| text(v, "/variant")));
         // Without a card it can use, the engine runs on the processor (Install anyway was ticked).
         p["cpu"] = json!(s.probe.as_ref().and_then(|v| v.get("gpuUsable")).and_then(Value::as_bool) == Some(false));
@@ -1760,6 +1787,73 @@ fn folder_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, engine: bool) {
     ui.add_space(12.0);
 }
 
+/// The engine this app installs: models folders the user already has, read beside its own.
+fn own_folders(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let t = Tokens::get(ui.ctx());
+    ui.label(RichText::new(tr("Models you already have")).font(crate::theme::medium(13.0)).color(t.text));
+    ui.add_space(3.0);
+    let mut gone = None;
+    for (i, dir) in app.ui.ai_setup.extra_models_dirs.iter().enumerate() {
+        ui.horizontal(|ui| {
+            let room = ui.available_width() - 70.0;
+            ui.add_sized([room, 20.0], egui::Label::new(RichText::new(dir).font(crate::theme::mono(12.0)).color(t.text_dim)).truncate()).on_hover_text(dir);
+            if ui.add(egui::Label::new(RichText::new(tr("Remove")).color(t.text_faint).size(11.5).underline()).sense(Sense::click())).clicked() {
+                gone = Some(i);
+            }
+        });
+    }
+    if let Some(i) = gone {
+        app.ui.ai_setup.extra_models_dirs.remove(i);
+        refresh_manifest(app);
+    }
+    let full = app.ui.ai_setup.extra_models_dirs.len() >= photocraft_aisetup::plan::MAX_EXTRA_MODELS_DIRS;
+    if ui.add_enabled_ui(!full, |ui| widgets::secondary_button(ui, tr("Add Folder…"), 120.0)).inner.clicked() {
+        let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: None }, |app, answer| {
+            if let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer {
+                match own_folder(&path) {
+                    Ok(dir) if app.ui.ai_setup.extra_models_dirs.iter().any(|d| same_folder(d, &dir)) => {}
+                    Ok(dir) => {
+                        app.ui.ai_setup.extra_models_dirs.push(dir);
+                        app.ui.ai_setup.note.clear();
+                        refresh_manifest(app);
+                    }
+                    Err(why) => app.ui.ai_setup.note = why,
+                }
+            }
+            Ok(Value::Null)
+        });
+        if let Err(e) = asked {
+            app.ui.ai_setup.note = format!("{}: {e}", tr("Could not open the folder dialog"));
+        }
+    }
+    ui.add_space(3.0);
+    ui.add(
+        egui::Label::new(
+            RichText::new(tr(
+                "Another ComfyUI's models folder, say. The engine reads it too: what the setup needs and finds there is not downloaded again, its LoRAs show up, and nothing in it is changed or deleted.",
+            ))
+            .color(t.text_faint)
+            .size(11.5),
+        )
+        .wrap(),
+    );
+    ui.add_space(12.0);
+}
+
+/// The models folder a picked folder stands for (a ComfyUI folder: the `models` folder in it),
+/// or why it can't be one.
+pub fn own_folder(picked: &str) -> Result<String, String> {
+    let dir = photocraft_aisetup::plan::models_root(std::path::Path::new(picked.trim()));
+    if !photocraft_aisetup::plan::has_model_folders(&dir) {
+        return Err(format!(
+            "{} {}",
+            picked.trim(),
+            tr("has no model folders in it (checkpoints, diffusion_models, loras, …). Choose a ComfyUI models folder, or the ComfyUI folder that has one.")
+        ));
+    }
+    Ok(dir.to_string_lossy().into_owned())
+}
+
 /// What the plan says about room: needed against free, as a bar. Red when only another folder
 /// helps; amber when fewer models would, which the Models page is for.
 fn room(ui: &mut egui::Ui, plan: &Value) {
@@ -1851,6 +1945,7 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         heading(ui, "Where it goes", "Two folders: a small one for the engine, and one for the models, which can be on any drive.");
         folder_row(app, ui, true);
         folder_row(app, ui, false);
+        own_folders(app, ui);
     }
     replan(app);
     if let Some(plan) = app.ui.ai_setup.plan.clone() {
@@ -1928,6 +2023,8 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             let mut on = app.ui.ai_setup.models.contains(&id);
             let gated = model.get("gated").and_then(Value::as_bool).unwrap_or(false);
             let installed = model.get("installed").and_then(Value::as_bool).unwrap_or(false);
+            // There because the user's own folder has its files: theirs, not the setup's to delete.
+            let linked = model.get("linked").and_then(Value::as_bool).unwrap_or(false);
             any_gated |= gated && on;
             let rect = row_frame(ui, 82.0);
             let mut inner = ui.new_child(UiBuilder::new().max_rect(rect.shrink2(vec2(12.0, 9.0))).layout(Layout::top_down(Align::Min)));
@@ -1943,7 +2040,11 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     ui.label(RichText::new(format!("{} {min} ({} {version})", tr("needs ComfyUI"), tr("yours is"))).color(t.warning).size(11.5));
                 }
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    let label = if installed { tr("installed").to_string() } else { download_size(number(&model, "/bytes")) };
+                    let label = match (installed, linked) {
+                        (true, true) => tr("in your folder").to_string(),
+                        (true, false) => tr("installed").to_string(),
+                        _ => download_size(number(&model, "/bytes")),
+                    };
                     ui.label(RichText::new(label).font(crate::theme::mono(12.0)).color(if installed { t.accent_text } else { t.text_dim }));
                 });
             });
@@ -1967,7 +2068,7 @@ fn page_models(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 if gated && on && needing.iter().any(|m| text(m, "/id") == id) {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| gated_state(app, ui, &id));
                 }
-                if installed && managed {
+                if installed && managed && !linked {
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if app.ui.ai_setup.remove_model.as_deref() == Some(id.as_str()) {
                             if ui.add(egui::Label::new(RichText::new(tr("Keep")).color(t.text_dim).size(11.5).underline()).sense(Sense::click())).clicked() {
@@ -2210,6 +2311,7 @@ fn step_words(step: &Value) -> String {
         (_, "configure", _) => tr("Model settings").to_string(),
         (_, "verify", _) => tr("Engine start and a test image").to_string(),
         (_, _, Some(name)) if !note.is_empty() && state != "done" => format!("{name} · {}", tr(note)),
+        ("done", _, Some(name)) if note == photocraft_aisetup::plan::LINKED_NOTE => format!("{name} · {}", tr(note)),
         _ => tr(label).to_string(),
     };
     // Busy, unless it ends on a running clock ("· 3:12"), which says so itself.

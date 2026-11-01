@@ -343,6 +343,36 @@ selection changed; with a reference ("the scarf from image 2") a Draft takes 9 s
 the picture too, and with a hard-edged selection that shows as a seam along the selection's
 edge where the picture has detail. Feather the selection with those two models.
 
+## LoRAs
+
+A LoRA is a small file of changes to a model's weights that steers it to a style, a character or
+a subject. LoRAs are made for one model: a FLUX LoRA does nothing to Qwen Image (ComfyUI only
+says so in its console, as "lora key not loaded"). So each local model keeps its own list.
+
+- **Set up once, in the model's settings** (Preferences › Generative AI › Manage Models, the
+  model's **LoRAs**): **Add LoRA**, then choose its file from the server's `models/loras` (Scan
+  Server lists them, subfolders and the folders of ComfyUI's `extra_model_paths.yaml` included;
+  until then the file is typed). Each has a **name** (empty: one made from the file,
+  `ghibli_style-v2.safetensors` is "ghibli style v2"), the **strength** it starts at, and its
+  **trigger words**. Many LoRAs only show their effect when the prompt has the words they were
+  trained with; those are added to the prompt the model is given (`, ink drawing`), unless the
+  prompt has them already. The layer keeps the prompt as typed.
+- **Added per generation, in the panel** (Advanced › **LoRAs**, local models that take them): **+**
+  lists the model's LoRAs; each added one has a **strength** slider from 0 to 2 (1 as it was
+  trained; the field takes −4 to 4, and below 0 steers away from what it learnt), an **eye** that
+  leaves it out without removing it, and a **bin**. Up to five. What was added is kept for each
+  model, so a model comes back with its own.
+- **The order doesn't matter.** Each LoRA adds its changes to the weights, and a sum is the same
+  in any order, so the list stays in the order LoRAs were added. A LoRA at strength 0 is left
+  out of the graph.
+- **In the graph** each is a `LoraLoaderModelOnly` after the model's speed LoRA, as ComfyUI's
+  templates chain them. A **Checkpoint (SD / SDXL)** model gets `LoraLoader`, which changes the
+  text encoder as well, at the same strength: those LoRAs were trained on both.
+- Not for cloud models, custom workflows, or HiDream O1 (which loads a checkpoint with a graph of
+  its own).
+- **Load from layer** brings back the LoRAs a layer was made with, with their strengths. The layer
+  keeps them (`generation.loras`) in PSD and `.pcraft` files.
+
 ## Setting up local AI (the wizard)
 
 **File › Set Up Local AI…** installs everything local models need, for someone who has never
@@ -360,7 +390,7 @@ dialog: the editor stays usable beside it.
 | Step | Shows | Changes anything? |
 |---|---|---|
 | 1. Your PC | Windows version, graphics card and its memory, driver, free space, an existing ComfyUI, whether the download servers answer | No |
-| 2. Location | The engine folder (default `%LOCALAPPDATA%\LayerShop\engine`) and the models folder (default beside it; any drive), with the room needed against the room free | No |
+| 2. Location | The engine folder (default `%LOCALAPPDATA%\LayerShop\engine`) and the models folder (default beside it; any drive), with the room needed against the room free; **Models you already have** (see below) | No |
 | 3. Models | Light / Starter / Recommended / Everything (Light, MOSS Image alone, on a card under 16 GB, its model listed first and "suggested for your card"), and a checklist: size, what each is for, its licence and whether that allows commercial work, a gated model's two steps (Sign in with Hugging Face, Accept the licence), "not tested on cards this size" | No |
 | 4. Install | One row per file with its progress; overall size, speed and time left; Pause | Yes |
 | 5. Ready | The test image, how long it took, how many models the panel lists | Starts the engine |
@@ -501,6 +531,38 @@ test image that runs out of memory (not a failed install: a smaller model is sug
 The setup's own record (what was chosen, how far it got) is `ai-setup.json` in the settings
 folder: a file of its own, not a preference.
 
+### Models you already have
+
+Someone who has used ComfyUI before has a models folder full of models and LoRAs. Downloading
+them again into the engine's folder would be a waste, and pointing the engine's own models
+folder at theirs would make the setup's downloads and deletions land in it. So the engine this
+app installs can read **models folders of the user's own** beside its own (up to 16):
+
+- **Where:** the wizard's Location page (**Models you already have › Add Folder…**), and
+  **Preferences › Generative AI › Local Server › Your models folders** once the engine is
+  installed (**Add Folder…**, **Remove**). Picking a ComfyUI folder picks the `models` folder in
+  it; a folder with none of the model folders in it (`checkpoints`, `diffusion_models`, `loras`,
+  …) is refused with why.
+- **Only read:** nothing is ever written into them or deleted from them. Downloads still go to
+  the setup's own models folder, which ComfyUI searches first (`is_default`). **Delete files…** is
+  not offered for a model whose files are there: the Models page says **in your folder**.
+- **Not downloaded again:** a file a setup needs that one of them has, under its folder or the
+  older name ComfyUI still reads (`unet` for `diffusion_models`, `clip` for `text_encoders`),
+  with the manifest's size, counts as there. The Install row says **in your models folder**.
+- **The engine reads them** through its `layershop-models.yaml`: one `yoursN` section per folder,
+  with the older folder names, written by every setup and whenever the folders change (in each
+  engine folder the setup installed). ComfyUI reads that file when it starts, so a change stops
+  the engine this app started; it starts again the next time a model needs it.
+- **The model list follows:** what their files make runnable is added and ticked, as **Scan
+  Server** does, and what went with a removed folder is unticked. The Preferences page scans its
+  own copy of the settings (so OK keeps it), which starts the engine on the new folders. Their
+  LoRAs show in each model's LoRA list once scanned.
+- Files in subfolders are listed as ComfyUI lists them (`styles\pixel_art.safetensors`), and only
+  the file types it loads (`.gguf` needs a custom node the engine doesn't have, so it is left
+  out).
+- **Not for "Use my ComfyUI":** that ComfyUI reads the folders its own `extra_model_paths.yaml`
+  names; adding one there is the way.
+
 ## Starting ComfyUI for you
 
 On the **Local Server** page, switch on **Start ComfyUI when a local model needs it and it isn't
@@ -625,7 +687,10 @@ loads. The workflows follow ComfyUI's own text-to-image templates and use only b
 | Custom workflow | whatever your workflow loads | yours |
 
 Per model: steps, CFG, sampler, scheduler, shift, FLUX guidance, seed (-1: random each time),
-negative prompt (used when CFG is above 1), an optional LoRA, and the render size.
+negative prompt (used when CFG is above 1), a speed LoRA, the LoRAs the panel may add, and the
+render size. The **Speed LoRA** always applies: it is the few-step LoRA (Qwen's Lightning) that the
+model's steps and CFG are set for, which Scan Server fills in when the server has it. The panel
+doesn't show it. The **LoRAs** below it are the ones the panel offers ([LoRAs](#loras)).
 
 **Ideogram 4 refuses some seeds.** On some seeds, for harmless prompts too, the model draws a
 flat grey picture reading "Image blocked by safety filter" in place of the image. The words are
@@ -792,8 +857,8 @@ It loads the int8 Qwen 3 VL 4B (`qwen3vl_4b_int8_convrot`, FLUX.3 Klein's), not 
 bf16 one: the deer and the hat edits came out the same at the same speed (52 s, 50 s), and the
 setup then downloads 8.9 GB less.
 
-**Custom workflow.** For anything the built-in graphs don't cover (LoRA stacks, prompt
-enhancers, custom nodes): in ComfyUI use **Workflow › Export (API)** and paste the JSON. Put
+**Custom workflow.** For anything the built-in graphs don't cover (prompt enhancers, custom
+nodes, LoRAs on a graph of your own): in ComfyUI use **Workflow › Export (API)** and paste the JSON. Put
 `%prompt%`, `%negative%`, `%width%`, `%height%`, `%seed%`, `%steps%` and `%cfg%` where those
 values go; a field that is exactly a numeric placeholder (`"%width%"`) becomes a number. The
 workflow needs a Save Image or Preview Image node.
@@ -870,23 +935,25 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "model"?, "alpha"?, "seed"?, "rect"?, "mask"?}` | generate onto a new layer; a background job |
 | `ai.generate {"prompt", "mode": "inpaint", "strength"?, "context"?, …}` | repaint the selected part of the active pixel layer onto a new masked layer; needs a selection and pixels under it. `cargo run -p photocraft-engine --example ai_inpaint` runs it (and, with `img2img` in place of the rectangle, image to image) against a real server without the app |
 | `ai.generate {"prompt", "mode": "img2img", "source"?: {"layer": id} or {"document": id}, "strength"?, …}` | redraw a layer in place, or another open document fitted to the area, onto a new layer |
-| `window.panel.aiGen.loadPrompt {"layer"?: id}` → `{loaded}` | a shell command (the running app): put the prompt a generated layer was made with into the panel's prompt box, like its Load from layer button (the prompt and the model it was made with, when still offered; a layer laid out in regions brings them back too; tab and settings stay); the active layer without `layer`. `loaded` is false for a layer that was not generated or has no prompt, and while a generation runs |
+| `window.panel.aiGen.loadPrompt {"layer"?: id}` → `{loaded}` | a shell command (the running app): put the prompt a generated layer was made with into the panel's prompt box, like its Load from layer button (the prompt and the model it was made with, when still offered, with its LoRAs; a layer laid out in regions brings them back too; tab and settings stay); the active layer without `layer`. `loaded` is false for a layer that was not generated or has no prompt, and while a generation runs |
 | `ai.mask {"paint"?: bool, "clear"?: bool}` | paint the area to inpaint, or to scope an edit, instead of selecting it: Quick Mask, started empty, tinted where selected; then `paint.stroke {"target": "quickMask", "color": "#ffffff"}` adds to it. `ai.generate` leaves the mode itself, for `inpaint` and for `imgEdit` |
 | `ai.generate {"prompt", "mode": "imgEdit", "source"?, "references"?: [{"layer": id} or {"document": id}, …], "quality"?: "draft"/"standard"/"detail", "context"?, …}` | change a picture following the prompt as an instruction, onto a new layer; with a selection only the part around it is sent, and the layer is masked by it. `--example ai_inpaint` runs it with `edit` or `edit:x,y,w,h` in place of the rectangle |
 | `ai.sources {"mode"?: "img2img"/"imgEdit"}` | what img2img (or an edit, and its references) can start from now: the active document's layers with pixels, the other open documents, for an edit also the active document itself, and which is the default |
-| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`), is offered for inpainting (`inpaint`), edits (`edit`) and how many `references` an edit with it takes, and the layout format of a model trained on boxes (`regions`: `moss`, `ideogram`, `flux3`, `fibo`; null for the others) |
+| `ai.models` | the models, whether each can run now, generates from a prompt (`generate`), is offered for inpainting (`inpaint`), edits (`edit`) and how many `references` an edit with it takes, the layout format of a model trained on boxes (`regions`: `moss`, `ideogram`, `flux3`, `fibo`; null for the others), and the LoRAs its settings offer (`loras`: `[{file, name, strength, trigger}]`; null for a model that takes none) |
 | `ai.regions` / `ai.setRegions {"regions": [{"id"?, "kind"?, "caption"?, "text"?, "rect"?: [x, y, w, h], "color"?, "fill"?, "fillOpacity"?}, …]}` | the active document's regions, front to back / replace them (an entry with an id changes that region, one without is new and needs a `rect`; order is depth). One History step |
 | `ai.region.set {"id", …fields}` | change one region; `"coalesce"` merges a run (typing) into one step |
 | `ai.layoutPrompt {"prompt", "model"?, "regions"?, "rect"?}` → `{text, format, area}` | what `ai.generate {"regions": true}` would send that model: the panel's copy button |
 | `ai.setLayerPrompt {"layer", "prompt", "coalesce"?}` → `{layer, prompt}` | change the prompt an AI layer keeps (what Load from layer brings back); refused for a layer not made with AI Gen. `ai.setRegions` and `ai.region.set` take `"layer"` too: that AI layer gets the document's regions in the same History step |
 | `ai.generate {"prompt", "regions": true or [...], …}` | a text to image laid out in the document's regions (or those given), with a model trained on boxes; `modelPrompt` in the result is the layout sent |
+| `ai.generate {"prompt", "loras": [{"lora", "strength"?}, …], …}` | stack up to five LoRAs on a local model: `lora` is one of the model's (by file or name, see `ai.models`) or a file of the server's `models/loras`; `strength` −4 to 4, unasked the one its settings start it at, else 1. Their trigger words are added to `modelPrompt`. Refused for a model that takes none |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
 | `ai.setup.probe` | what this machine has for local models: system, graphics card and memory, drives, an existing ComfyUI, whether the download hosts answer; and the rows the wizard's first screen shows. Changes nothing; a background job |
-| `ai.setup.manifest {"vramGb"?}` | what the setup can install: models with their files, sizes, licences, whether each is installed and how it suits a card of that size; presets with shared files counted once |
+| `ai.setup.manifest {"vramGb"?}` | what the setup can install: models with their files, sizes, licences, whether each is installed (`linked`: only because the user's own models folders have its files) and how it suits a card of that size; presets with shared files counted once |
+| `ai.setup.modelFolders` | the user's own models folders the installed engine reads. **Setting them (`folders`) is refused to agents**, like the rest of the setup |
 | `ai.setup.plan {"models"?, "route"?, "variant"?, "recheck"?}` | what a setup would download and the room it needs, given what is on disk. Changes nothing |
-| `ai.setup.status` | the setup that is running (steps, bytes, speed, time left) or how the last one ended; the setup's record; what is installed now |
+| `ai.setup.status` | the setup that is running (steps, bytes, speed, time left) or how the last one ended; the setup's record (with `extraModelsDirs`); what is installed now, and the engine's model files (its own and those of the user's folders) |
 | `ai.setup.hfStatus` | the Hugging Face sign-in: signed in or not, as whom, how (`oauth`, `token`), whether Sign in is available and a token is on this PC. Never a token |
 | `ai.setup.hfAccess {"models"?}` | where each gated model stands (`signIn`, `licence`, `ready`): one `HEAD` of its gated file. Renews a sign-in about to expire. A background job |
 | `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair`, `ai.setup.remove`, `ai.setup.hfSignIn`, `ai.setup.hfSignOut`, `ai.setup.setToken`, `ai.setup.hfUseFound` | install, stop, fix, delete, sign in and out of Hugging Face, an access token, the token found on this PC. **Refused to agents**: they download and start a program, delete files, or sign in, and are the user's to do from the wizard. So is `ai.setup.plan` with a folder or a server listing of the agent's choosing |
@@ -901,13 +968,14 @@ section; `edit.preferences.generativeAi` returns them, and in the app opens the 
 `change` or `restyle`), `method` (`instruct` or `fill`, for a model that changes a picture both
 ways), `model` (Create and Restyle), `editModel` (Change), `strength`, `context`, `maskBrush`,
 `imgSource`, `imgStrength`, `editSource`, `editReferences`, `editQuality`, `prompt`, `alpha`,
-`seed`, `lastSeed`, `advanced`, `createTask` (Create's: `prompt` or `regions`), `region` (the
+`seed`, `lastSeed`, `advanced`, `loras` (by model id: `[{file, strength, on}]`), `createTask` (Create's: `prompt` or `regions`), `region` (the
 region selected). The panel's tabs and tasks are the shell's; `ai.generate`'s `mode`
 names the technique (`txt2img`, `inpaint`, `img2img`, `imgEdit`), as before.
 
 A generated layer carries its settings as `generation` in the layer tree (`document.inspect`
 and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source, references, quality}`
-(and `regions`, for one laid out in regions), named
+(and `regions`, for one laid out in regions, and `loras`, `[{file, name, strength}]`, for one
+made with LoRAs), named
 as `ai.generate` names its params, so they can be passed straight back to it. In the code it is
 `photocraft_doc::Layer::generation`.
 

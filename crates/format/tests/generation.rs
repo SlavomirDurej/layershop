@@ -16,6 +16,7 @@ fn generated(source: Option<GenerationSource>) -> Generation {
         references: Vec::new(),
         quality: GenerationQuality::Detail,
         regions: Vec::new(),
+        loras: vec![photocraft_doc::GenerationLora { file: "styles/ink_v1.safetensors".into(), name: "Ink".into(), strength: -0.25 }],
     }
 }
 

@@ -126,7 +126,7 @@ pub fn hidream_o1_dev(checkpoint: &str) -> bool {
 /// `existing` with the architecture, files and sampling of `detected` (the same model file,
 /// detected afresh): what Scan Server does to a model that was set up as the wrong
 /// architecture. The user's own choices that still apply are kept: its id, name, whether it is
-/// listed, seed, render size, LoRA, negative prompt and transparency.
+/// listed, seed, render size, LoRAs, negative prompt and transparency.
 pub fn repaired(existing: &Model, detected: &Model) -> Model {
     Model {
         id: existing.id.clone(),
@@ -136,6 +136,7 @@ pub fn repaired(existing: &Model, detected: &Model) -> Model {
         megapixels: existing.megapixels,
         lora: existing.lora.clone(),
         lora_strength: existing.lora_strength,
+        loras: existing.loras.clone(),
         negative_prompt: existing.negative_prompt.clone(),
         alpha: existing.alpha,
         ..detected.clone()

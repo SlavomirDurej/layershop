@@ -830,14 +830,16 @@ fn the_panel_asks_for_room_for_its_generate_button() {
     app.ui.ai_gen.mode = Mode::Edit;
     assert_eq!(wanted_height(&app), base + ROW);
     app.ui.ai_gen.advanced = true;
-    assert_eq!(wanted_height(&app), base + 3.0 * ROW);
+    // (The strength and context, the seed, and the LoRAs heading of a local model.)
+    assert_eq!(wanted_height(&app), base + 4.0 * ROW);
     // A model that changes a picture both ways has the method to choose as well.
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     app.ui.ai_gen.edit_model = "flux".into();
     app.ui.ai_gen.method = Method::Fill;
-    assert_eq!(wanted_height(&app), base + 4.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 5.0 * ROW);
+    // Create: the seed and the LoRAs heading.
     app.ui.ai_gen.mode = Mode::Create;
-    assert_eq!(wanted_height(&app), base + ROW);
+    assert_eq!(wanted_height(&app), base + 2.0 * ROW);
 }
 
 #[test]
@@ -2305,4 +2307,72 @@ fn the_region_editor_follows_the_selection_and_closes_on_a_press_outside_it() {
     assert_eq!(app.ui.ai_gen.regions.editor, Some(ids[0]), "no press, still open");
     ctx.run_ui(press, |ui| panel(&mut app, ui, true)).textures_delta.clear();
     assert_eq!(app.ui.ai_gen.regions.editor, None);
+}
+
+#[test]
+fn loras_are_added_per_model_with_a_strength_and_come_back_with_load_prompt() {
+    use loras::PanelLora;
+    use photocraft_aigen::Lora;
+    let mut app = app();
+    let ink = Lora { file: "ink_v1.safetensors".into(), name: "Ink".into(), strength: 0.6, trigger: "ink drawing".into() };
+    let oil = Lora { file: "styles/oil_paint.safetensors".into(), ..Lora::default() };
+    add_model(&mut app, Model { loras: vec![ink, oil], ..z_image("z") });
+    add_model(&mut app, Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) });
+    app.session.ai.set_key(Provider::Openai, "sk-test");
+    app.run("file.new", json!({"width": 32, "height": 32})).unwrap();
+    app.ui.ai_gen.model = "z".into();
+    app.ui.ai_gen.prompt = "a harbour".into();
+
+    // Open, Advanced has a LoRAs heading for a local model, and a row for each LoRA added.
+    let closed = wanted_height(&app);
+    app.ui.ai_gen.advanced = true;
+    assert_eq!(wanted_height(&app), closed + 2.0 * ROW);
+    let added = vec![
+        PanelLora { file: "ink_v1.safetensors".into(), strength: 0.8, on: true },
+        PanelLora { file: "styles/oil_paint.safetensors".into(), strength: 1.2, on: false },
+        PanelLora { file: "gone.safetensors".into(), strength: 0.5, on: true },
+    ];
+    app.ui.ai_gen.loras.insert("z".into(), added.clone());
+    assert_eq!(wanted_height(&app), closed + 5.0 * ROW);
+    draw_panel(&mut app);
+    // Drawing leaves them as they are.
+    assert_eq!(app.ui.ai_gen.loras["z"], added);
+
+    // Generate sends those switched on; the layer keeps them with their names.
+    generate(&mut app).unwrap();
+    let d = app.session.active().unwrap();
+    let made = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.as_deref().cloned().unwrap();
+    let kept: Vec<_> = made.loras.iter().map(|l| (l.name.as_str(), l.strength)).collect();
+    assert_eq!(kept, [("Ink", 0.8), ("gone", 0.5)]);
+    let layer = d.active_layer.unwrap().0;
+
+    // Another model has LoRAs of its own; a cloud model none, and no heading.
+    app.ui.ai_gen.model = "gpt".into();
+    assert_eq!(wanted_height(&app), closed + ROW);
+    assert!(loras::param(&app, current_model(&app).unwrap()).is_none());
+    draw_panel(&mut app);
+
+    // Load Prompt brings the model back with what it was made with.
+    app.ui.ai_gen.loras.insert("z".into(), Vec::new());
+    assert!(load_prompt(&mut app, layer));
+    assert_eq!(app.ui.ai_gen.model, "z");
+    let back: Vec<_> = app.ui.ai_gen.loras["z"].iter().map(|l| (l.file.as_str(), l.strength, l.on)).collect();
+    assert_eq!(back, [("ink_v1.safetensors", 0.8, true), ("gone.safetensors", 0.5, true)]);
+    // The panel's state is readable like the rest, and a state saved before LoRAs loads.
+    assert_eq!(serde_json::to_value(&app.ui).unwrap()["ai_gen"]["loras"]["z"][0]["file"], "ink_v1.safetensors");
+    let old: AiGenUi = serde_json::from_value(json!({"prompt": "x"})).unwrap();
+    assert!(old.loras.is_empty());
+}
+
+#[test]
+fn the_model_settings_keep_its_loras() {
+    use photocraft_aigen::Lora;
+    let mut app = app();
+    let ink = Lora { file: "ink_v1.safetensors".into(), name: "Ink".into(), strength: 0.6, trigger: "ink drawing".into() };
+    add_model(&mut app, Model { loras: vec![ink.clone(), Lora::default()], ..z_image("z") });
+    let (_, mut f) = dialog_fields(&mut app);
+    draw_section(&mut f);
+    let models = f["values"]["integrations"]["ai"]["models"].clone();
+    let z: Model = serde_json::from_value(models.as_array().unwrap().iter().find(|m| m["id"] == "z").unwrap().clone()).unwrap();
+    assert_eq!(z.loras, [ink, Lora::default()]);
 }

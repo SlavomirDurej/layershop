@@ -14,7 +14,7 @@ mod native {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
-    const COMMANDS: [&str; 14] = [
+    const COMMANDS: [&str; 15] = [
         "ai.setup.probe",
         "ai.setup.manifest",
         "ai.setup.plan",
@@ -23,6 +23,7 @@ mod native {
         "ai.setup.cancel",
         "ai.setup.repair",
         "ai.setup.remove",
+        "ai.setup.modelFolders",
         "ai.setup.setToken",
         "ai.setup.hfStatus",
         "ai.setup.hfAccess",
@@ -460,6 +461,78 @@ mod native {
     }
 
     #[test]
+    fn the_users_own_models_folders_are_read_by_the_engine_and_never_touched() {
+        let mut rig = Rig::new();
+        let root = fake_engine(&rig);
+        // Only Qwen in the setup's own folder; Z-Image Turbo's model file is the user's, in a
+        // subfolder of the older folder name, beside a LoRA.
+        let z = "diffusion_models/z_image_turbo_int8_convrot.safetensors";
+        std::fs::remove_file(rig.models_dir().join("diffusion_models").join("z_image_turbo_int8_convrot.safetensors")).unwrap();
+        let comfy = rig.dir.path().join("ComfyUI");
+        let mine = comfy.join("models");
+        write(&mine.join("unet").join("z_image_turbo_int8_convrot.safetensors"), &contents(z));
+        write(&mine.join("loras").join("styles").join("pixel_art.safetensors"), b"lora");
+        let status = rig.run("ai.setup.status", json!({})).unwrap();
+        assert_eq!(status["installedNow"], json!(["qwen-image-2-1"]));
+
+        // Picking the ComfyUI folder is picking its models folder.
+        let set = rig.run("ai.setup.modelFolders", json!({"folders": [comfy.to_string_lossy()]})).unwrap();
+        assert_eq!((set["folders"][0].as_str(), set["applied"].as_bool()), (Some(mine.to_string_lossy().as_ref()), Some(true)));
+        assert_eq!(set["loras"], 1);
+        assert_eq!(rig.s.ai_setup.record().choices.extra_models_dirs, [mine.to_string_lossy().into_owned()]);
+        let yaml = std::fs::read_to_string(root.join(photocraft_aisetup::plan::MODEL_PATHS)).unwrap();
+        assert!(yaml.contains("yours1:") && yaml.contains("    unet: unet"), "{yaml}");
+        // The model list follows: Z-Image Turbo can run again, from the user's file.
+        assert!(set["ready"].as_array().unwrap().iter().any(|id| id == "z-image-turbo"), "{set}");
+        assert!(rig.s.prefs().integrations.ai.model("z-image-turbo").is_some_and(|m| m.enabled));
+        let status = rig.run("ai.setup.status", json!({})).unwrap();
+        assert_eq!(status["installedNow"].as_array().map(Vec::len), Some(2));
+        assert_eq!(status["record"]["extraModelsDirs"][0], mine.to_string_lossy().as_ref());
+        let sub = format!("styles{}pixel_art.safetensors", std::path::MAIN_SEPARATOR);
+        assert!(status["modelFiles"]["loras"].as_array().unwrap().iter().any(|f| f == sub.as_str()), "{}", status["modelFiles"]);
+        // Installed, but because of the user's folder: not the setup's to delete.
+        let m = rig.run("ai.setup.manifest", json!({})).unwrap();
+        let by = |id: &str| m["models"].as_array().unwrap().iter().find(|x| x["id"] == id).unwrap().clone();
+        assert_eq!((by("z-image-turbo")["installed"].as_bool(), by("z-image-turbo")["linked"].as_bool()), (Some(true), Some(true)));
+        assert_eq!(by("qwen-image-2-1")["linked"], false);
+        // The wizard can ask about folders it has not saved yet.
+        let m = rig.run("ai.setup.manifest", json!({"extraModelsDirs": []})).unwrap();
+        assert_eq!(m["models"].as_array().unwrap().iter().filter(|x| x["installed"] == true).count(), 1);
+        // A plan with them downloads nothing that is there.
+        let plan = rig.run("ai.setup.plan", json!({"route": "managed", "models": ["z-image-turbo"]})).unwrap();
+        let step = plan["steps"].as_array().unwrap().iter().find(|st| st["label"] == "z_image_turbo_int8_convrot.safetensors").unwrap().clone();
+        assert_eq!((step["done"].as_bool(), step["linked"].as_str()), (Some(true), Some(mine.to_string_lossy().as_ref())));
+        // Removing a model takes only the setup's own files: the one that runs from the user's
+        // folder still does.
+        rig.run("ai.setup.remove", json!({"models": ["qwen-image-2-1"]})).unwrap();
+        assert!(mine.join("unet").join("z_image_turbo_int8_convrot.safetensors").is_file());
+        assert!(rig.s.prefs().integrations.ai.model("z-image-turbo").is_some_and(|m| m.enabled), "it still runs, from their folder");
+
+        // Folders that are not models folders, too many, or for the user's own ComfyUI: refused.
+        let empty = rig.dir.path().join("empty");
+        std::fs::create_dir_all(&empty).unwrap();
+        for (folders, says) in [
+            (json!([empty.to_string_lossy()]), "no model folders"),
+            (json!([rig.dir.path().join("missing").to_string_lossy()]), "not a folder"),
+            (json!(["models"]), "full path"),
+            (json!("C:\\x"), "a list"),
+        ] {
+            let e = rig.run("ai.setup.modelFolders", json!({"folders": folders})).unwrap_err().to_string();
+            assert!(e.contains(says), "{folders}: {e}");
+        }
+        // Taking them away: the engine is told, and the model that needed them is unticked.
+        let cleared = rig.run("ai.setup.modelFolders", json!({"folders": []})).unwrap();
+        assert_eq!((cleared["folders"].as_array().map(Vec::len), cleared["unlisted"].as_u64()), (Some(0), Some(1)));
+        assert!(!std::fs::read_to_string(root.join(photocraft_aisetup::plan::MODEL_PATHS)).unwrap().contains("yours1"));
+        assert!(!rig.s.prefs().integrations.ai.model("z-image-turbo").unwrap().enabled);
+        let mut record = rig.s.ai_setup.record();
+        record.choices.route = Route::Existing;
+        state::save(&rig.s.ai_setup.env.as_ref().unwrap().state_file, &record).unwrap();
+        let e = rig.run("ai.setup.modelFolders", json!({"folders": [mine.to_string_lossy()]})).unwrap_err().to_string();
+        assert!(e.contains("your own ComfyUI"), "{e}");
+    }
+
+    #[test]
     fn removing_deletes_only_what_the_setup_installed_and_says_what_it_freed() {
         let mut rig = Rig::new();
         let root = fake_engine(&rig);
@@ -744,6 +817,7 @@ fn every_setup_command_is_registered_with_its_parameters_documented() {
             "ai.setup.cancel",
             "ai.setup.repair",
             "ai.setup.remove",
+            "ai.setup.modelFolders",
             "ai.setup.setToken",
             "ai.setup.hfStatus",
             "ai.setup.hfAccess",

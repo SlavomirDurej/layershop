@@ -32,14 +32,14 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use photocraft_aigen::{Control, Generated, Job, LocalServer, Model, Provider, ServerState, Settings, Source, Transport};
+use photocraft_aigen::{Control, Generated, Job, LocalServer, LoraUse, Model, Provider, ServerState, Settings, Source, Transport};
 use photocraft_aisetup::hf::{Credentials as HfCredentials, Via as HfVia};
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
 use photocraft_color::PixelFormat;
 use photocraft_doc::{
-    AiPicture, ColorIndicates, Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, LayerContent, LayerId,
-    LayerMask,
+    AiPicture, ColorIndicates, Document, Generation, GenerationLora, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer,
+    LayerContent, LayerId, LayerMask,
 };
 use photocraft_geom::Rect;
 use photocraft_raster::Surface;
@@ -1076,6 +1076,63 @@ fn references_param(p: &Value) -> Result<Vec<NamedRef>> {
 }
 
 /// The `source` param of `ai.generate`: `{"layer": id}` or `{"document": id}`.
+/// `ai.generate`'s `loras`: the LoRAs to stack on `model`, each as the model's settings name it
+/// (by file or name) or a file of the server's `models/loras`, with its strength (else the
+/// one its settings start it at, else 1). What the layer keeps of them, and their trigger words.
+fn loras_param(cmd: &str, p: &Value, model: &Model) -> Result<(Vec<LoraUse>, Vec<GenerationLora>, Vec<String>)> {
+    let list = match p.get("loras") {
+        None | Some(Value::Null) => return Ok(Default::default()),
+        Some(Value::Array(list)) => list,
+        Some(_) => return Err(bad(cmd, "`loras` must be a list of {lora, strength}")),
+    };
+    if list.is_empty() {
+        return Ok(Default::default());
+    }
+    if !model.takes_loras() {
+        return Err(EngineError::Other(format!("{} takes no LoRAs: only local models do, and not custom workflows", model.name)));
+    }
+    if list.len() > photocraft_aigen::MAX_LORAS {
+        return Err(bad(cmd, format!("at most {} LoRAs, not {}", photocraft_aigen::MAX_LORAS, list.len())));
+    }
+    let range = photocraft_aigen::LORA_STRENGTHS;
+    let (mut uses, mut kept, mut triggers) = (Vec::new(), Vec::new(), Vec::new());
+    for item in list {
+        let wanted = match item {
+            Value::String(name) => name.as_str(),
+            Value::Object(o) => o.get("lora").and_then(Value::as_str).unwrap_or(""),
+            _ => "",
+        }
+        .trim();
+        if wanted.is_empty() || wanted.chars().count() > 512 {
+            return Err(bad(cmd, "each of `loras` needs a `lora`: a file of the server's models/loras, or the name the model's settings give it"));
+        }
+        let known = model.lora(wanted);
+        let strength = match item.get("strength") {
+            None => known.map_or(1.0, |l| l.strength),
+            Some(v) => v
+                .as_f64()
+                .filter(|x| x.is_finite() && range.contains(x))
+                .ok_or_else(|| bad(cmd, format!("a LoRA's `strength` must be a number from {} to {}", range.start(), range.end())))?,
+        };
+        let file = known.map_or(wanted, |l| l.file.trim()).to_string();
+        let name = known.map_or_else(|| photocraft_aigen::model::label_of("", &file), photocraft_aigen::Lora::label);
+        if let Some(trigger) = known.map(|l| l.trigger.trim()).filter(|t| !t.is_empty() && strength != 0.0) {
+            triggers.push(trigger.to_string());
+        }
+        uses.push(LoraUse { file: file.clone(), strength });
+        kept.push(GenerationLora { file, name, strength });
+    }
+    Ok((uses, kept, triggers))
+}
+
+/// `prompt` with the trigger words of the LoRAs it is rendered with, each added once unless the
+/// prompt has it already.
+fn with_triggers(prompt: String, triggers: &[String]) -> String {
+    let lower = prompt.to_lowercase();
+    let missing: Vec<&str> = triggers.iter().map(String::as_str).filter(|t| !lower.contains(&t.to_lowercase())).collect();
+    if missing.is_empty() { prompt } else { format!("{}, {}", prompt.trim_end().trim_end_matches(','), missing.join(", ")) }
+}
+
 fn source_param(p: &Value) -> Result<Option<SourceRef>> {
     match p.get("source") {
         None => Ok(None),
@@ -1377,7 +1434,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // The prompt says which references go (those it mentions by name, else all), and the model
     // is told them by number.
-    let resolved = crate::ai_refs::resolve(&prompt, &references.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>());
+    let (lora_uses, loras, triggers) = loras_param(cmd, p, &model)?;
+    let mut resolved = crate::ai_refs::resolve(&prompt, &references.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>());
     let sent: Vec<&Given> = resolved.sent.iter().filter_map(|i| references.get(*i)).map(|(given, _)| given).collect();
     if sent.len() > model.max_references() {
         return Err(EngineError::Other(format!("{} takes {} reference pictures at most, not {}", model.name, model.max_references(), sent.len())));
@@ -1459,6 +1517,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let reseed = p.get("seed").is_none() && model.seed < 0;
     let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false);
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
+    // The LoRAs' trigger words go with the prompt (with regions: the scene).
+    resolved.prompt = with_triggers(resolved.prompt, &triggers);
     // With regions, the prompt is the scene and the boxes in the model's layout format, the boxes
     // made relative to the area generated.
     let model_prompt = match layout {
@@ -1471,7 +1531,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         ),
         None => resolved.prompt,
     };
-    let mut job = Job { prompt: model_prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None };
+    let mut job = Job { prompt: model_prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None, loras: lora_uses };
     let name = layer_name(&model, &prompt);
     let model_id = model.id.clone();
     let label = match kind {
@@ -1502,6 +1562,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             .collect(),
         quality,
         regions,
+        loras,
     };
     // A draft runs part of a local model's schedule, detail a little more of it.
     if model.provider.is_local() {
@@ -1634,6 +1695,11 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
                 "listed": listed.contains(&m.id.as_str()),
                 "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "references": m.max_references(),
                 "regions": m.layout().map(|f| f.key()),
+                "loras": if m.takes_loras() {
+                    json!(m.loras.iter().map(|l| json!({"file": l.file, "name": l.label(), "strength": l.strength, "trigger": l.trigger})).collect::<Vec<_>>())
+                } else {
+                    Value::Null
+                },
                 "ready": ready.is_ok(), "why": ready.err(),
             })
         })
@@ -1768,7 +1834,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions or layout written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-4..4?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions or layout written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}])}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -1798,7 +1864,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Models",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {models:[{id,name,provider,local,enabled,listed (offered in the AI Gen panel),alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),regions ("moss|ideogram|flux3|fibo": the layout format of a model trained on boxes, which ai.generate's regions need; null: none),ready,why}],listed:[id,…] (the panel's order: cloud first; the first is the default model),comfyUrl,available}"##,
+            params: r##"{} → {models:[{id,name,provider,local,enabled,listed (offered in the AI Gen panel),alpha,generate (text to image),inpaint,edit (imgEdit),references (how many an edit takes),regions ("moss|ideogram|flux3|fibo": the layout format of a model trained on boxes, which ai.generate's regions need; null: none),loras ([{file,name,strength,trigger}]: the LoRAs its settings offer ai.generate; null: it takes none),ready,why}],listed:[id,…] (the panel's order: cloud first; the first is the default model),comfyUrl,available}"##,
             enabled: always,
             run: models,
             journal: false,

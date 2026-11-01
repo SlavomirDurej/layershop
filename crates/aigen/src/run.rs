@@ -26,6 +26,19 @@ pub struct Job {
     /// Inpainting: the image the area holds now and the part of it to repaint. `None` generates
     /// from the prompt alone.
     pub source: Option<Source>,
+    /// LoRAs stacked on the model for this generation ([`crate::MAX_LORAS`] at most), after
+    /// its own speed LoRA ([`Model::lora`]). Local models that [`Model::takes_loras`]; the
+    /// others ignore them.
+    pub loras: Vec<LoraUse>,
+}
+
+/// A LoRA a generation is rendered with ([`Job::loras`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct LoraUse {
+    /// The file, as ComfyUI names it under `models/loras`.
+    pub file: String,
+    /// How strongly it applies: 1 as trained, 0 not at all, below 0 against it.
+    pub strength: f64,
 }
 
 /// The image an inpainting starts from, already at the size the model is asked to render
@@ -527,7 +540,7 @@ mod tests {
     }
 
     fn job() -> Job {
-        Job { prompt: "a frog".into(), width: 500, height: 500, seed: 7, alpha: false, source: None }
+        Job { prompt: "a frog".into(), width: 500, height: 500, seed: 7, alpha: false, source: None, loras: Vec::new() }
     }
 
     const DONE: &str =
@@ -680,7 +693,7 @@ mod tests {
             sleep: &|d| std::thread::sleep(d),
         };
         let settings = Settings { comfy_url: url, timeout_seconds: 600, ..Settings::default() };
-        let job = Job { prompt: "a lighthouse on a cliff at dusk".into(), width: 768, height: 768, seed: random_seed(), alpha: false, source: None };
+        let job = Job { prompt: "a lighthouse on a cliff at dusk".into(), width: 768, height: 768, seed: random_seed(), alpha: false, source: None, loras: Vec::new() };
         let family = if std::env::var("PHOTOCRAFT_LIVE_MODEL").is_ok_and(|m| m == "moss") { Family::MossImage } else { Family::ZImage };
         let g = generate(&crate::UreqTransport::new(), &settings, &family.preset(), "", &job, &c).unwrap();
         println!("{:>6.2} s  done: {} bytes, {}x{}", began.elapsed().as_secs_f64(), g.bytes.len(), g.width, g.height);

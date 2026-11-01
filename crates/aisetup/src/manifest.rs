@@ -19,6 +19,9 @@ use crate::{Error, Result};
 pub const VERSION: u32 = 1;
 /// The folders of a ComfyUI `models` directory a file may go to.
 pub const FOLDERS: [&str; 6] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet"];
+/// ComfyUI's older names for two of [`FOLDERS`], which it still reads as those (models folders
+/// made for older versions keep their diffusion models in `unet`).
+pub const LEGACY_FOLDERS: [(&str, &str); 2] = [("diffusion_models", "unet"), ("text_encoders", "clip")];
 /// Model files come from Hugging Face; the runtime from ComfyUI's GitHub releases.
 const FILE_HOST: &str = "huggingface.co";
 const ASSET_HOST: &str = "github.com";

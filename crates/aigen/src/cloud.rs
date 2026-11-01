@@ -498,7 +498,7 @@ mod tests {
     use super::*;
 
     fn job(w: u32, h: u32, alpha: bool) -> Job {
-        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha, source: None }
+        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha, source: None, loras: Vec::new() }
     }
 
     fn body(r: &Request) -> Value {

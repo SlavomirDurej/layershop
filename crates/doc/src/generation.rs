@@ -155,6 +155,21 @@ pub struct Generation {
     /// held them ([`crate::Document::ai_regions`]); Load Prompt puts them back.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub regions: Vec<AiRegion>,
+    /// The LoRAs stacked on a local model, with the strengths they were given; Load Prompt puts
+    /// them back in the panel.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub loras: Vec<GenerationLora>,
+}
+
+/// A LoRA a generation was rendered with ([`Generation::loras`]).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct GenerationLora {
+    /// The file, as ComfyUI names it under `models/loras`.
+    pub file: String,
+    /// Its name in the model's settings then.
+    pub name: String,
+    pub strength: f64,
 }
 
 /// What an [`AiRegion`] holds.
