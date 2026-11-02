@@ -49,6 +49,8 @@ mod mac_menu;
 #[cfg(target_os = "macos")]
 mod mac_window;
 // Pure logic is tested on every platform; only Linux runs the check.
+#[cfg(not(target_arch = "wasm32"))]
+mod external_svg;
 #[cfg(any(target_os = "linux", test))]
 mod linux_libs;
 mod logging;
@@ -77,8 +79,7 @@ mod window_frame;
 use photocraft_engine::Session;
 use photocraft_ui_egui::PhotocraftApp;
 
-/// Matches the `.desktop` file and hicolor icon name, so Wayland docks pick up the icon.
-const APP_ID: &str = "ai.storyteller.photocraft";
+use photocraft_ui_egui::os_window::APP_ID;
 
 /// Windows and Linux: no OS title bar; the app's top bar is the title bar, with its own caption
 /// buttons and edge resizing (`photocraft_ui_egui::titlebar`), as Photoshop does on Windows. macOS
@@ -345,7 +346,10 @@ fn main() -> eframe::Result {
     if std::env::args_os().nth(1).is_some_and(|a| a == "--uninstall-cleanup") {
         std::process::exit(uninstall::run(uninstall::parse(std::env::args_os().skip(2))));
     }
-    // First, so the panic hook and every start-up warning are recorded (`logging`).
+    // Before anything starts a thread: may re-execute this process with glibc tuned to return
+    // the memory of closed documents (#8743).
+    photocraft_engine::malloc_tuning::apply();
+    // Then, so the panic hook and every start-up warning are recorded (`logging`).
     let logger = logging::install();
     crash_guard::install_hook();
     #[cfg(not(target_arch = "wasm32"))]
@@ -679,7 +683,14 @@ fn main() -> eframe::Result {
             // Caps Lock state (X11/Windows/macOS; `None` on native Wayland): the canvas shows the
             // precise crosshair for painting tools while it is toggled on (#1758).
             app.services.caps_lock = caps_lock::service(cc);
-            app.services.screen_pick = screen_color::service(cc, app.services.is_wayland);
+            // Pick through the portal on a Wayland desktop even when the window went through
+            // Xwayland (a pen, or the X11 display-server preference): Xwayland's root window has
+            // no desktop pixels to read (#8977).
+            #[cfg(target_os = "linux")]
+            let portal = screen_color::uses_portal(native_session);
+            #[cfg(not(target_os = "linux"))]
+            let portal = false;
+            app.services.screen_pick = screen_color::service(cc, portal);
             // Tablet pressure/tilt/eraser (winit drops them): the macOS monitor and the X11 reader
             // write into the stylus feed. The monitor goes in here, not before the event loop:
             // AppKit's shared application only exists once winit created it (#759).

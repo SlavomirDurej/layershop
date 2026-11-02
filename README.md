@@ -101,7 +101,7 @@ PhotoCraft's own status is early alpha: it is **not yet a Photoshop replacement 
 
 ## How this relates to PhotoCraft
 
-LayerShop is a fork of PhotoCraft by the [ArtCraft](https://getartcraft.com/) team and its contributors, used under its MIT / Apache-2.0 licence (this preview includes PhotoCraft 0.17.0). What LayerShop adds:
+LayerShop is a fork of PhotoCraft by the [ArtCraft](https://getartcraft.com/) team and its contributors, used under its MIT / Apache-2.0 licence (this preview includes PhotoCraft 0.19.0). What LayerShop adds:
 
 - the AI Gen panel (Create, Regions, Edit, Restyle and references),
 - the local setup wizard and ComfyUI management,
