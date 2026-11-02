@@ -2550,3 +2550,20 @@ fn remove_not_installed_asks_then_takes_only_the_models_it_names() {
     assert!(f.get(PRUNE).is_none() && f.get(SELECTED).is_none());
     assert!(f[STATUS]["text"].as_str().unwrap().starts_with("2 models"));
 }
+
+#[test]
+fn model_settings_offer_the_files_of_the_folders_as_well_as_the_servers() {
+    // The server was read before a folder was added (or not at all: the engine is stopped when
+    // the folders change). Its LoRAs are offered all the same, from what the folder has.
+    let listing = json!([
+        {"path": "C:/LayerShop/models", "kind": "setup", "found": true, "files": {"vae": ["ae.safetensors"]}},
+        {"path": "D:/mine/models", "kind": "yours", "found": true, "files": {"loras": ["b.safetensors", "A.safetensors"]}},
+    ]);
+    let mut f = Map::from_iter([("__aiFolderListing".to_string(), listing)]);
+    let files = known_files(&f).unwrap();
+    assert_eq!((files["loras"].clone(), files["vae"].clone()), (json!(["A.safetensors", "b.safetensors"]), json!(["ae.safetensors"])));
+    f.insert(FILES.into(), json!({"loras": ["b.safetensors", "server_only.safetensors"]}));
+    assert_eq!(known_files(&f).unwrap()["loras"], json!(["A.safetensors", "b.safetensors", "server_only.safetensors"]));
+    // Nothing known: typed names.
+    assert!(known_files(&Map::new()).is_none());
+}

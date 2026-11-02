@@ -420,6 +420,9 @@ fn filter_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, d: &Dialog, fields: &
     }
 }
 
+/// The room the Preferences dialog's button row leaves its resize grip, right and below.
+pub(crate) const RESIZE_GRIP_ROOM: egui::Vec2 = egui::vec2(10.0, 6.0);
+
 /// The OK / Cancel row (with Apply, Alternate or Reset where the dialog has them), drawn in the
 /// right-to-left layout. Returns what the buttons (or Enter) answered and whether Apply was hit.
 /// `popup_blocks_enter` is true when a web dialog has a popup open, which keeps Enter for the popup.
@@ -603,6 +606,7 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         let web = fields.contains_key("__web");
         let web_popup_open = web && egui::Popup::is_any_open(ctx);
         let resizable = resizable_dialog(&fields);
+        let grip_room = resizable.is_some() && d.kind == DialogKind::Command && crate::prefs_ui::is_preferences(&fields);
         // Curves reopens at the size it was left at (#8984).
         let remembered = if is_curves(&fields) { ctx.data_mut(|m| m.get_persisted::<egui::Vec2>(size_id(place))) } else { None };
         let resize = resizable.map(|size| {
@@ -695,10 +699,19 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 // (larger) size, so a dialog whose body gets shorter would never shrink back.
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
                     ui.spacing_mut().item_spacing.x = 10.0;
+                    // Preferences resizes from its bottom-right corner: the buttons keep clear of the
+                    // grip. (Not every resizable dialog: Save for Web sizes its preview to the room
+                    // above the row, and space under it would grow the dialog frame by frame.)
+                    if grip_room {
+                        ui.add_space(RESIZE_GRIP_ROOM.x);
+                    }
                     let (done, apply) = button_row(app, ui, &d, &mut fields, id, interactive, web && (web_popup_open || egui::Popup::is_any_open(ui.ctx())));
                     outcome = done.or(outcome);
                     apply_requested |= apply;
                 });
+                if grip_room {
+                    ui.add_space(RESIZE_GRIP_ROOM.y);
+                }
             }
             // The frame around the content (Frame::popup's margin and stroke).
             ui.min_rect().expand(ui.spacing().menu_margin.sum().max_elem() + 2.0)
@@ -1224,7 +1237,8 @@ mod preference_resize_tests {
         let f = frame(h);
         let row = ["OK", "Cancel", "Apply"].map(|l| h.get_by_label(l).rect()).into_iter().reduce(|a, b| a.union(b)).unwrap();
         // Inside the frame (not past its edge) and near it.
-        let near = |gap: f32| (0.0..24.0).contains(&gap);
+        // Clear of the resize grip by RESIZE_GRIP_ROOM, and no further.
+        let near = |gap: f32| (RESIZE_GRIP_ROOM.min_elem()..36.0).contains(&gap);
         assert!(near(f.bottom() - row.bottom()) && near(f.right() - row.right()), "{when}: frame {f:?}, buttons {row:?}");
     }
 
@@ -1251,7 +1265,8 @@ mod preference_resize_tests {
         assert_buttons_in_corner(&h, "wider");
         drag_corner(&mut h, egui::vec2(-500.0, -300.0));
         let smaller = frame(&h);
-        assert!(smaller.width() < opened.width() - 200.0 && smaller.height() < opened.height() - 150.0, "smaller: {smaller:?}");
+        // As small as its contents allow (the room the buttons leave the grip included).
+        assert!(smaller.width() < opened.width() - 200.0 && smaller.height() < opened.height() - 120.0, "smaller: {smaller:?}, opened {opened:?}");
         assert_buttons_in_corner(&h, "smaller");
         // The contents never ask for more than the dialog gives them, so it keeps its size.
         h.run_steps(10);

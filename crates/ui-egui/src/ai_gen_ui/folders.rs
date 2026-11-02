@@ -173,56 +173,59 @@ fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: bool
     let mut clicked = None;
     egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
         ui.set_width(width - 22.0);
-        ui.horizontal(|ui| {
+        // The buttons sit on the path's line, centred on its field. The rest of the header (icon,
+        // name, path, counts) opens and closes the list, without lying over them.
+        let mut header = egui::Rect::NOTHING;
+        ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            // The buttons keep their own room on the right; the rest of the header (icon, name,
-            // path, counts) opens and closes the list, without lying over them.
-            // Room for all four on every row, so the paths line up whether a row has a bin or not.
-            let buttons = 4.0 * 26.0;
-            let left = (ui.available_width() - buttons - 8.0).max(120.0);
-            let header = ui
-                .allocate_ui_with_layout(vec2(left, 0.0), egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                    ui.add(crate::icons::image("folder", 22.0, if found { t.icon } else { t.text_faint }));
-                    ui.vertical(|ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            ui.label(RichText::new(title).font(crate::theme::medium(13.0)).color(t.text));
-                            badge(ui, whose, whose_color);
-                        });
-                        ui.add_space(2.0);
-                        path_field(ui, path);
-                        ui.add_space(2.0);
-                        let (what, color) = if found { (counts(&files), t.text_faint) } else { (tr("Not found: is its drive plugged in?").to_string(), t.warning) };
-                        ui.label(RichText::new(what).color(color).size(11.0));
+            header = header.union(ui.add(crate::icons::image("folder", 22.0, if found { t.icon } else { t.text_faint })).rect);
+            ui.vertical(|ui| {
+                let name = ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(RichText::new(title).font(crate::theme::medium(13.0)).color(t.text));
+                    badge(ui, whose, whose_color);
+                });
+                header = header.union(name.response.rect);
+                ui.add_space(2.0);
+                ui.horizontal_top(|ui| {
+                    // Room for all four buttons on every row, so the paths line up whether a row
+                    // has a bin or not.
+                    let buttons = 4.0 * 26.0;
+                    let field_width = (ui.available_width() - buttons - 8.0).max(120.0);
+                    let field = ui.allocate_ui_with_layout(vec2(field_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| path_field(ui, path)).response;
+                    header = header.union(field.rect);
+                    let room = vec2(ui.available_width(), field.rect.height());
+                    ui.allocate_ui_with_layout(room, egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        let chevron = crate::icons::button(ui, if open { "chevron-down" } else { "chevron-right" }, 24.0, false, if open { tr("Hide its files") } else { tr("List its files") });
+                        if chevron.clicked() {
+                            clicked = Some(open);
+                        }
+                        if yours {
+                            let remove = ui.add_enabled_ui(!busy, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Stop reading this folder (nothing in it is deleted)"))).inner;
+                            if remove.clicked() {
+                                f.insert(CONFIRM.into(), json!(path));
+                            }
+                        }
+                        let show = ui.add_enabled_ui(found, |ui| crate::icons::button(ui, "folder-open", 24.0, false, tr(open_label()))).inner;
+                        if show.clicked() {
+                            f.insert(ACTION.into(), json!(format!("{SHOW}{path}")));
+                        }
+                        if crate::icons::button(ui, "rotate-cw", 24.0, false, tr("Read the folder again")).clicked() {
+                            f.insert(ACTION.into(), json!(LIST));
+                        }
                     });
-                })
-                .response;
-            let header = ui.interact(header.rect, ui.scope_id().with(("folder-row", path)), egui::Sense::click()).on_hover_text(format!("{path}
-{tip}"));
-            if header.clicked() {
-                clicked = Some(open);
-            }
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.spacing_mut().item_spacing.x = 2.0;
-                let chevron = crate::icons::button(ui, if open { "chevron-down" } else { "chevron-right" }, 24.0, false, if open { tr("Hide its files") } else { tr("List its files") });
-                if chevron.clicked() {
-                    clicked = Some(open);
-                }
-                if yours {
-                    let remove = ui.add_enabled_ui(!busy, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Stop reading this folder (nothing in it is deleted)"))).inner;
-                    if remove.clicked() {
-                        f.insert(CONFIRM.into(), json!(path));
-                    }
-                }
-                let show = ui.add_enabled_ui(found, |ui| crate::icons::button(ui, "folder-open", 24.0, false, tr(open_label()))).inner;
-                if show.clicked() {
-                    f.insert(ACTION.into(), json!(format!("{SHOW}{path}")));
-                }
-                if crate::icons::button(ui, "rotate-cw", 24.0, false, tr("Read the folder again")).clicked() {
-                    f.insert(ACTION.into(), json!(LIST));
-                }
+                });
+                ui.add_space(2.0);
+                let (what, color) = if found { (counts(&files), t.text_faint) } else { (tr("Not found: is its drive plugged in?").to_string(), t.warning) };
+                header = header.union(ui.label(RichText::new(what).color(color).size(11.0)).rect);
             });
         });
+        let header = ui.interact(header, ui.scope_id().with(("folder-row", path)), egui::Sense::click()).on_hover_text(format!("{path}
+{tip}"));
+        if header.clicked() {
+            clicked = Some(open);
+        }
         if open && found {
             ui.add_space(6.0);
             files_list(ui, path, &files);

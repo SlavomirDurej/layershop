@@ -163,8 +163,10 @@ fn preferences_settings_fill_the_dialog_down_to_the_buttons() {
     // more would make the dialog grow every frame. The area follows the dialog's size (#7420).
     for available in [300.0, 600.0, 1400.0] {
         let h = super::settings_height(available, 4.0, 30.0);
-        assert!(h + 4.0 + 8.0 + 30.0 <= available, "{available}");
-        assert!(h + 4.0 + 8.0 + 30.0 + 8.0 >= available, "{available}");
+        // The row, and the room under it that keeps it clear of the resize grip.
+        let row = 4.0 + 8.0 + 30.0 + crate::dialogs::RESIZE_GRIP_ROOM.y + 4.0;
+        assert!(h + row <= available, "{available}");
+        assert!(h + row + 8.0 >= available, "{available}");
     }
     assert_eq!(super::settings_height(1400.0, 4.0, 30.0) - super::settings_height(600.0, 4.0, 30.0), 800.0);
     assert_eq!(super::settings_height(50.0, 4.0, 30.0), 160.0);

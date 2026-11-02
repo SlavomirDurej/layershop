@@ -115,10 +115,16 @@ pub fn apply(app: &mut PhotocraftApp, id: u64) -> Result<Value, String> {
 pub const PREFERENCES_SIZE: egui::Vec2 = egui::vec2(1040.0, 800.0);
 
 /// The height of the settings area (section list and fields) when `available` is left below the
-/// search field: everything but the dialog's button row (`item_spacing` + 8 pt + the buttons) and
-/// a little slack, never less than a few rows.
+/// search field: everything but the dialog's button row (`item_spacing` + 8 pt + the buttons +
+/// the room under them that keeps them clear of the resize grip) and a little slack, never less
+/// than a few rows.
 pub(super) fn settings_height(available: f32, item_spacing: f32, button_height: f32) -> f32 {
-    (available - (item_spacing + 8.0 + button_height + 4.0)).max(160.0)
+    (available - (item_spacing + 8.0 + button_height + footer_room(item_spacing) + 4.0)).max(160.0)
+}
+
+/// The room under the button row ([`crate::dialogs::RESIZE_GRIP_ROOM`]), with the spacing before it.
+fn footer_room(item_spacing: f32) -> f32 {
+    crate::dialogs::RESIZE_GRIP_ROOM.y + item_spacing
 }
 
 /// Max dialog width for our dialogs. Preferences fills the width it is given (`available`, its

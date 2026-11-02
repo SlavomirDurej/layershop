@@ -2995,7 +2995,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     // The buttons under the list keep their row whatever the list holds.
     let footer = 34.0;
     let pane = (bottom - ui.cursor().top() - footer - 4.0).max(MIN_PANE_HEIGHT - footer);
-    let files = f.get(FILES).and_then(Value::as_object).cloned();
+    let files = known_files(f);
     let (show_cloud, show_local) = (ai.get("showCloud").and_then(Value::as_bool).unwrap_or(true), ai.get("showLocal").and_then(Value::as_bool).unwrap_or(true));
     let mut remove = None;
     // A model moved up or down: (its position, the position of the neighbour it passes).
@@ -3186,9 +3186,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     if let Some(lack) = &act {
         act_on_missing(f, lack);
     }
-    // What Reset makes of a model's file: the server's lists, else what the folders have.
-    let known = files.clone().or_else(|| serde_json::to_value(folders::files_of(f)).ok().and_then(|v| v.as_object().cloned()).filter(|m| !m.is_empty()));
-    reset_question(ui.ctx(), &mut models, f, known.as_ref());
+    reset_question(ui.ctx(), &mut models, f, files.as_ref());
     // Local models whose files are nowhere the engine looks, which a recommended entry isn't.
     let stale: Vec<usize> = (0..models.len())
         .filter(|&i| {
@@ -3424,6 +3422,30 @@ fn prune_question(ctx: &egui::Context, models: &mut Vec<Value>, f: &mut Map<Stri
         }
         None => false,
     }
+}
+
+/// The model files a model's settings offer, by folder (`loras`, `vae`, …): what the server
+/// listed when last read, with what the folders the engine reads have on disk (the server may not
+/// have been read since a folder was added, or isn't running: the engine is stopped when the
+/// folders change). `None` when neither is known: the settings then take typed names.
+fn known_files(f: &Map<String, Value>) -> Option<Map<String, Value>> {
+    let mut out: std::collections::BTreeMap<String, Vec<String>> =
+        f.get(FILES).filter(|v| v.is_object()).and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
+    for (kind, names) in folders::files_of(f) {
+        let have = out.entry(kind).or_default();
+        for name in names {
+            if !have.contains(&name) {
+                have.push(name);
+            }
+        }
+    }
+    for names in out.values_mut() {
+        names.sort_by_key(|n| n.to_lowercase());
+    }
+    if out.is_empty() && f.get(FILES).is_none() {
+        return None;
+    }
+    serde_json::to_value(out).ok().and_then(|v| v.as_object().cloned())
 }
 
 /// What "Add Model" offers, in the groups its menu shows: (heading, [(menu title, model)]).
