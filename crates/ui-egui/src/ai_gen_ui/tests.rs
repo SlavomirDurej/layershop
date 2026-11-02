@@ -320,8 +320,12 @@ fn the_gear_opens_manage_models_on_the_model_and_a_filter_selects_from_what_it_l
     .textures_delta
     .clear();
     assert_eq!(f.get(ACTION), Some(&json!("peek")));
+    app.ui.ai_gen.server_files = None;
     after_body(&mut app, &mut f);
     assert!(f.get(FILES).is_some() && f.get(ACTION).is_none());
+    // What the dialog read is what the AI Gen panel goes by too: a model Scan Server adds there is
+    // offered without the panel having to look again.
+    assert_eq!(app.ui.ai_gen.server_files.as_ref().map(|files| json!(files)), f.get(FILES).cloned());
     // An unknown page or filter falls back to the first; any height is one it can be drawn in.
     f.insert(PAGE.into(), json!("nope"));
     f.insert(FILTER.into(), json!("nope"));
@@ -2435,20 +2439,62 @@ fn the_model_settings_keep_its_loras() {
 }
 
 #[test]
-fn each_model_is_marked_with_where_it_runs_from() {
+fn each_model_is_listed_in_the_group_of_where_it_runs_from() {
     let files = |names: &[&str]| std::collections::BTreeMap::from([("diffusion_models".to_string(), names.iter().map(|n| n.to_string()).collect::<Vec<_>>())]);
     let (internal, external) = (files(&["mine.safetensors"]), files(&["theirs.safetensors", "mine.safetensors"]));
     let local = |file: &str| Model { unet: file.into(), ..Family::ZImage.preset() };
+    let of = |m: &Model, installed: bool, existing: bool| Group::of(m, installed, &internal, &external, existing);
     // PhotoCraft's own folder wins when both have the file.
-    assert_eq!(Origin::of(&local("mine.safetensors"), &internal, &external), Some(Origin::Internal));
-    assert_eq!(Origin::of(&local("theirs.safetensors"), &internal, &external), Some(Origin::External));
-    assert_eq!(Origin::of(&local("gone.safetensors"), &internal, &external), None, "not installed: no mark");
-    assert_eq!(Origin::of(&Model::cloud(Provider::Openai, "GPT", "gpt-image-2", false), &internal, &external), Some(Origin::Cloud));
-    assert_eq!(Origin::of(&Model { family: Family::Custom, ..Model::default() }, &internal, &external), None);
-    for o in Origin::ALL {
-        assert_eq!(Origin::from_key(o.key()), Some(o));
-    }
-    assert_eq!(Origin::from_key(""), None);
+    assert_eq!(of(&local("mine.safetensors"), true, false), Group::Internal);
+    assert_eq!(of(&local("theirs.safetensors"), true, false), Group::External);
+    assert_eq!(of(&local("theirs.safetensors"), false, false), Group::Missing, "not installed, wherever its name points");
+    assert_eq!(of(&Model::cloud(Provider::Openai, "GPT", "gpt-image-2", false), false, false), Group::Cloud, "a cloud model without its key is still cloud");
+    // A custom workflow runs on the engine: PhotoCraft's, or the user's own ComfyUI.
+    let custom = Model { family: Family::Custom, ..Model::default() };
+    assert_eq!((of(&custom, true, false), of(&custom, true, true)), (Group::Internal, Group::External));
+    // The user's own ComfyUI: what it has is theirs, even a file the folders don't show.
+    assert_eq!(of(&local("elsewhere.safetensors"), true, true), Group::External);
+}
+
+#[test]
+fn a_group_folds_at_its_header_and_stays_folded() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let mut app = app();
+    add_model(&mut app, Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) });
+    add_model(&mut app, z_image("z"));
+    let (_, mut f) = dialog_fields(&mut app);
+    f.insert(PAGE.into(), json!("models"));
+    let mut h = Harness::builder()
+        .with_size(vec2(1100.0, 700.0))
+        .with_context_setup(|ctx| PhotocraftApp::setup_context(ctx, Default::default()))
+        .build_ui_state(
+            |ui, f: &mut Map<String, Value>| {
+                let mut values = f.get("values").cloned().unwrap_or_default();
+                if let Some(obj) = values.get_mut("integrations").and_then(Value::as_object_mut) {
+                    prefs_section(ui, obj, f, 600.0);
+                }
+                f.insert("values".into(), values);
+            },
+            f,
+        );
+    h.run();
+    assert!(h.query_by_label("Offer in the AI Gen panel: GPT Image 2").is_some(), "the cloud group starts open");
+    h.get_by_label("Cloud").click();
+    h.run();
+    // Folded: its header stays, its rows go; the other groups are as they were.
+    assert!(h.query_by_label("Cloud").is_some() && h.query_by_label("Offer in the AI Gen panel: GPT Image 2").is_none());
+    let folded = h.state()["values"]["integrations"]["ai"]["listCollapsed"].clone();
+    assert_eq!(folded, json!(["cloud"]));
+    // Kept at once, not only on OK: a Cancel doesn't bring the rows back next time.
+    let mut f = h.state().clone();
+    f.remove(ACTION);
+    after_body(&mut app, &mut f);
+    assert_eq!(app.session.prefs().integrations.ai.list_collapsed, ["cloud"]);
+    // And open again.
+    h.get_by_label("Cloud").click();
+    h.run();
+    assert!(h.query_by_label("Offer in the AI Gen panel: GPT Image 2").is_some());
+    assert_eq!(h.state()["values"]["integrations"]["ai"]["listCollapsed"], json!([]));
 }
 
 #[test]

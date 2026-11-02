@@ -201,7 +201,7 @@ pub struct AiGenUi {
     /// without starting it): which local models can run. `None`: it has not answered in this
     /// session. And that look, running in the background.
     #[serde(skip)]
-    server_files: Option<std::collections::BTreeMap<String, Vec<String>>>,
+    pub(crate) server_files: Option<std::collections::BTreeMap<String, Vec<String>>>,
     #[serde(skip)]
     server_job: Option<u64>,
     /// When the server was last asked (UI time; never: −∞), the setup endings seen then, and
@@ -479,6 +479,15 @@ fn look_at_server(app: &mut PhotocraftApp, ctx: &egui::Context) {
         // Not running, or not there: what was learnt before stays (its files are still there).
         Err(_) => {}
     }
+}
+
+/// The models folders the engine reads changed: what the server listed before is out of date
+/// (and the engine was stopped, so it can't be asked now). Until it answers again, the panel goes
+/// by the files the setup knows are on disk, the new folders' among them, and asks the server
+/// again the next time it looks.
+pub(crate) fn server_files_changed(app: &mut PhotocraftApp) {
+    app.ui.ai_gen.server_files = None;
+    app.ui.ai_gen.server_asked = f64::NEG_INFINITY;
 }
 
 fn server_answered(app: &mut PhotocraftApp, found: &Value) {
@@ -1790,8 +1799,6 @@ const ACTION: &str = "__aiAction";
 /// that the page already tried to read the server.
 const PAGE: &str = "__aiPage";
 const FILTER: &str = "__aiFilter";
-/// What the Manage Models list is narrowed to by where models run from ([`Origin`]): `""` for all.
-const ORIGIN: &str = "__aiOrigin";
 /// The model (its index) whose Reset to Defaults waits for the user to confirm it.
 const RESET: &str = "__aiReset";
 /// An action for [`after_body`]: the AI Gen panel's LoRAs of the models with these ids (one per
@@ -2181,99 +2188,108 @@ impl Filter {
     }
 }
 
-/// Where a model runs from, as Manage Models marks it: on its provider's servers, from
-/// PhotoCraft's own models folder, or from one of the user's (a folder they added, or their own
-/// ComfyUI's).
+/// The groups of Manage Models' list: where a model runs from (its provider's servers,
+/// PhotoCraft's own models folder, or a folder of the user's: one they added, or their own
+/// ComfyUI's), or that it can't run yet for want of its files. Each group can be folded away,
+/// and stays so ([`Settings::list_collapsed`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Origin {
+enum Group {
     Cloud,
     Internal,
     External,
+    Missing,
 }
 
-impl Origin {
-    const ALL: [Origin; 3] = [Origin::Cloud, Origin::Internal, Origin::External];
+impl Group {
+    const ALL: [Group; 4] = [Group::Cloud, Group::Internal, Group::External, Group::Missing];
 
     fn key(self) -> &'static str {
         match self {
-            Origin::Cloud => "cloud",
-            Origin::Internal => "internal",
-            Origin::External => "external",
+            Group::Cloud => "cloud",
+            Group::Internal => "internal",
+            Group::External => "external",
+            Group::Missing => "missing",
         }
-    }
-
-    fn from_key(key: &str) -> Option<Origin> {
-        Origin::ALL.into_iter().find(|o| o.key() == key)
     }
 
     fn title(self) -> &'static str {
         match self {
-            Origin::Cloud => "Cloud",
-            Origin::Internal => "Internal",
-            Origin::External => "External",
-        }
-    }
-
-    /// Its mark on a row of the list: short, so the names keep their room.
-    fn short(self) -> &'static str {
-        match self {
-            Origin::Cloud => "Cloud",
-            Origin::Internal => "Int",
-            Origin::External => "Ext",
+            Group::Cloud => "Cloud",
+            Group::Internal => "Internal",
+            Group::External => "External",
+            Group::Missing => "Not Installed",
         }
     }
 
     fn tip(self) -> &'static str {
         match self {
-            Origin::Cloud => "Cloud: run by its provider with your API key",
-            Origin::Internal => "Internal: its files are in PhotoCraft's own models folder",
-            Origin::External => "External: its files are in a models folder of yours (Model Folders), only read",
+            Group::Cloud => "Run by their provider with your API key. Click to fold the group away, or open it again",
+            Group::Internal => "Their files are in PhotoCraft's own models folder. Click to fold the group away, or open it again",
+            Group::External => "Their files are in a models folder of yours (Model Folders), only read. Click to fold the group away, or open it again",
+            Group::Missing => "Their files are in none of the folders the engine reads. Click to fold the group away, or open it again",
         }
     }
 
-    /// The colour of its mark, as the Model Folders page's badges: the accent for PhotoCraft's
+    /// The colour of its band, as the Model Folders page's badges: the accent for PhotoCraft's
     /// own, amber for the user's.
     fn tone(self, t: &Tokens) -> egui::Color32 {
         match self {
-            Origin::Cloud => t.text_dim,
-            Origin::Internal => t.accent,
-            Origin::External => t.warning,
+            Group::Cloud => t.text,
+            Group::Internal => t.accent,
+            Group::External => t.warning,
+            Group::Missing => t.danger,
         }
     }
 
-    /// Where `m` runs from: `None` for a local model whose file isn't in any of the folders
-    /// (`internal`, `external`: their files by kind), or that has no single file (a custom
-    /// workflow).
-    fn of(m: &Model, internal: &std::collections::BTreeMap<String, Vec<String>>, external: &std::collections::BTreeMap<String, Vec<String>>) -> Option<Origin> {
+    /// The group of `m`: `installed` is that it doesn't lack its files; `internal` and `external`
+    /// are the files of PhotoCraft's folder and of the user's, by kind; `existing` is that local
+    /// models run on the user's own ComfyUI (whose files the folders may not all show).
+    fn of(
+        m: &Model,
+        installed: bool,
+        internal: &std::collections::BTreeMap<String, Vec<String>>,
+        external: &std::collections::BTreeMap<String, Vec<String>>,
+        existing: bool,
+    ) -> Group {
         use photocraft_aigen::detect::on_server;
+        let has_file = m.family != Family::Custom && !m.main_file().is_empty();
         if !m.provider.is_local() {
-            return Some(Origin::Cloud);
-        }
-        if m.family == Family::Custom || m.main_file().is_empty() {
-            return None;
-        }
-        if on_server(internal, m) {
-            Some(Origin::Internal)
-        } else if on_server(external, m) {
-            Some(Origin::External)
+            Group::Cloud
+        } else if !installed {
+            Group::Missing
+        } else if has_file && on_server(internal, m) {
+            Group::Internal
+        } else if existing || (has_file && on_server(external, m)) {
+            Group::External
         } else {
-            None
+            Group::Internal
         }
     }
 }
 
-/// The width of a row's [`Origin`] mark: one for all, so the names after it line up.
-const MARK_WIDTH: f32 = 36.0;
-
-/// A row's [`Origin`] mark, painted at `at` (its top left), [`MARK_WIDTH`] wide.
-fn origin_mark(ui: &egui::Ui, at: egui::Pos2, origin: Origin) {
+/// A group's header in the list: its fold, its name, how many models it holds and (`note`) that
+/// the panel doesn't offer them, on its colour. Returns its click.
+fn group_header(ui: &mut egui::Ui, group: Group, count: usize, folded: bool, note: Option<&str>) -> egui::Response {
     let t = Tokens::get(ui.ctx());
-    let tone = origin.tone(&t);
-    let text = tone.lerp_to_gamma(egui::Color32::WHITE, 0.35);
-    let galley = ui.painter().layout_no_wrap(tr(origin.short()).to_string(), egui::FontId::proportional(9.5), text);
-    let rect = egui::Rect::from_min_size(at, vec2(MARK_WIDTH, 14.0));
-    ui.painter().rect_filled(rect, t.radius_sm, tone.gamma_multiply(0.22));
-    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, text);
+    let tone = group.tone(&t);
+    let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click());
+    let r = t.radius_sm as u8;
+    let corners = if folded { egui::CornerRadius::same(r) } else { egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 } };
+    ui.painter().rect_filled(rect, corners, tone.gamma_multiply(if resp.hovered() { 0.3 } else { 0.22 }));
+    let chevron = egui::Rect::from_center_size(egui::pos2(rect.left() + 12.0, rect.center().y), vec2(12.0, 12.0));
+    crate::icons::paint(ui, chevron, if folded { "chevron-right" } else { "chevron-down" }, 12.0, t.text_dim);
+    let mut job = egui::text::LayoutJob::default();
+    job.append(tr(group.title()), 0.0, egui::TextFormat::simple(crate::theme::medium(11.5), t.text));
+    job.append(&format!("  {count}"), 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.0), t.text_faint));
+    if let Some(note) = note {
+        job.append(&format!("  · {note}"), 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.0), t.text_faint));
+    }
+    job.wrap = egui::text::TextWrapping::truncate_at_width((rect.width() - 30.0).max(10.0));
+    let galley = ui.painter().layout_job(job);
+    ui.painter().galley(egui::pos2(rect.left() + 24.0, rect.center().y - galley.size().y / 2.0), galley, t.text);
+    let label = tr(group.title()).to_string();
+    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, !folded, &label));
+    resp.on_hover_text(tr(group.tip()))
 }
 
 /// What a model is used for, in the words of the list's filters.
@@ -2847,7 +2863,6 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         }
     }
     let mut filter = Filter::from_key(f.get(FILTER).and_then(Value::as_str).unwrap_or(""));
-    let mut origin = Origin::from_key(f.get(ORIGIN).and_then(Value::as_str).unwrap_or(""));
     let page = ui.available_width();
     let page_right = ui.cursor().left() + page;
 
@@ -2887,7 +2902,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             if ui.button(title).clicked() {
                                 push_model(ai, f, preset);
                                 // Whatever the list was narrowed to, the new model is in view.
-                                (filter, origin) = (Filter::All, None);
+                                filter = Filter::All;
                                 ui.close();
                             }
                         }
@@ -2929,41 +2944,27 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     // ----- the filters -----
     let mut models = ai.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
     let parsed: Vec<Option<Model>> = models.iter().map(model_of).collect();
-    // Where each runs from, by the files of the folders the Model Folders page lists.
+    // Each model's group: where it runs from, by the files of the folders the Model Folders page
+    // lists; or that it isn't installed.
     let (internal, external) = folders::files_by_origin(f);
-    // One that isn't installed has no files anywhere to come from: no mark, in no filter but All.
-    let origins: Vec<Option<Origin>> = parsed
+    let existing = f.get(SETUP).and_then(|s| s.get("route")).and_then(Value::as_str) == Some("existing");
+    let groups: Vec<Group> = parsed
         .iter()
-        .map(|m| {
-            let m = m.as_ref()?;
-            let installed = !matches!(standing.missing(m), Some(Missing::Files(_) | Missing::NoLocalAi(_)));
-            Origin::of(m, &internal, &external).filter(|_| installed)
+        .map(|m| match m {
+            Some(m) => {
+                let installed = !matches!(standing.missing(m), Some(Missing::Files(_) | Missing::NoLocalAi(_)));
+                Group::of(m, installed, &internal, &external, existing)
+            }
+            None => Group::Internal,
         })
         .collect();
-    let lists = |filter: Filter, origin: Option<Origin>, i: usize| {
-        models.get(i).is_some_and(Value::is_object)
-            && filter.shows(parsed.get(i).and_then(Option::as_ref))
-            && origin.is_none_or(|o| origins.get(i).copied().flatten() == Some(o))
-    };
+    let lists = |filter: Filter, i: usize| models.get(i).is_some_and(Value::is_object) && filter.shows(parsed.get(i).and_then(Option::as_ref));
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for x in Filter::ALL {
-            let count = (0..models.len()).filter(|&i| lists(x, origin, i)).count();
+            let count = (0..models.len()).filter(|&i| lists(x, i)).count();
             if filter_chip(ui, &format!("{}  {count}", tr(x.title())), filter == x).clicked() {
                 filter = x;
-            }
-        }
-        // Where they run from: a second filter beside the first, on or off at a click.
-        ui.add_space(8.0);
-        widgets::vline(ui, 18.0);
-        ui.add_space(8.0);
-        for o in Origin::ALL {
-            let count = (0..models.len()).filter(|&i| lists(filter, Some(o), i)).count();
-            if count == 0 && origin != Some(o) {
-                continue;
-            }
-            if filter_chip(ui, &format!("{}  {count}", tr(o.title())), origin == Some(o)).on_hover_text(tr(o.tip())).clicked() {
-                origin = if origin == Some(o) { None } else { Some(o) };
             }
         }
     });
@@ -2973,13 +2974,24 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     });
     ui.add_space(6.0);
 
-    // Cloud models first, then local, each in the order of the settings: the panel's order.
-    let mut shown: Vec<usize> = Vec::new();
-    for local in [false, true] {
-        shown.extend((0..models.len()).filter(|&i| lists(filter, origin, i) && models.get(i).is_some_and(is_local_model) == local));
-    }
-    // The selection is an index into all models; when the list doesn't show it, the list's first.
-    let mut selected = f.get(SELECTED).and_then(Value::as_u64).map(|i| i as usize).filter(|i| shown.contains(i)).or_else(|| shown.first().copied());
+    // The groups in their order, each with its models in the order of the settings (the panel's
+    // order); a folded group shows its header alone.
+    let mut collapsed: Vec<String> =
+        ai.get("listCollapsed").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
+    let folded = |g: Group, collapsed: &[String]| collapsed.iter().any(|c| c == g.key());
+    let members = |g: Group| (0..models.len()).filter(|&i| lists(filter, i) && groups.get(i) == Some(&g)).collect::<Vec<usize>>();
+    let by_group: Vec<(Group, Vec<usize>)> = Group::ALL.into_iter().map(|g| (g, members(g))).filter(|(_, m)| !m.is_empty()).collect();
+    let listed: Vec<usize> = by_group.iter().flat_map(|(_, m)| m.iter().copied()).collect();
+    let shown: Vec<usize> = by_group.iter().filter(|(g, _)| !folded(*g, &collapsed)).flat_map(|(_, m)| m.iter().copied()).collect();
+    // The selection is an index into all models: kept while the list holds it (a folded group
+    // still does), else the first shown.
+    let mut selected = f
+        .get(SELECTED)
+        .and_then(Value::as_u64)
+        .map(|i| i as usize)
+        .filter(|i| listed.contains(i))
+        .or_else(|| shown.first().copied())
+        .or_else(|| listed.first().copied());
     // The buttons under the list keep their row whatever the list holds.
     let footer = 34.0;
     let pane = (bottom - ui.cursor().top() - footer - 4.0).max(MIN_PANE_HEIGHT - footer);
@@ -2991,7 +3003,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     // What a model that can't run asked to do about it (its row's button, or the banner's).
     let mut act: Option<Missing> = None;
     let selected_lack = selected.and_then(|i| parsed.get(i)).and_then(Option::as_ref).and_then(|m| standing.missing(m).map(|lack| (lack, m.clone())));
-    if shown.is_empty() {
+    if listed.is_empty() {
         let hint = match filter {
             Filter::All => "No models yet. Restore Defaults lists the recommended ones; Scan Server adds the ones your ComfyUI server has.",
             Filter::Create => "No text-to-image models yet. Restore Defaults lists the recommended ones.",
@@ -3006,33 +3018,39 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             ui.vertical(|ui| {
                 ui.set_width(list_width(ui));
                 egui::ScrollArea::vertical().id_salt("ai-model-list").max_height(pane).auto_shrink([false, false]).show(ui, |ui| {
-                    let mut group = None;
-                    for (at, &i) in shown.iter().enumerate() {
-                        let local = models.get(i).is_some_and(is_local_model);
-                        if group != Some(local) {
-                            if group.is_some() {
-                                ui.add_space(6.0);
-                            }
-                            group = Some(local);
-                            let offered = if local { show_local } else { show_cloud };
-                            let mut title = tr(if local { "Local" } else { "Cloud" }).to_string();
-                            if !offered {
-                                title = format!("{title} · {}", tr("not offered in the panel"));
-                            }
-                            ui.label(RichText::new(title).font(crate::theme::medium(11.0)).color(t.text_faint));
+                    // The rows of a group touch, so its colour reads as one band.
+                    ui.spacing_mut().item_spacing.y = 0.0;
+                    for (n, (group, rows)) in by_group.iter().enumerate() {
+                        if n > 0 {
+                            ui.add_space(8.0);
                         }
-                        // The neighbours of its own kind in the list on screen: where Move Up and
-                        // Move Down take it.
-                        let neighbour = |step: isize| {
-                            at.checked_add_signed(step).and_then(|n| shown.get(n)).copied().filter(|&n| models.get(n).is_some_and(is_local_model) == local)
-                        };
-                        let (above, below) = (neighbour(-1), neighbour(1));
+                        let offered = if *group == Group::Cloud { show_cloud } else { show_local };
+                        let is_folded = folded(*group, &collapsed);
+                        let note = (!offered).then(|| tr("not offered in the panel"));
+                        if group_header(ui, *group, rows.len(), is_folded, note).clicked() {
+                            if is_folded {
+                                collapsed.retain(|c| c != group.key());
+                            } else {
+                                collapsed.push(group.key().to_string());
+                            }
+                        }
+                        if is_folded {
+                            continue;
+                        }
+                        let tone = group.tone(&t);
+                        for (at, &i) in rows.iter().enumerate() {
+                        // The neighbours in its group: where Move Up and Move Down take it.
+                        let (above, below) = (at.checked_sub(1).and_then(|a| rows.get(a)).copied(), rows.get(at + 1).copied());
                         let model = parsed.get(i).and_then(Option::as_ref);
                         // Can it run? A cloud model needs its key, a local one its files.
                         let lack = model.and_then(|m| standing.missing(m));
                         let Some(m) = models.get_mut(i).and_then(Value::as_object_mut) else { continue };
                         let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), ROW_HEIGHT), egui::Sense::click());
                         let on = selected == Some(i);
+                        // The group's colour, weaker than its header's; the last row rounds it off.
+                        let r = t.radius_sm as u8;
+                        let corners = if at + 1 == rows.len() { egui::CornerRadius { nw: 0, ne: 0, sw: r, se: r } } else { egui::CornerRadius::ZERO };
+                        ui.painter().rect_filled(rect, corners, tone.gamma_multiply(0.07));
                         if on {
                             ui.painter().rect_filled(rect, t.radius_sm, t.row_selected);
                         } else if resp.hovered() {
@@ -3107,12 +3125,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                                 used += 40.0;
                             }
                         }
-                        // Where it runs from, before its name (the names line up after the marks).
-                        if let Some(o) = origins.get(i).copied().flatten() {
-                            origin_mark(ui, egui::pos2(rect.left() + 30.0, rect.top() + 5.0), o);
-                        }
-                        let indent = MARK_WIDTH + 6.0;
-                        let width = (rect.width() - 34.0 - used - indent).max(20.0);
+                        let width = (rect.width() - 34.0 - used).max(20.0);
                         let line = |text: String, size: f32, color: egui::Color32| {
                             let mut job = egui::text::LayoutJob::simple_singleline(text, egui::FontId::proportional(size), color);
                             job.wrap = egui::text::TextWrapping::truncate_at_width(width);
@@ -3130,8 +3143,8 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         };
                         let under = line(caption.clone(), 10.5, caption_color);
                         let elided = title.elided || under.elided;
-                        ui.painter().galley(egui::pos2(rect.left() + 30.0 + indent, rect.top() + 4.0), title, color);
-                        ui.painter().galley(egui::pos2(rect.left() + 30.0 + indent, rect.top() + 20.0), under, caption_color);
+                        ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 4.0), title, color);
+                        ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 20.0), under, caption_color);
                         if let (Some(Missing::Files(None)), Some(model)) = (&lack, model) {
                             resp.on_hover_text(format!(
                                 "{name}\n{}: {}. {}",
@@ -3141,6 +3154,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             ));
                         } else if elided {
                             resp.on_hover_text(format!("{name}\n{caption}"));
+                        }
                         }
                     }
                 });
@@ -3237,14 +3251,14 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         let was = selected.and_then(|i| models.get(i)).cloned();
         sort_recommended(&mut models);
         selected = was.and_then(|was| models.iter().position(|m| *m == was));
-        (filter, origin) = (Filter::All, None);
+        filter = Filter::All;
     }
     ai.insert("models".into(), Value::Array(models));
     if restore {
         let added = restore_defaults(ai, f);
         let text = if added == 0 { tr("The recommended models are all listed.").to_string() } else { format!("{added} {}", tr("recommended models added")) };
         f.insert(STATUS.into(), json!({"error": false, "text": text}));
-        (filter, origin) = (Filter::All, None);
+        filter = Filter::All;
     } else {
         // A list that shows nothing keeps the selection for when it shows it again.
         if let Some(i) = selected {
@@ -3252,7 +3266,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         }
     }
     f.insert(FILTER.into(), json!(filter.key()));
-    f.insert(ORIGIN.into(), json!(origin.map_or("", Origin::key)));
+    ai.insert("listCollapsed".into(), json!(collapsed));
 }
 
 /// `m` with every setting as PhotoCraft sets it up, and no LoRAs; its id, name and whether it is
@@ -3699,6 +3713,12 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     }
     f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
     folders::ensure_listed(app, f);
+    // The list's folded groups are a view, not a setting to confirm: kept at once.
+    if let Some(folded) = f.get("values").and_then(|v| v.pointer("/integrations/ai/listCollapsed")).and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        && app.session.prefs().integrations.ai.list_collapsed != folded
+    {
+        app.session.prefs.edit(|p| p.integrations.ai.list_collapsed = folded);
+    }
     if let Some(job) = f.get(JOB).cloned() {
         let id = job.get("id").and_then(Value::as_u64).unwrap_or(0);
         let action = job.get("action").and_then(Value::as_str).unwrap_or("connect").to_string();
@@ -3710,7 +3730,11 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
             Some(j) => {
                 f.remove(JOB);
                 match (j.state, j.result) {
-                    ("done", Some(result)) => connected(f, &action, &result),
+                    // What the server has now is what the AI Gen panel offers too.
+                    ("done", Some(result)) => {
+                        connected(f, &action, &result);
+                        server_answered(app, &result);
+                    }
                     (_, _) => connect_failed(f, &action, &j.error.unwrap_or_else(|| tr("Cancelled").to_string())),
                 }
             }
@@ -3778,7 +3802,10 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
                 app.session.execute("ai.comfyModels", params).map(photocraft_engine::jobs::Started::Done).map_err(|e| e.to_string())
             };
             match started {
-                Ok(photocraft_engine::jobs::Started::Done(result)) => connected(f, &action, &result),
+                Ok(photocraft_engine::jobs::Started::Done(result)) => {
+                    connected(f, &action, &result);
+                    server_answered(app, &result);
+                }
                 Ok(photocraft_engine::jobs::Started::Job(id)) => {
                     f.insert(JOB.into(), json!({"id": id.0, "action": action}));
                     f.insert(STATUS.into(), json!({"error": false, "text": tr("Connecting…")}));

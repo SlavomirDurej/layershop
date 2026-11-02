@@ -933,6 +933,9 @@ pub struct Settings {
     pub show_cloud: bool,
     /// Offer local models in the AI Gen panel's model lists.
     pub show_local: bool,
+    /// The groups of Preferences › Manage Models' list that are folded away (`cloud`,
+    /// `internal`, `external`, `missing`): the user's view of the list, kept across launches.
+    pub list_collapsed: Vec<String>,
     /// The models, in the order the user gave them: the panel lists the cloud ones first, then
     /// the local ones, each kind in this order ([`Settings::listed`]).
     pub models: Vec<Model>,
@@ -954,6 +957,7 @@ impl Settings {
             timeout_seconds: 600,
             show_cloud: true,
             show_local: true,
+            list_collapsed: Vec::new(),
             models: Vec::new(),
         }
     }

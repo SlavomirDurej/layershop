@@ -553,6 +553,8 @@ pub fn set_own_folders(app: &mut PhotocraftApp, folders: &[String]) -> Result<Va
     refresh_status(app);
     if let Ok(result) = &done {
         app.ui.ai_setup.extra_models_dirs = list(result, "/folders").iter().filter_map(Value::as_str).map(str::to_string).collect();
+        // The AI Gen panel offers the models the folders make runnable (or no longer do).
+        crate::ai_gen_ui::server_files_changed(app);
     }
     done
 }

@@ -26,10 +26,10 @@ back end you set up, and places the answer on a new layer.
      a model for every model file the ComfyUI server has; **Restore Defaults** puts back the
      recommended models that are missing, and changes nothing else; **Recommended Order** sorts
      the list best and newest first. A local model whose file the server doesn't have is marked.
-     Each row is marked with where the model runs from: **Cloud** (its provider, with your API
-     key), **Int** (PhotoCraft's own models folder) or **Ext** (a models folder of yours, or your
-     own ComfyUI's); a model that isn't installed has no mark. **Cloud**, **Internal** and
-     **External** beside the filters narrow the list the same way (click again for all). Under a
+     The list is grouped by where models run from: **Cloud** (their provider, with your API
+     key), **Internal** (PhotoCraft's own models folder), **External** (a models folder of yours,
+     or your own ComfyUI) and **Not Installed** (files in none of those), each on its own colour.
+     Click a group's header to fold it away; folded groups stay folded, across launches.Under a
      model's settings, **Reset to Defaults…** asks, then puts every setting back as PhotoCraft
      sets it up (a recommended model's own defaults, else what Scan Server makes of its file) and
      removes its LoRAs, from its settings and from the AI Gen panel; its name and its switch stay.

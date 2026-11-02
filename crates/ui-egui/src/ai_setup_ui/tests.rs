@@ -1032,7 +1032,13 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
     assert!(f["__aiFiles"]["loras"].as_array().is_none_or(|l| l.is_empty()), "{}", f["__aiFiles"]);
     // Added again: the models in it are listed from its files, as Scan Server would, without
     // starting the engine (it reads the folder the next time a local model needs it).
+    // The panel last heard from the engine before the folder was there.
+    app.ui.ai_gen.server_files = Some(Default::default());
     crate::ai_gen_ui::folders::added(&mut app, &mut f, std::slice::from_ref(&mine));
+    // It forgets that, and goes by the files on disk, the folder's among them, until the engine
+    // answers again: the models found there are offered in its lists.
+    assert!(app.ui.ai_gen.server_files.is_none());
+    assert!(installed_files(&app).unwrap()["diffusion_models"].iter().any(|f| f == "z_image_bf16.safetensors"));
     let models: Vec<photocraft_aigen::Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
     assert!(models.iter().any(|m| m.unet == "z_image_bf16.safetensors"), "{:?}", models.iter().map(|m| &m.unet).collect::<Vec<_>>());
     assert!(f.get("__aiJob").is_none() && f.get("__aiAction").is_none(), "nothing was started");
