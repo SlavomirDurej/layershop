@@ -983,6 +983,25 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
             crate::ai_gen_ui::after_body(app, f);
         }
     };
+    // A model Scan Server found in their folder, beside the recommended Z-Image Turbo whose file
+    // is there too, and a model of the setup's own with LoRAs from their folder and elsewhere.
+    std::fs::create_dir_all(std::path::Path::new(&mine).join("diffusion_models")).unwrap();
+    std::fs::write(std::path::Path::new(&mine).join("diffusion_models").join("my_finetune.safetensors"), b"m").unwrap();
+    let z_file = std::fs::read_dir(std::path::Path::new(&mine).join("unet")).unwrap().next().unwrap().unwrap().file_name().into_string().unwrap();
+    let lora = |file: &str| photocraft_aigen::Lora { file: file.into(), ..Default::default() };
+    let draft = [
+        photocraft_aigen::Model { id: "found".into(), name: "my finetune".into(), unet: "my_finetune.safetensors".into(), ..photocraft_aigen::Family::ZImage.preset() },
+        photocraft_aigen::Model { id: "z-image-turbo".into(), unet: z_file, enabled: true, ..photocraft_aigen::Family::ZImage.preset() },
+        photocraft_aigen::Model {
+            id: "own".into(),
+            loras: vec![lora("krea2_darkbrush.safetensors"), lora("somewhere_else.safetensors")],
+            ..photocraft_aigen::Family::QwenImage21.preset()
+        },
+    ];
+    f["values"]["integrations"]["ai"]["models"] = json!(draft);
+    let panel = |file: &str| crate::ai_gen_ui::loras::PanelLora { file: file.into(), ..Default::default() };
+    app.ui.ai_gen.loras.insert("own".into(), vec![panel("pixel_art_style_z_image_turbo.safetensors"), panel("somewhere_else.safetensors")]);
+    app.ui.ai_gen.loras.insert("found".into(), vec![panel("krea2_darkbrush.safetensors")]);
     frames(&mut app, &mut f);
     let listing = f["__aiFolderListing"].as_array().unwrap().clone();
     let kinds: Vec<_> = listing.iter().map(|e| (e["kind"].as_str().unwrap(), e["found"].as_bool().unwrap())).collect();
@@ -999,6 +1018,16 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
     assert_eq!(f["__aiFolderListing"].as_array().map(Vec::len), Some(1));
     assert_eq!(f["__aiFolderOpened"], json!([]));
     assert!(std::path::Path::new(&mine).is_dir(), "nothing of the folder is deleted");
+    // What could run only thanks to it is gone from the list: the model found there, and the
+    // LoRAs whose files were there (in the model's settings and in the panel). The recommended
+    // model stays, unticked: the wizard can install it.
+    let models: Vec<photocraft_aigen::Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
+    assert_eq!(models.iter().map(|m| (m.id.as_str(), m.enabled)).collect::<Vec<_>>(), [("z-image-turbo", false), ("own", models[1].enabled)]);
+    assert_eq!(models[1].loras.iter().map(|l| l.file.as_str()).collect::<Vec<_>>(), ["somewhere_else.safetensors"]);
+    assert_eq!(app.ui.ai_gen.loras.get("own").map(|l| l.iter().map(|l| l.file.as_str()).collect::<Vec<_>>()), Some(vec!["somewhere_else.safetensors"]));
+    assert!(!app.ui.ai_gen.loras.contains_key("found"));
+    assert!(f["__aiStatus"]["text"].as_str().unwrap().contains("1 model, 1 LoRA"), "{}", f["__aiStatus"]);
+    assert!(f["__aiFiles"]["loras"].as_array().is_none_or(|l| l.is_empty()), "{}", f["__aiFiles"]);
     // The Engine page draws for it too.
     f.insert("__aiPage".into(), json!("server"));
     f.remove("__aiAction");

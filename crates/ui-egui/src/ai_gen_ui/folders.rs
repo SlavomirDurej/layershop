@@ -11,7 +11,7 @@
 use egui::{RichText, vec2};
 use serde_json::{Map, Value, json};
 
-use super::{ACTION, SETUP, STATUS, failed, status_line, tr};
+use super::{ACTION, FILES, SELECTED, SETUP, STATUS, Standing, failed, model_of, status_line, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::widgets;
@@ -249,7 +249,7 @@ fn confirm_remove(ctx: &egui::Context, f: &mut Map<String, Value>) {
         ui.add_space(8.0);
         ui.add(
             egui::Label::new(tr(
-                "PhotoCraft will stop reading this folder. The models and LoRAs that are only in it can no longer be used, and the models that need them are switched off until you add the folder again.",
+                "PhotoCraft will stop reading this folder. The models and LoRAs that are only in it are taken out of Manage Models and the AI Gen panel (a recommended model stays, switched off, so it can be installed). Adding the folder again and pressing Scan Server brings them back.",
             ))
             .wrap(),
         );
@@ -353,6 +353,77 @@ fn changed(app: &mut PhotocraftApp, f: &mut Map<String, Value>, folders: &[Strin
     }
 }
 
+/// The model files of every folder the page lists, by kind, merged.
+fn files_of(f: &Map<String, Value>) -> std::collections::BTreeMap<String, Vec<String>> {
+    let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    for entry in f.get(LISTING).and_then(Value::as_array).into_iter().flatten() {
+        for (kind, names) in entry.get("files").and_then(Value::as_object).into_iter().flatten() {
+            let have = out.entry(kind.clone()).or_default();
+            for name in names.as_array().into_iter().flatten().filter_map(Value::as_str) {
+                if !have.iter().any(|h| h == name) {
+                    have.push(name.to_string());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// A models folder went: take out of the draft what could run (`had`) only thanks to it and can't
+/// now (`left`). A model Scan Server added for one of its files goes; a recommended one (the
+/// wizard can install it) stays, unticked, to show as not installed. A LoRA whose file was only
+/// there goes from its model's settings and from the AI Gen panel. Returns how many models and
+/// LoRAs went.
+fn forget(
+    app: &mut PhotocraftApp,
+    f: &mut Map<String, Value>,
+    had: &std::collections::BTreeMap<String, Vec<String>>,
+    left: &std::collections::BTreeMap<String, Vec<String>>,
+) -> (usize, usize) {
+    use photocraft_aigen::detect::on_server;
+    let Some(mut ai) = f.get("values").and_then(|v| v.pointer("/integrations/ai")).and_then(Value::as_object).cloned() else { return (0, 0) };
+    let lost_lora = |file: &str| {
+        let file = file.trim();
+        let in_ = |m: &std::collections::BTreeMap<String, Vec<String>>| m.get("loras").is_some_and(|l| l.iter().any(|x| x == file));
+        !file.is_empty() && in_(had) && !in_(left)
+    };
+    let standing = Standing::of(&ai, f);
+    let (mut models, mut loras) = (0, 0);
+    let mut kept = Vec::new();
+    for v in ai.get("models").and_then(Value::as_array).cloned().unwrap_or_default() {
+        let Some(mut m) = model_of(&v) else {
+            kept.push(v);
+            continue;
+        };
+        let lost = m.provider.is_local() && on_server(had, &m) && !on_server(left, &m);
+        let recommended = photocraft_aigen::Model::defaults().iter().any(|d| photocraft_aigen::detect::same_variant(&m, d)) || standing.wizard_model(&m).is_some();
+        if lost && !recommended {
+            models += 1;
+            continue;
+        }
+        if lost {
+            m.enabled = false;
+        }
+        let before = m.loras.len();
+        m.loras.retain(|l| !lost_lora(&l.file));
+        loras += before - m.loras.len();
+        kept.push(serde_json::to_value(&m).unwrap_or(v));
+    }
+    ai.insert("models".into(), Value::Array(kept));
+    if let Some(slot) = f.get_mut("values").and_then(|v| v.pointer_mut("/integrations/ai")) {
+        *slot = Value::Object(ai);
+    }
+    if models > 0 {
+        f.remove(SELECTED);
+    }
+    // The panel's LoRAs: those added for a model, from the same files.
+    for list in app.ui.ai_gen.loras.values_mut() {
+        list.retain(|l| !lost_lora(&l.file));
+    }
+    app.ui.ai_gen.loras.retain(|_, list| !list.is_empty());
+    (models, loras)
+}
+
 /// The user's own models folders as saved in the setup's record: what Add and Remove change.
 /// (The wizard's own copy is only read when the wizard opens, so after a restart it is empty.)
 fn saved(app: &mut PhotocraftApp) -> Vec<String> {
@@ -400,7 +471,26 @@ pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &
                 if let Some(opened) = f.get_mut(OPENED).and_then(Value::as_array_mut) {
                     opened.retain(|p| p.as_str() != Some(gone));
                 }
-                changed(app, f, &folders);
+                let had = files_of(f);
+                match crate::ai_setup_ui::set_own_folders(app, &folders) {
+                    Ok(_) => {
+                        f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
+                        list(app, f);
+                        let left = files_of(f);
+                        let (models, loras) = forget(app, f, &had, &left);
+                        // What the engine has now is what Manage Models and the LoRA lists offer
+                        // (no scan: a folder going adds nothing, and starting the engine is slow).
+                        f.insert(FILES.into(), json!(left));
+                        let text = if models + loras == 0 {
+                            tr("Folder removed. Nothing listed came from it alone.").to_string()
+                        } else {
+                            let n = |n: usize, one: &str, many: &str| format!("{n} {}", tr(if n == 1 { one } else { many }));
+                            format!("{} {}, {}", tr("Folder removed, with what was only in it:"), n(models, "model", "models"), n(loras, "LoRA", "LoRAs"))
+                        };
+                        f.insert(STATUS.into(), json!({"error": false, "text": text}));
+                    }
+                    Err(e) => failed(f, &e),
+                }
             }
         }
         _ if action.starts_with(SHOW) => {

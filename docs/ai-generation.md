@@ -36,7 +36,10 @@ back end you set up, and places the answer on a new layer.
    - **Model Folders**: every models folder local models are read from, one row each: the
      setup's own (**Internal**) and the ones you added (**External (read only)**). A row shows its path and what it has (diffusion models, LoRAs, text encoders, …);
      click it to list its files. **Refresh** reads it again, the arrow opens it in Explorer /
-     Finder, the bin stops reading an added folder after asking (nothing in it is deleted). A folder that
+     Finder, the bin stops reading an added folder after asking (nothing in it is deleted). What
+     could run only thanks to that folder leaves the lists: models Scan Server found in it, and
+     LoRAs whose files were there (in each model's settings and in the AI Gen panel); a
+     recommended model stays, switched off, so the setup can install it. A folder that
      isn't there now (a drive that isn't plugged in) says so. **Add Folder…** and **Download
      Models…** (the setup wizard) are underneath. With your own ComfyUI there is only its
      folder: its own `extra_model_paths.yaml` names any others.

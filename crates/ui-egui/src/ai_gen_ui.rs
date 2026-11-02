@@ -3528,7 +3528,7 @@ pub fn load_keys(app: &mut PhotocraftApp) {
 }
 
 mod folders;
-mod loras;
+pub(crate) mod loras;
 mod refs;
 pub mod regions;
 #[cfg(test)]
