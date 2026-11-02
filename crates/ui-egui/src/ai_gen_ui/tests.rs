@@ -1560,7 +1560,15 @@ mod clicks {
         assert_eq!(press(&mut h, "Read the folder again", 1), Some(json!("folderList")));
         let open = if cfg!(windows) { "Open in Explorer" } else if cfg!(target_os = "macos") { "Open in Finder" } else { "Open Folder" };
         assert_eq!(press(&mut h, open, 1), Some(json!("folderShow:D:/mine/models")));
-        assert_eq!(press(&mut h, "Stop reading this folder (nothing in it is deleted)", 0), Some(json!("ownFolderRemove:0")));
+        // Remove asks first; Cancel leaves the folder, Remove in the question removes it.
+        assert_eq!(press(&mut h, "Stop reading this folder (nothing in it is deleted)", 0), None);
+        assert_eq!(h.state().get("__aiFolderConfirm"), Some(&json!("D:/mine/models")));
+        assert!(h.query_by_label_contains("No files are deleted").is_some());
+        assert_eq!(press(&mut h, "Cancel", 0), None);
+        assert!(h.state().get("__aiFolderConfirm").is_none());
+        press(&mut h, "Stop reading this folder (nothing in it is deleted)", 0);
+        assert_eq!(press(&mut h, "Remove", 0), Some(json!("ownFolderRemove:D:/mine/models")));
+        assert!(h.state().get("__aiFolderConfirm").is_none());
         assert_eq!(opened(&h), json!([]), "no button opened a list");
         // The chevron, and a click on the folder's name, open and close it.
         press(&mut h, "List its files", 1);

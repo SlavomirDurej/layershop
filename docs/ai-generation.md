@@ -28,16 +28,15 @@ back end you set up, and places the answer on a new layer.
      the list best and newest first. A local model whose file the server doesn't have is marked.
    - **API Keys**: one key per provider.
    - **Engine**: which ComfyUI runs local models, in a card at the top: the one the setup
-     installed (**Installed by PhotoCraft**, its version and folder, **Repair**, **Remove Local
-     AI…**), your own ComfyUI (**Added by you**), or none yet (**Set Up Local AI…**). Under it
+     installed (**Internal**, its version and folder, **Repair**, **Remove Local
+     AI…**), your own ComfyUI (**External**), or none yet (**Set Up Local AI…**). Under it
      the address, **Connect**, the timeout, and starting ComfyUI automatically (below). For the
      installed engine its Python, folder and arguments are folded under **Launch settings**: the
      setup fills them in.
    - **Model Folders**: every models folder local models are read from, one row each: the
-     setup's own (**Installed by PhotoCraft**) and the ones you added (**Added by you · read
-     only**). A row shows its path and what it has (diffusion models, LoRAs, text encoders, …);
+     setup's own (**Internal**) and the ones you added (**External (read only)**). A row shows its path and what it has (diffusion models, LoRAs, text encoders, …);
      click it to list its files. **Refresh** reads it again, the arrow opens it in Explorer /
-     Finder, the bin stops reading an added folder (nothing in it is deleted). A folder that
+     Finder, the bin stops reading an added folder after asking (nothing in it is deleted). A folder that
      isn't there now (a drive that isn't plugged in) says so. **Add Folder…** and **Download
      Models…** (the setup wizard) are underneath. With your own ComfyUI there is only its
      folder: its own `extra_model_paths.yaml` names any others.

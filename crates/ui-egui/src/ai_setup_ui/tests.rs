@@ -989,8 +989,11 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
     assert_eq!(kinds, [("setup", true), ("yours", true)]);
     assert_eq!(listing[1]["path"], mine.as_str());
     assert_eq!(listing[1]["files"]["loras"], json!(["krea2_darkbrush.safetensors", "pixel_art_style_z_image_turbo.safetensors"]));
-    // Removing it from its row: the engine no longer reads it, and the page lists the setup's own.
-    f.insert("__aiAction".into(), json!("ownFolderRemove:0"));
+    // Removing it from its row (once confirmed): the engine no longer reads it, and the page
+    // lists the setup's own. The wizard's copy of the folders is only read when it opens, so after
+    // a restart it is empty: Remove goes by the saved ones.
+    app.ui.ai_setup.extra_models_dirs.clear();
+    f.insert("__aiAction".into(), json!(format!("ownFolderRemove:{mine}")));
     crate::ai_gen_ui::after_body(&mut app, &mut f);
     assert!(app.ui.ai_setup.extra_models_dirs.is_empty());
     assert_eq!(f["__aiFolderListing"].as_array().map(Vec::len), Some(1));

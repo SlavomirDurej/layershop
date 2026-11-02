@@ -20,6 +20,8 @@ use crate::widgets;
 /// folders opened to show their files (by path).
 const LISTING: &str = "__aiFolderListing";
 const OPENED: &str = "__aiFolderOpened";
+/// The folder whose Remove is waiting for the user to confirm it.
+const CONFIRM: &str = "__aiFolderConfirm";
 
 /// What the rows ask [`act`] for.
 const LIST: &str = "folderList";
@@ -53,14 +55,15 @@ fn counts(files: &Map<String, Value>) -> String {
     if parts.is_empty() { tr("No model files").to_string() } else { parts.join(" · ") }
 }
 
-/// A small rounded label beside a folder's name: whose folder it is.
-pub(super) fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
+/// A small rounded label beside a folder's (or the engine's) name saying whose it is, on a muted
+/// fill of `tone`, in a lighter `tone`: the accent for PhotoCraft's own, amber for the user's.
+pub(super) fn badge(ui: &mut egui::Ui, text: &str, tone: egui::Color32) {
     let t = Tokens::get(ui.ctx());
     egui::Frame::new()
-        .stroke(egui::Stroke::new(1.0, color.gamma_multiply(0.7)))
+        .fill(tone.gamma_multiply(0.22))
         .corner_radius(t.radius_sm)
-        .inner_margin(egui::Margin::symmetric(6, 1))
-        .show(ui, |ui| ui.label(RichText::new(text).color(color).size(10.5)));
+        .inner_margin(egui::Margin::symmetric(7, 2))
+        .show(ui, |ui| ui.label(RichText::new(text).color(tone.lerp_to_gamma(egui::Color32::WHITE, 0.35)).size(10.5)));
 }
 
 /// The page. `setup` is what [`crate::ai_setup_ui::summary`] says; `busy` while a Connect or
@@ -110,14 +113,9 @@ pub(super) fn page(ui: &mut egui::Ui, f: &mut Map<String, Value>, busy: bool) {
     for entry in &listing {
         let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
         let kind = entry.get("kind").and_then(Value::as_str).unwrap_or("");
-        let index = if kind == "yours" {
-            yours += 1;
-            Some(yours - 1)
-        } else {
-            None
-        };
+        yours += usize::from(kind == "yours");
         let open = opened.iter().any(|p| p == path);
-        if let Some(toggled) = row(ui, f, entry, index, open, width, busy) {
+        if let Some(toggled) = row(ui, f, entry, kind == "yours", open, width, busy) {
             if toggled {
                 opened.retain(|p| p != path);
             } else {
@@ -127,6 +125,7 @@ pub(super) fn page(ui: &mut egui::Ui, f: &mut Map<String, Value>, busy: bool) {
         ui.add_space(6.0);
     }
     f.insert(OPENED.into(), json!(opened));
+    confirm_remove(ui.ctx(), f);
     ui.add_space(4.0);
     ui.horizontal(|ui| {
         if managed {
@@ -154,9 +153,9 @@ pub(super) fn page(ui: &mut egui::Ui, f: &mut Map<String, Value>, busy: bool) {
 }
 
 /// One folder: its icon, whose it is, its path and what it has, with Refresh, Open and (for one
-/// the user added, `yours` its place among them) Remove; opened, its files. Returns
+/// the user added, `yours`) Remove; opened, its files. Returns
 /// `Some(was_open)` when its header was clicked.
-fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: Option<usize>, open: bool, width: f32, busy: bool) -> Option<bool> {
+fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: bool, open: bool, width: f32, busy: bool) -> Option<bool> {
     let t = Tokens::get(ui.ctx());
     let path = entry.get("path").and_then(Value::as_str).unwrap_or("");
     let found = entry.get("found").and_then(Value::as_bool).unwrap_or(false);
@@ -164,12 +163,12 @@ fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: Opti
     let (title, whose, whose_color, tip) = match entry.get("kind").and_then(Value::as_str) {
         Some("setup") => (
             tr("PhotoCraft's models"),
-            tr("Installed by PhotoCraft"),
-            t.accent_text,
+            tr("Internal"),
+            t.accent,
             tr("The folder the setup downloads models into. Removing models is done in the setup wizard"),
         ),
-        Some("comfy") => (tr("Your ComfyUI's models"), tr("Your ComfyUI"), t.text_dim, tr("Where your own ComfyUI keeps its models; the setup downloaded into it")),
-        _ => (tr("Your models folder"), tr("Added by you · read only"), t.text_dim, tr("Read by PhotoCraft's engine; nothing in it is changed or deleted")),
+        Some("comfy") => (tr("Your ComfyUI's models"), tr("External"), t.warning, tr("Where your own ComfyUI keeps its models; the setup downloaded into it")),
+        _ => (tr("Your models folder"), tr("External (read only)"), t.warning, tr("Read by PhotoCraft's engine; nothing in it is changed or deleted")),
     };
     let mut clicked = None;
     egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(egui::Margin::symmetric(10, 8)).show(ui, |ui| {
@@ -209,10 +208,10 @@ fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: Opti
                 if chevron.clicked() {
                     clicked = Some(open);
                 }
-                if let Some(i) = yours {
+                if yours {
                     let remove = ui.add_enabled_ui(!busy, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Stop reading this folder (nothing in it is deleted)"))).inner;
                     if remove.clicked() {
-                        f.insert(ACTION.into(), json!(format!("{REMOVE}{i}")));
+                        f.insert(CONFIRM.into(), json!(path));
                     }
                 }
                 let show = ui.add_enabled_ui(found, |ui| crate::icons::button(ui, "folder-open", 24.0, false, tr(open_label()))).inner;
@@ -230,6 +229,51 @@ fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: Opti
         }
     });
     clicked
+}
+
+/// Remove's question: what stops working when the folder is no longer read, and that nothing in
+/// it is deleted. Remove asks [`act`] to do it; Cancel, Escape or a click outside drop it.
+fn confirm_remove(ctx: &egui::Context, f: &mut Map<String, Value>) {
+    use widgets::{ButtonRole, DialogButton};
+    let Some(path) = f.get(CONFIRM).and_then(Value::as_str).map(str::to_string) else { return };
+    let mut answer = None;
+    let buttons = [DialogButton::new(ButtonRole::Default, tr("Remove"), 100.0), DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0)];
+    let modal = egui::Modal::new(egui::Id::unique("ai-folder-remove")).show(ctx, |ui| {
+        let t = Tokens::get(ui.ctx());
+        ui.set_max_width(460.0);
+        ui.label(RichText::new(tr("Remove this models folder?")).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        ui.add(egui::Label::new(RichText::new(&path).font(crate::theme::mono(12.0)).color(t.text)).wrap());
+        ui.add_space(8.0);
+        ui.add(
+            egui::Label::new(tr(
+                "PhotoCraft will stop reading this folder. The models and LoRAs that are only in it can no longer be used, and the models that need them are switched off until you add the folder again.",
+            ))
+            .wrap(),
+        );
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(RichText::new(tr("No files are deleted: the folder and everything in it stay as they are.")).color(t.text_dim)).wrap());
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    match answer {
+        Some(ButtonRole::Default) => {
+            f.remove(CONFIRM);
+            f.insert(ACTION.into(), json!(format!("{REMOVE}{path}")));
+        }
+        Some(_) => {
+            f.remove(CONFIRM);
+        }
+        None => {}
+    }
 }
 
 /// A folder's path, left-aligned in a field of its own (cut short with "…" when it doesn't fit).
@@ -309,6 +353,15 @@ fn changed(app: &mut PhotocraftApp, f: &mut Map<String, Value>, folders: &[Strin
     }
 }
 
+/// The user's own models folders as saved in the setup's record: what Add and Remove change.
+/// (The wizard's own copy is only read when the wizard opens, so after a restart it is empty.)
+fn saved(app: &mut PhotocraftApp) -> Vec<String> {
+    match app.session.execute("ai.setup.modelFolders", json!({})) {
+        Ok(r) => r.get("folders").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default(),
+        Err(_) => app.ui.ai_setup.extra_models_dirs.clone(),
+    }
+}
+
 /// Do what a row asked for; `false` when `action` isn't one of this page's.
 pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &str) -> bool {
     match action {
@@ -316,11 +369,13 @@ pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &
         ADD => {
             let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: None }, |app, answer| {
                 let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer else { return Ok(Value::Null) };
-                let mut folders = app.ui.ai_setup.extra_models_dirs.clone();
+                let mut folders = saved(app);
                 let picked = crate::ai_setup_ui::own_folder(&path);
                 let Some(d) = app.ui.dialogs.iter().position(|d| crate::prefs_ui::is_preferences(&d.fields)) else { return Ok(Value::Null) };
                 let mut fields = std::mem::take(&mut app.ui.dialogs[d].fields);
                 match picked {
+                    // Picked again: nothing changes.
+                    Ok(dir) if folders.contains(&dir) => {}
                     Ok(dir) => {
                         folders.push(dir);
                         changed(app, &mut fields, &folders);
@@ -337,12 +392,13 @@ pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &
             }
         }
         _ if action.starts_with(REMOVE) => {
-            let at: usize = action.trim_start_matches(REMOVE).parse().unwrap_or(usize::MAX);
-            let mut folders = app.ui.ai_setup.extra_models_dirs.clone();
-            if at < folders.len() {
-                let gone = folders.remove(at);
+            let gone = action.trim_start_matches(REMOVE);
+            let mut folders = saved(app);
+            let before = folders.len();
+            folders.retain(|d| d != gone);
+            if folders.len() < before {
                 if let Some(opened) = f.get_mut(OPENED).and_then(Value::as_array_mut) {
-                    opened.retain(|p| p.as_str() != Some(gone.as_str()));
+                    opened.retain(|p| p.as_str() != Some(gone));
                 }
                 changed(app, f, &folders);
             }

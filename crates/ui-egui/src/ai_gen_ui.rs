@@ -2290,13 +2290,13 @@ fn engine_card(ui: &mut egui::Ui, setup: &Value, f: &mut Map<String, Value>, wid
     let (title, whose, about) = if managed {
         (
             format!("ComfyUI {}", text("engineVersion")).trim().to_string(),
-            Some((tr("Installed by PhotoCraft"), t.accent_text)),
+            Some((tr("Internal"), t.accent)),
             text("engineFolder"),
         )
     } else if route == "existing" {
         (
             tr("Your own ComfyUI").to_string(),
-            Some((tr("Added by you"), t.text_dim)),
+            Some((tr("External"), t.warning)),
             tr("PhotoCraft uses the ComfyUI at the address below. The setup only downloaded models for it; the ComfyUI itself is yours to update.").to_string(),
         )
     } else {
@@ -2534,7 +2534,8 @@ fn keys_page(ui: &mut egui::Ui, ai: &Map<String, Value>, f: &mut Map<String, Val
     let focus = f.get(KEY_FOCUS).and_then(Value::as_str).unwrap_or("").to_string();
     let mut focus_once = f.get(KEY_FOCUS_ONCE).and_then(Value::as_bool).unwrap_or(false);
     let models: Vec<Model> = ai.get("models").and_then(Value::as_array).into_iter().flatten().filter_map(model_of).collect();
-    let width = ui.available_width().min(560.0);
+    // As wide as the dialog lets it be: it follows the dialog when that is resized.
+    let width = ui.available_width();
     let mut open = None;
     ui.scope(|ui| {
         ui.set_max_width(width);
