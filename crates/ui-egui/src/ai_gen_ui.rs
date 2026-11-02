@@ -1790,6 +1790,15 @@ const ACTION: &str = "__aiAction";
 /// that the page already tried to read the server.
 const PAGE: &str = "__aiPage";
 const FILTER: &str = "__aiFilter";
+/// What the Manage Models list is narrowed to by where models run from ([`Origin`]): `""` for all.
+const ORIGIN: &str = "__aiOrigin";
+/// The model (its index) whose Reset to Defaults waits for the user to confirm it.
+const RESET: &str = "__aiReset";
+/// An action for [`after_body`]: the AI Gen panel's LoRAs of the models with these ids (one per
+/// line) go.
+const PANEL_LORAS: &str = "panelLoras:";
+/// Remove Not Installed waits for the user to confirm it.
+const PRUNE: &str = "__aiPrune";
 const AUTO: &str = "__aiAutoConnect";
 /// A Connect / Scan running in the background (`{id, action}`), and whether the app has a ComfyUI
 /// it started itself (for the Stop button).
@@ -2170,6 +2179,101 @@ impl Filter {
             (Filter::Inpaint, Some(m)) => m.can_inpaint(),
         }
     }
+}
+
+/// Where a model runs from, as Manage Models marks it: on its provider's servers, from
+/// PhotoCraft's own models folder, or from one of the user's (a folder they added, or their own
+/// ComfyUI's).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Origin {
+    Cloud,
+    Internal,
+    External,
+}
+
+impl Origin {
+    const ALL: [Origin; 3] = [Origin::Cloud, Origin::Internal, Origin::External];
+
+    fn key(self) -> &'static str {
+        match self {
+            Origin::Cloud => "cloud",
+            Origin::Internal => "internal",
+            Origin::External => "external",
+        }
+    }
+
+    fn from_key(key: &str) -> Option<Origin> {
+        Origin::ALL.into_iter().find(|o| o.key() == key)
+    }
+
+    fn title(self) -> &'static str {
+        match self {
+            Origin::Cloud => "Cloud",
+            Origin::Internal => "Internal",
+            Origin::External => "External",
+        }
+    }
+
+    /// Its mark on a row of the list: short, so the names keep their room.
+    fn short(self) -> &'static str {
+        match self {
+            Origin::Cloud => "Cloud",
+            Origin::Internal => "Int",
+            Origin::External => "Ext",
+        }
+    }
+
+    fn tip(self) -> &'static str {
+        match self {
+            Origin::Cloud => "Cloud: run by its provider with your API key",
+            Origin::Internal => "Internal: its files are in PhotoCraft's own models folder",
+            Origin::External => "External: its files are in a models folder of yours (Model Folders), only read",
+        }
+    }
+
+    /// The colour of its mark, as the Model Folders page's badges: the accent for PhotoCraft's
+    /// own, amber for the user's.
+    fn tone(self, t: &Tokens) -> egui::Color32 {
+        match self {
+            Origin::Cloud => t.text_dim,
+            Origin::Internal => t.accent,
+            Origin::External => t.warning,
+        }
+    }
+
+    /// Where `m` runs from: `None` for a local model whose file isn't in any of the folders
+    /// (`internal`, `external`: their files by kind), or that has no single file (a custom
+    /// workflow).
+    fn of(m: &Model, internal: &std::collections::BTreeMap<String, Vec<String>>, external: &std::collections::BTreeMap<String, Vec<String>>) -> Option<Origin> {
+        use photocraft_aigen::detect::on_server;
+        if !m.provider.is_local() {
+            return Some(Origin::Cloud);
+        }
+        if m.family == Family::Custom || m.main_file().is_empty() {
+            return None;
+        }
+        if on_server(internal, m) {
+            Some(Origin::Internal)
+        } else if on_server(external, m) {
+            Some(Origin::External)
+        } else {
+            None
+        }
+    }
+}
+
+/// The width of a row's [`Origin`] mark: one for all, so the names after it line up.
+const MARK_WIDTH: f32 = 36.0;
+
+/// A row's [`Origin`] mark, painted at `at` (its top left), [`MARK_WIDTH`] wide.
+fn origin_mark(ui: &egui::Ui, at: egui::Pos2, origin: Origin) {
+    let t = Tokens::get(ui.ctx());
+    let tone = origin.tone(&t);
+    let text = tone.lerp_to_gamma(egui::Color32::WHITE, 0.35);
+    let galley = ui.painter().layout_no_wrap(tr(origin.short()).to_string(), egui::FontId::proportional(9.5), text);
+    let rect = egui::Rect::from_min_size(at, vec2(MARK_WIDTH, 14.0));
+    ui.painter().rect_filled(rect, t.radius_sm, tone.gamma_multiply(0.22));
+    ui.painter().galley(rect.center() - galley.size() / 2.0, galley, text);
 }
 
 /// What a model is used for, in the words of the list's filters.
@@ -2743,6 +2847,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         }
     }
     let mut filter = Filter::from_key(f.get(FILTER).and_then(Value::as_str).unwrap_or(""));
+    let mut origin = Origin::from_key(f.get(ORIGIN).and_then(Value::as_str).unwrap_or(""));
     let page = ui.available_width();
     let page_right = ui.cursor().left() + page;
 
@@ -2782,7 +2887,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             if ui.button(title).clicked() {
                                 push_model(ai, f, preset);
                                 // Whatever the list was narrowed to, the new model is in view.
-                                filter = Filter::All;
+                                (filter, origin) = (Filter::All, None);
                                 ui.close();
                             }
                         }
@@ -2824,13 +2929,41 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     // ----- the filters -----
     let mut models = ai.get("models").and_then(Value::as_array).cloned().unwrap_or_default();
     let parsed: Vec<Option<Model>> = models.iter().map(model_of).collect();
-    let lists = |filter: Filter, i: usize| models.get(i).is_some_and(Value::is_object) && filter.shows(parsed.get(i).and_then(Option::as_ref));
+    // Where each runs from, by the files of the folders the Model Folders page lists.
+    let (internal, external) = folders::files_by_origin(f);
+    // One that isn't installed has no files anywhere to come from: no mark, in no filter but All.
+    let origins: Vec<Option<Origin>> = parsed
+        .iter()
+        .map(|m| {
+            let m = m.as_ref()?;
+            let installed = !matches!(standing.missing(m), Some(Missing::Files(_) | Missing::NoLocalAi(_)));
+            Origin::of(m, &internal, &external).filter(|_| installed)
+        })
+        .collect();
+    let lists = |filter: Filter, origin: Option<Origin>, i: usize| {
+        models.get(i).is_some_and(Value::is_object)
+            && filter.shows(parsed.get(i).and_then(Option::as_ref))
+            && origin.is_none_or(|o| origins.get(i).copied().flatten() == Some(o))
+    };
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
         for x in Filter::ALL {
-            let count = (0..models.len()).filter(|&i| lists(x, i)).count();
+            let count = (0..models.len()).filter(|&i| lists(x, origin, i)).count();
             if filter_chip(ui, &format!("{}  {count}", tr(x.title())), filter == x).clicked() {
                 filter = x;
+            }
+        }
+        // Where they run from: a second filter beside the first, on or off at a click.
+        ui.add_space(8.0);
+        widgets::vline(ui, 18.0);
+        ui.add_space(8.0);
+        for o in Origin::ALL {
+            let count = (0..models.len()).filter(|&i| lists(filter, Some(o), i)).count();
+            if count == 0 && origin != Some(o) {
+                continue;
+            }
+            if filter_chip(ui, &format!("{}  {count}", tr(o.title())), origin == Some(o)).on_hover_text(tr(o.tip())).clicked() {
+                origin = if origin == Some(o) { None } else { Some(o) };
             }
         }
     });
@@ -2843,7 +2976,7 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     // Cloud models first, then local, each in the order of the settings: the panel's order.
     let mut shown: Vec<usize> = Vec::new();
     for local in [false, true] {
-        shown.extend((0..models.len()).filter(|&i| lists(filter, i) && models.get(i).is_some_and(is_local_model) == local));
+        shown.extend((0..models.len()).filter(|&i| lists(filter, origin, i) && models.get(i).is_some_and(is_local_model) == local));
     }
     // The selection is an index into all models; when the list doesn't show it, the list's first.
     let mut selected = f.get(SELECTED).and_then(Value::as_u64).map(|i| i as usize).filter(|i| shown.contains(i)).or_else(|| shown.first().copied());
@@ -2912,15 +3045,16 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         let mut check =
                             ui.new_child(egui::UiBuilder::new().max_rect(side(rect.left() + 4.0)).layout(egui::Layout::left_to_right(egui::Align::Center)));
                         let mut enabled = m.get("enabled").and_then(Value::as_bool).unwrap_or(true);
+                        let offer = format!("{} {}", tr("Offer in the AI Gen panel:"), text_of(m, "name"));
                         // One that can't run can't be offered: its box is off and greyed, and its
                         // own choice is kept for when it can run.
                         if lack.is_none() {
-                            widgets::checkbox(&mut check, &mut enabled, "").on_hover_text(tr("Show in the AI Gen panel"));
+                            widgets::checkbox_named(&mut check, &mut enabled, "", &offer).on_hover_text(tr("Show in the AI Gen panel"));
                             m.insert("enabled".into(), json!(enabled));
                         } else {
                             let mut off = false;
                             check
-                                .add_enabled_ui(false, |ui| widgets::checkbox(ui, &mut off, ""))
+                                .add_enabled_ui(false, |ui| widgets::checkbox_named(ui, &mut off, "", &offer))
                                 .inner
                                 .on_disabled_hover_text(tr("It can't run yet, so the AI Gen panel doesn't offer it"));
                         }
@@ -2973,7 +3107,12 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                                 used += 40.0;
                             }
                         }
-                        let width = (rect.width() - 34.0 - used).max(20.0);
+                        // Where it runs from, before its name (the names line up after the marks).
+                        if let Some(o) = origins.get(i).copied().flatten() {
+                            origin_mark(ui, egui::pos2(rect.left() + 30.0, rect.top() + 5.0), o);
+                        }
+                        let indent = MARK_WIDTH + 6.0;
+                        let width = (rect.width() - 34.0 - used - indent).max(20.0);
                         let line = |text: String, size: f32, color: egui::Color32| {
                             let mut job = egui::text::LayoutJob::simple_singleline(text, egui::FontId::proportional(size), color);
                             job.wrap = egui::text::TextWrapping::truncate_at_width(width);
@@ -2991,8 +3130,8 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                         };
                         let under = line(caption.clone(), 10.5, caption_color);
                         let elided = title.elided || under.elided;
-                        ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 4.0), title, color);
-                        ui.painter().galley(egui::pos2(rect.left() + 30.0, rect.top() + 20.0), under, caption_color);
+                        ui.painter().galley(egui::pos2(rect.left() + 30.0 + indent, rect.top() + 4.0), title, color);
+                        ui.painter().galley(egui::pos2(rect.left() + 30.0 + indent, rect.top() + 20.0), under, caption_color);
                         if let (Some(Missing::Files(None)), Some(model)) = (&lack, model) {
                             resp.on_hover_text(format!(
                                 "{name}\n{}: {}. {}",
@@ -3017,6 +3156,14 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                     }
                     if let Some(m) = selected.and_then(|i| models.get_mut(i)).and_then(Value::as_object_mut) {
                         model_settings(ui, m, files.as_ref(), selected.unwrap_or(0));
+                        ui.add_space(14.0);
+                        if widgets::secondary_button(ui, tr("Reset to Defaults…"), 150.0)
+                            .on_hover_text(tr("Put every setting of this model back as PhotoCraft sets it up, and remove its LoRAs. It asks first"))
+                            .clicked()
+                        {
+                            f.insert(RESET.into(), json!(selected.unwrap_or(0)));
+                        }
+                        ui.add_space(6.0);
                     }
                 });
             });
@@ -3024,6 +3171,22 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     }
     if let Some(lack) = &act {
         act_on_missing(f, lack);
+    }
+    // What Reset makes of a model's file: the server's lists, else what the folders have.
+    let known = files.clone().or_else(|| serde_json::to_value(folders::files_of(f)).ok().and_then(|v| v.as_object().cloned()).filter(|m| !m.is_empty()));
+    reset_question(ui.ctx(), &mut models, f, known.as_ref());
+    // Local models whose files are nowhere the engine looks, which a recommended entry isn't.
+    let stale: Vec<usize> = (0..models.len())
+        .filter(|&i| {
+            parsed.get(i).and_then(Option::as_ref).is_some_and(|m| {
+                matches!(standing.missing(m), Some(Missing::Files(_)))
+                    && !Model::defaults().iter().any(|d| d.id == m.id)
+                    && !standing.catalog.iter().any(|w| w.get("id").and_then(Value::as_str) == Some(m.id.as_str()))
+            })
+        })
+        .collect();
+    if prune_question(ui.ctx(), &mut models, f, &stale) {
+        selected = None;
     }
     if let Some((from, to)) = moved {
         move_model(&mut models, from, to);
@@ -3054,6 +3217,14 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         reorder = widgets::secondary_button(ui, tr("Recommended Order"), 150.0)
             .on_hover_text(tr("Put the models in the recommended order: the best and newest first, cloud models before local ones. The selected model's arrows move one model up or down"))
             .clicked();
+        let prune = ui
+            .add_enabled_ui(!stale.is_empty(), |ui| widgets::secondary_button(ui, tr("Remove Not Installed…"), 170.0))
+            .inner
+            .on_hover_text(tr("Remove the local models whose files are in none of the folders the engine reads (left over from another ComfyUI, say). Recommended models stay. It asks first"))
+            .on_disabled_hover_text(tr("Every local model listed is installed, or recommended (those stay to be installed)"));
+        if prune.clicked() {
+            f.insert(PRUNE.into(), json!(true));
+        }
         // What the server last said, on one line (all of it in the tooltip); an error is shown
         // whole at the top of the page instead.
         if let Some((text, false)) = &status {
@@ -3066,14 +3237,14 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         let was = selected.and_then(|i| models.get(i)).cloned();
         sort_recommended(&mut models);
         selected = was.and_then(|was| models.iter().position(|m| *m == was));
-        filter = Filter::All;
+        (filter, origin) = (Filter::All, None);
     }
     ai.insert("models".into(), Value::Array(models));
     if restore {
         let added = restore_defaults(ai, f);
         let text = if added == 0 { tr("The recommended models are all listed.").to_string() } else { format!("{added} {}", tr("recommended models added")) };
         f.insert(STATUS.into(), json!({"error": false, "text": text}));
-        filter = Filter::All;
+        (filter, origin) = (Filter::All, None);
     } else {
         // A list that shows nothing keeps the selection for when it shows it again.
         if let Some(i) = selected {
@@ -3081,6 +3252,164 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         }
     }
     f.insert(FILTER.into(), json!(filter.key()));
+    f.insert(ORIGIN.into(), json!(origin.map_or("", Origin::key)));
+}
+
+/// `m` with every setting as PhotoCraft sets it up, and no LoRAs; its id, name and whether it is
+/// offered stay. The defaults are those of the recommended model of its id; else what Scan
+/// Server makes of its file (`files`: the server's, or the folders', by kind); else those of the
+/// cloud model it is; else its architecture's, with its own model file.
+fn defaults_for(m: &Model, files: Option<&Map<String, Value>>) -> Model {
+    let file = m.main_file().to_string();
+    let found = || {
+        let folders: std::collections::BTreeMap<String, Vec<String>> = files.and_then(|f| serde_json::from_value(Value::Object(f.clone())).ok())?;
+        photocraft_aigen::detect::detect(&folders).into_iter().find(|d| d.family == m.family && d.main_file() == file)
+    };
+    let base = Model::defaults()
+        .into_iter()
+        .find(|d| d.id == m.id)
+        .or_else(|| if m.provider.is_local() { found() } else { None })
+        .or_else(|| Model::cloud_presets().into_iter().find(|c| !m.provider.is_local() && c.provider == m.provider && c.api_model == m.api_model))
+        .unwrap_or_else(|| Model { unet: m.unet.clone(), checkpoint: m.checkpoint.clone(), workflow: m.workflow.clone(), ..m.family.preset() });
+    Model { id: m.id.clone(), name: m.name.clone(), enabled: m.enabled, provider: m.provider, loras: Vec::new(), ..base }
+}
+
+/// Reset to Defaults' question for the model `RESET` names: what goes back and what goes. Reset
+/// puts [`defaults_for`] in its place and asks [`after_body`] to take its LoRAs out of the panel;
+/// Cancel, Escape or a click outside drop it.
+fn reset_question(ctx: &egui::Context, models: &mut [Value], f: &mut Map<String, Value>, files: Option<&Map<String, Value>>) {
+    use widgets::{ButtonRole, DialogButton};
+    let Some(i) = f.get(RESET).and_then(Value::as_u64).and_then(|i| usize::try_from(i).ok()) else { return };
+    let Some(model) = models.get(i).and_then(model_of) else {
+        f.remove(RESET);
+        return;
+    };
+    let mut answer = None;
+    let buttons = [DialogButton::new(ButtonRole::Default, tr("Reset"), 100.0), DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0)];
+    let name = if model.name.trim().is_empty() { model.family.label().to_string() } else { model.name.clone() };
+    let modal = egui::Modal::new(egui::Id::unique("ai-model-reset")).show(ctx, |ui| {
+        let t = Tokens::get(ui.ctx());
+        ui.set_max_width(460.0);
+        ui.label(RichText::new(format!("{} {name}?", tr("Reset"))).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        let what = if model.provider.is_local() {
+            tr("Every setting of this model goes back to its defaults, as PhotoCraft sets it up: its files, sampling, size and options, and its Speed LoRA.")
+        } else {
+            tr("Every setting of this model goes back to its defaults, as PhotoCraft sets it up: its model ID, quality, size and options.")
+        };
+        ui.add(egui::Label::new(what).wrap());
+        ui.add_space(6.0);
+        let loras = model.loras.len();
+        let text = if loras == 0 {
+            tr("It has no LoRAs to remove.").to_string()
+        } else {
+            format!("{} {loras} {}", tr("Its LoRAs are removed too:"), tr("from its settings and from the AI Gen panel. No files are deleted."))
+        };
+        ui.add(egui::Label::new(RichText::new(text).color(if loras == 0 { t.text_dim } else { t.warning })).wrap());
+        ui.add_space(6.0);
+        ui.add(egui::Label::new(RichText::new(tr("Its name and whether the AI Gen panel offers it stay. Cancel in Preferences undoes it.")).color(t.text_dim)).wrap());
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    match answer {
+        Some(ButtonRole::Default) => {
+            f.remove(RESET);
+            if let (Some(slot), Ok(fresh)) = (models.get_mut(i), serde_json::to_value(defaults_for(&model, files))) {
+                *slot = fresh;
+            }
+            f.insert(ACTION.into(), json!(format!("{PANEL_LORAS}{}", model.id)));
+            f.insert(STATUS.into(), json!({"error": false, "text": format!("{name}: {}", tr("settings reset to their defaults"))}));
+        }
+        Some(_) => {
+            f.remove(RESET);
+        }
+        None => {}
+    }
+}
+
+/// Remove Not Installed's question: which models go (`stale`: their places in `models`), that
+/// recommended ones stay and that no file is deleted. Remove takes them out of `models` (and asks
+/// [`after_body`] to drop their LoRAs from the panel). Returns whether they went.
+fn prune_question(ctx: &egui::Context, models: &mut Vec<Value>, f: &mut Map<String, Value>, stale: &[usize]) -> bool {
+    use widgets::{ButtonRole, DialogButton};
+    if f.get(PRUNE).is_none() {
+        return false;
+    }
+    if stale.is_empty() {
+        f.remove(PRUNE);
+        return false;
+    }
+    let names: Vec<String> = stale.iter().filter_map(|&i| models.get(i)).map(|m| text_of_value(m, "name")).collect();
+    let mut answer = None;
+    let buttons = [DialogButton::new(ButtonRole::Default, tr("Remove"), 100.0), DialogButton::new(ButtonRole::Cancel, tr("Cancel"), 84.0)];
+    let modal = egui::Modal::new(egui::Id::unique("ai-model-prune")).show(ctx, |ui| {
+        let t = Tokens::get(ui.ctx());
+        ui.set_max_width(460.0);
+        let title = if names.len() == 1 { tr("Remove 1 model that isn't installed?").to_string() } else { format!("{} {} {}", tr("Remove"), names.len(), tr("models that aren't installed?")) };
+        ui.label(RichText::new(title).font(crate::theme::semibold(15.0)));
+        ui.add_space(4.0);
+        widgets::hairline(ui);
+        ui.add_space(8.0);
+        ui.add(
+            egui::Label::new(tr(
+                "Their files are in none of the folders the engine reads, so they can't run: they are usually left over from another ComfyUI. Their settings and LoRAs go with them.",
+            ))
+            .wrap(),
+        );
+        ui.add_space(6.0);
+        const SHOWN: usize = 8;
+        for name in names.iter().take(SHOWN) {
+            ui.label(RichText::new(format!("•  {name}")).color(t.text));
+        }
+        if names.len() > SHOWN {
+            ui.label(RichText::new(format!("… {} {}", names.len() - SHOWN, tr("more"))).color(t.text_dim));
+        }
+        ui.add_space(6.0);
+        ui.add(
+            egui::Label::new(RichText::new(tr("Recommended models stay, to be installed. No files are deleted; Scan Server adds a model again once its file is there. Cancel in Preferences undoes it.")).color(t.text_dim))
+                .wrap(),
+        );
+        ui.add_space(12.0);
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            answer = widgets::dialog_buttons(ui, &buttons);
+        });
+    });
+    if modal.should_close() {
+        answer = answer.or(Some(ButtonRole::Cancel));
+    }
+    match answer {
+        Some(ButtonRole::Default) => {
+            f.remove(PRUNE);
+            let ids: Vec<String> = stale.iter().filter_map(|&i| models.get(i)).map(|m| text_of_value(m, "id")).collect();
+            // From the end, so the places of the others hold.
+            let mut at = stale.to_vec();
+            at.sort_unstable();
+            for i in at.into_iter().rev() {
+                if i < models.len() {
+                    models.remove(i);
+                }
+            }
+            f.remove(SELECTED);
+            f.insert(ACTION.into(), json!(format!("{PANEL_LORAS}{}", ids.join("\n"))));
+            let text = format!("{} {}", ids.len(), tr(if ids.len() == 1 { "model that wasn't installed removed" } else { "models that weren't installed removed" }));
+            f.insert(STATUS.into(), json!({"error": false, "text": text}));
+            true
+        }
+        Some(_) => {
+            f.remove(PRUNE);
+            false
+        }
+        None => false,
+    }
 }
 
 /// What "Add Model" offers, in the groups its menu shows: (heading, [(menu title, model)]).
@@ -3114,7 +3443,7 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
         ui.end_row();
     };
     egui::Grid::new(("ai-model", index)).num_columns(2).spacing([12.0, 6.0]).show(ui, |ui| {
-        text_row(ui, m, "name", "Name", "");
+        text_row(ui, m, "name", "Name", "Model name");
         label(ui, "Used for");
         let used = model_of(&Value::Object(m.clone())).map(|model| uses(&model).into_iter().map(tr).collect::<Vec<_>>().join(", ")).unwrap_or_default();
         ui.label(RichText::new(used).color(t.text)).on_hover_text(tr("What the AI Gen panel offers this model for: Create (text to image), or Edit (editing, inpainting)"));
@@ -3369,6 +3698,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         crate::ai_setup_ui::read_for_prefs(app);
     }
     f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
+    folders::ensure_listed(app, f);
     if let Some(job) = f.get(JOB).cloned() {
         let id = job.get("id").and_then(Value::as_u64).unwrap_or(0);
         let action = job.get("action").and_then(Value::as_str).unwrap_or("connect").to_string();
@@ -3426,6 +3756,12 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         "browsePython" | "browseScript" => browse(app, f, action == "browsePython"),
         // The Model Folders page's rows.
         _ if folders::act(app, f, &action) => {}
+        // Models were reset or removed: the LoRAs added for them in the panel go with their own.
+        _ if action.starts_with(PANEL_LORAS) => {
+            for id in action.trim_start_matches(PANEL_LORAS).lines() {
+                app.ui.ai_gen.loras.remove(id);
+            }
+        }
         // The wizard is a window: the dialog is confirmed first, then it opens (see `ai_setup_ui`).
         "setup" => crate::ai_setup_ui::request_from_prefs(app, "open"),
         "setupRepair" => crate::ai_setup_ui::request_from_prefs(app, "repair"),
@@ -3527,7 +3863,7 @@ pub fn load_keys(app: &mut PhotocraftApp) {
     }
 }
 
-mod folders;
+pub(crate) mod folders;
 pub(crate) mod loras;
 mod refs;
 pub mod regions;

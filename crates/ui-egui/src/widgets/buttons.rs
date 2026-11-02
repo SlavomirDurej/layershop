@@ -213,6 +213,12 @@ fn button_impl_h(ui: &mut Ui, label: &str, min_width: f32, height: Option<f32>, 
 
 /// Spectrum-style checkbox (blue when checked).
 pub fn checkbox(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
+    checkbox_named(ui, on, label, label)
+}
+
+/// [`checkbox`] whose accessible name is `name` rather than its label: for a box shown without a
+/// label (a list's row box), which screen readers and tests still need to name.
+pub fn checkbox_named(ui: &mut Ui, on: &mut bool, label: &str, name: &str) -> Response {
     let t = Tokens::get(ui.ctx());
     let (mut resp, label_resp) = ui
         .horizontal(|ui| {
@@ -234,7 +240,7 @@ pub fn checkbox(ui: &mut Ui, on: &mut bool, label: &str) -> Response {
     }
     // The label is the single named, focusable checkbox; the box is a mouse target.
     // Override Label's metadata instead of creating a second node with the same name.
-    label_resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, tl!(label)));
+    label_resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::CheckBox, ui.is_enabled(), *on, tl!(name)));
     resp
 }
 

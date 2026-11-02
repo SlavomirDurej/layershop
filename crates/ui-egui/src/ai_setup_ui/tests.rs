@@ -986,12 +986,14 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
     // A model Scan Server found in their folder, beside the recommended Z-Image Turbo whose file
     // is there too, and a model of the setup's own with LoRAs from their folder and elsewhere.
     std::fs::create_dir_all(std::path::Path::new(&mine).join("diffusion_models")).unwrap();
-    std::fs::write(std::path::Path::new(&mine).join("diffusion_models").join("my_finetune.safetensors"), b"m").unwrap();
+    std::fs::write(std::path::Path::new(&mine).join("diffusion_models").join("z_image_bf16.safetensors"), b"m").unwrap();
     let z_file = std::fs::read_dir(std::path::Path::new(&mine).join("unet")).unwrap().next().unwrap().unwrap().file_name().into_string().unwrap();
     let lora = |file: &str| photocraft_aigen::Lora { file: file.into(), ..Default::default() };
     let draft = [
-        photocraft_aigen::Model { id: "found".into(), name: "my finetune".into(), unet: "my_finetune.safetensors".into(), ..photocraft_aigen::Family::ZImage.preset() },
-        photocraft_aigen::Model { id: "z-image-turbo".into(), unet: z_file, enabled: true, ..photocraft_aigen::Family::ZImage.preset() },
+        photocraft_aigen::Model { id: "found".into(), name: "my finetune".into(), unet: "z_image_bf16.safetensors".into(), ..photocraft_aigen::Family::ZImage.preset() },
+        photocraft_aigen::Model { id: "z-image-turbo".into(), unet: z_file.clone(), enabled: true, ..photocraft_aigen::Family::ZImage.preset() },
+        // Scan Server's own entry for the same file: another build of the recommended model, not it.
+        photocraft_aigen::Model { id: "z-image-turbo-found".into(), name: "z image turbo".into(), unet: z_file, ..photocraft_aigen::Family::ZImage.preset() },
         photocraft_aigen::Model {
             id: "own".into(),
             loras: vec![lora("krea2_darkbrush.safetensors"), lora("somewhere_else.safetensors")],
@@ -1026,8 +1028,16 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
     assert_eq!(models[1].loras.iter().map(|l| l.file.as_str()).collect::<Vec<_>>(), ["somewhere_else.safetensors"]);
     assert_eq!(app.ui.ai_gen.loras.get("own").map(|l| l.iter().map(|l| l.file.as_str()).collect::<Vec<_>>()), Some(vec!["somewhere_else.safetensors"]));
     assert!(!app.ui.ai_gen.loras.contains_key("found"));
-    assert!(f["__aiStatus"]["text"].as_str().unwrap().contains("1 model, 1 LoRA"), "{}", f["__aiStatus"]);
+    assert!(f["__aiStatus"]["text"].as_str().unwrap().contains("2 models, 1 LoRA"), "{}", f["__aiStatus"]);
     assert!(f["__aiFiles"]["loras"].as_array().is_none_or(|l| l.is_empty()), "{}", f["__aiFiles"]);
+    // Added again: the models in it are listed from its files, as Scan Server would, without
+    // starting the engine (it reads the folder the next time a local model needs it).
+    crate::ai_gen_ui::folders::added(&mut app, &mut f, std::slice::from_ref(&mine));
+    let models: Vec<photocraft_aigen::Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
+    assert!(models.iter().any(|m| m.unet == "z_image_bf16.safetensors"), "{:?}", models.iter().map(|m| &m.unet).collect::<Vec<_>>());
+    assert!(f.get("__aiJob").is_none() && f.get("__aiAction").is_none(), "nothing was started");
+    assert!(f["__aiStatus"]["text"].as_str().unwrap().starts_with("Folder added:"), "{}", f["__aiStatus"]);
+    assert!(f["__aiFiles"]["loras"].as_array().unwrap().iter().any(|l| l == "krea2_darkbrush.safetensors"));
     // The Engine page draws for it too.
     f.insert("__aiPage".into(), json!("server"));
     f.remove("__aiAction");

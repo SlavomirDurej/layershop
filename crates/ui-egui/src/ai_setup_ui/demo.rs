@@ -480,7 +480,9 @@ pub fn own_models_folder(app: &mut PhotocraftApp, dir: &Path) -> Option<std::pat
 /// screen) with a models folder of the user's own beside the setup's, `installed-prefs-own` the
 /// Model Folders preferences page that lists it (opened to its files), `installed-prefs-remove-own`
 /// with its Remove's question up, `installed-prefs-engine-own` the Engine page and
-/// `installed-prefs-keys-own` the API Keys page,
+/// `installed-prefs-keys-own` the API Keys page, `installed-prefs-models-own` Manage Models (each
+/// model marked with where it runs from) and `installed-prefs-reset-own` with its first model's
+/// Reset to Defaults question up,
 /// `models-light` the Models screen on an 8 GB card (the Light preset, MOSS Image first),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
 /// asks while a setup runs; `aigen-empty` the AI Gen panel with nothing set up and no ComfyUI
@@ -642,12 +644,16 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
                 let page = match which {
                     "-engine" => "server",
                     "-keys" => "keys",
+                    "-models" | "-reset" => "models",
                     _ => "folders",
                 };
                 d.fields.insert("__aiPage".into(), json!(page));
                 d.fields.insert("__aiFolderOpened".into(), json!(mine));
                 if which == "-remove" {
                     d.fields.insert("__aiFolderConfirm".into(), json!(mine.first()));
+                }
+                if which == "-reset" {
+                    d.fields.insert("__aiReset".into(), json!(0));
                 }
             }
             return true;

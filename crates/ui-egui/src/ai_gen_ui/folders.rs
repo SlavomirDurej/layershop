@@ -338,23 +338,51 @@ fn list(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     }
 }
 
-/// The user's own models folders changed to `folders`: saved, listed again, then the page scans
-/// as Scan Server does, so the models and LoRAs in them are offered (and the engine is started
-/// on the new folders).
-fn changed(app: &mut PhotocraftApp, f: &mut Map<String, Value>, folders: &[String]) {
+/// A models folder was added (`folders` is the whole list now): saved, listed again, and the
+/// models in it added to the draft as Scan Server would, from the files the folders have. The
+/// engine isn't started for it: it reads the new folder the next time a local model needs it.
+pub(crate) fn added(app: &mut PhotocraftApp, f: &mut Map<String, Value>, folders: &[String]) {
     match crate::ai_setup_ui::set_own_folders(app, folders) {
         Ok(_) => {
             f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
             list(app, f);
-            f.insert(STATUS.into(), json!({"error": false, "text": tr("Reading the models folders…")}));
-            f.insert(ACTION.into(), json!("detect"));
+            let files = json!(files_of(f));
+            let (models, repaired, matched) = super::add_detected(f, &files);
+            f.insert(FILES.into(), files);
+            let mut text = format!("{} {models} {}", tr("Folder added:"), tr(if models == 1 { "model added" } else { "models added" }));
+            if repaired + matched > 0 {
+                text = format!("{text}, {} {}", repaired + matched, tr("pointed at its files"));
+            }
+            f.insert(STATUS.into(), json!({"error": false, "text": text}));
         }
         Err(e) => failed(f, &e),
     }
 }
 
+/// Read the folders for the page, once a dialog: Manage Models marks each model with the folder
+/// it is in (internal or external), so it needs them as much as this page does.
+pub(super) fn ensure_listed(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
+    let set_up = f.get(SETUP).and_then(|s| s.get("route")).and_then(Value::as_str).is_some_and(|r| !r.is_empty());
+    if set_up && !f.contains_key(LISTING) {
+        list(app, f);
+    }
+}
+
+/// The model files of PhotoCraft's own folder (`internal`) and of the user's (`external`: those
+/// added, and the user's own ComfyUI's), each by kind, from the folders the page listed.
+pub(super) fn files_by_origin(f: &Map<String, Value>) -> (std::collections::BTreeMap<String, Vec<String>>, std::collections::BTreeMap<String, Vec<String>>) {
+    let (mut internal, mut external): (std::collections::BTreeMap<String, Vec<String>>, std::collections::BTreeMap<String, Vec<String>>) = Default::default();
+    for entry in f.get(LISTING).and_then(Value::as_array).into_iter().flatten() {
+        let to = if entry.get("kind").and_then(Value::as_str) == Some("setup") { &mut internal } else { &mut external };
+        for (kind, names) in entry.get("files").and_then(Value::as_object).into_iter().flatten() {
+            to.entry(kind.clone()).or_default().extend(names.as_array().into_iter().flatten().filter_map(Value::as_str).map(str::to_string));
+        }
+    }
+    (internal, external)
+}
+
 /// The model files of every folder the page lists, by kind, merged.
-fn files_of(f: &Map<String, Value>) -> std::collections::BTreeMap<String, Vec<String>> {
+pub(super) fn files_of(f: &Map<String, Value>) -> std::collections::BTreeMap<String, Vec<String>> {
     let mut out: std::collections::BTreeMap<String, Vec<String>> = Default::default();
     for entry in f.get(LISTING).and_then(Value::as_array).into_iter().flatten() {
         for (kind, names) in entry.get("files").and_then(Value::as_object).into_iter().flatten() {
@@ -370,8 +398,9 @@ fn files_of(f: &Map<String, Value>) -> std::collections::BTreeMap<String, Vec<St
 }
 
 /// A models folder went: take out of the draft what could run (`had`) only thanks to it and can't
-/// now (`left`). A model Scan Server added for one of its files goes; a recommended one (the
-/// wizard can install it) stays, unticked, to show as not installed. A LoRA whose file was only
+/// now (`left`). A model Scan Server added for one of its files goes; a recommended one (one of
+/// [`photocraft_aigen::Model::defaults`], or the wizard's, by id) stays, unticked, to show as not
+/// installed. A LoRA whose file was only
 /// there goes from its model's settings and from the AI Gen panel. Returns how many models and
 /// LoRAs went.
 fn forget(
@@ -396,7 +425,10 @@ fn forget(
             continue;
         };
         let lost = m.provider.is_local() && on_server(had, &m) && !on_server(left, &m);
-        let recommended = photocraft_aigen::Model::defaults().iter().any(|d| photocraft_aigen::detect::same_variant(&m, d)) || standing.wizard_model(&m).is_some();
+        // The recommended entry itself (by id: the recommended and the wizard's models keep their
+        // own), not one Scan Server made for a file of the same model (`krea2_turbo_fp8_scaled`
+        // beside Krea 2 Turbo, or even its very file).
+        let recommended = photocraft_aigen::Model::defaults().iter().any(|d| d.id == m.id) || standing.catalog.iter().any(|w| w.get("id").and_then(Value::as_str) == Some(m.id.as_str()));
         if lost && !recommended {
             models += 1;
             continue;
@@ -449,7 +481,7 @@ pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &
                     Ok(dir) if folders.contains(&dir) => {}
                     Ok(dir) => {
                         folders.push(dir);
-                        changed(app, &mut fields, &folders);
+                        added(app, &mut fields, &folders);
                     }
                     Err(why) => failed(&mut fields, &why),
                 }

@@ -26,6 +26,16 @@ back end you set up, and places the answer on a new layer.
      a model for every model file the ComfyUI server has; **Restore Defaults** puts back the
      recommended models that are missing, and changes nothing else; **Recommended Order** sorts
      the list best and newest first. A local model whose file the server doesn't have is marked.
+     Each row is marked with where the model runs from: **Cloud** (its provider, with your API
+     key), **Int** (PhotoCraft's own models folder) or **Ext** (a models folder of yours, or your
+     own ComfyUI's); a model that isn't installed has no mark. **Cloud**, **Internal** and
+     **External** beside the filters narrow the list the same way (click again for all). Under a
+     model's settings, **Reset to Defaults…** asks, then puts every setting back as PhotoCraft
+     sets it up (a recommended model's own defaults, else what Scan Server makes of its file) and
+     removes its LoRAs, from its settings and from the AI Gen panel; its name and its switch stay.
+     **Remove Not Installed…** (under the list) asks, naming them, then removes the local models
+     whose files are in none of the folders the engine reads (left over from another ComfyUI);
+     recommended models stay, to be installed.
    - **API Keys**: one key per provider.
    - **Engine**: which ComfyUI runs local models, in a card at the top: the one the setup
      installed (**Internal**, its version and folder, **Repair**, **Remove Local
@@ -40,7 +50,9 @@ back end you set up, and places the answer on a new layer.
      could run only thanks to that folder leaves the lists: models Scan Server found in it, and
      LoRAs whose files were there (in each model's settings and in the AI Gen panel); a
      recommended model stays, switched off, so the setup can install it. A folder that
-     isn't there now (a drive that isn't plugged in) says so. **Add Folder…** and **Download
+     isn't there now (a drive that isn't plugged in) says so. Adding a folder lists the models in
+     it at once, from its files, without starting ComfyUI (the engine reads the folder the next
+     time a local model needs it). **Add Folder…** and **Download
      Models…** (the setup wizard) are underneath. With your own ComfyUI there is only its
      folder: its own `extra_model_paths.yaml` names any others.
 2. **Window › AI Gen** — a tab next to Properties and Adjustments. It has two tabs of its own:

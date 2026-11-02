@@ -2433,3 +2433,74 @@ fn the_model_settings_keep_its_loras() {
     let z: Model = serde_json::from_value(models.as_array().unwrap().iter().find(|m| m["id"] == "z").unwrap().clone()).unwrap();
     assert_eq!(z.loras, [ink, Lora::default()]);
 }
+
+#[test]
+fn each_model_is_marked_with_where_it_runs_from() {
+    let files = |names: &[&str]| std::collections::BTreeMap::from([("diffusion_models".to_string(), names.iter().map(|n| n.to_string()).collect::<Vec<_>>())]);
+    let (internal, external) = (files(&["mine.safetensors"]), files(&["theirs.safetensors", "mine.safetensors"]));
+    let local = |file: &str| Model { unet: file.into(), ..Family::ZImage.preset() };
+    // PhotoCraft's own folder wins when both have the file.
+    assert_eq!(Origin::of(&local("mine.safetensors"), &internal, &external), Some(Origin::Internal));
+    assert_eq!(Origin::of(&local("theirs.safetensors"), &internal, &external), Some(Origin::External));
+    assert_eq!(Origin::of(&local("gone.safetensors"), &internal, &external), None, "not installed: no mark");
+    assert_eq!(Origin::of(&Model::cloud(Provider::Openai, "GPT", "gpt-image-2", false), &internal, &external), Some(Origin::Cloud));
+    assert_eq!(Origin::of(&Model { family: Family::Custom, ..Model::default() }, &internal, &external), None);
+    for o in Origin::ALL {
+        assert_eq!(Origin::from_key(o.key()), Some(o));
+    }
+    assert_eq!(Origin::from_key(""), None);
+}
+
+#[test]
+fn reset_puts_a_models_defaults_back_and_takes_its_loras_away() {
+    let lora = |file: &str| photocraft_aigen::Lora { file: file.into(), ..Default::default() };
+    // A recommended model: its own defaults, whatever was changed. Name and switch stay.
+    let qwen = Model::defaults().into_iter().find(|m| m.id == "qwen-image-2-1").unwrap();
+    let changed = Model { name: "My Qwen".into(), enabled: false, steps: 99, cfg: 7.5, lora: String::new(), loras: vec![lora("a.safetensors")], ..qwen.clone() };
+    let reset = defaults_for(&changed, None);
+    assert_eq!((reset.steps, reset.cfg, reset.lora.as_str()), (qwen.steps, qwen.cfg, qwen.lora.as_str()));
+    assert_eq!((reset.name.as_str(), reset.enabled, reset.id.as_str()), ("My Qwen", false, "qwen-image-2-1"));
+    assert!(reset.loras.is_empty());
+    // One Scan Server found: what it makes of the file, with the encoder the folders have.
+    let files = json!({"diffusion_models": ["z_image_bf16.safetensors"], "text_encoders": ["qwen_3_4b.safetensors"], "vae": ["ae.safetensors"]});
+    let found = photocraft_aigen::detect::detect(&serde_json::from_value(files.clone()).unwrap()).into_iter().next().unwrap();
+    let mine = Model { id: "z-image-bf16".into(), name: "z image".into(), steps: 3, loras: vec![lora("b.safetensors")], ..found.clone() };
+    let reset = defaults_for(&mine, files.as_object());
+    assert_eq!((reset.steps, reset.unet.as_str(), reset.clip.as_str()), (found.steps, "z_image_bf16.safetensors", found.clip.as_str()));
+    assert!(reset.loras.is_empty() && reset.id == "z-image-bf16");
+    // Without the server's lists: its architecture's settings, keeping its file.
+    let reset = defaults_for(&mine, None);
+    assert_eq!((reset.steps, reset.unet.as_str()), (Family::ZImage.preset().steps, "z_image_bf16.safetensors"));
+    // A cloud model: its preset.
+    let gpt = Model::cloud_presets().into_iter().next().unwrap();
+    let reset = defaults_for(&Model { id: "g".into(), seed: 5, ..gpt.clone() }, None);
+    assert_eq!((reset.seed, reset.api_model.as_str()), (gpt.seed, gpt.api_model.as_str()));
+}
+
+#[test]
+fn remove_not_installed_asks_then_takes_only_the_models_it_names() {
+    use egui_kittest::{Harness, kittest::Queryable};
+    let models = vec![json!({"id": "a", "name": "Left Over"}), json!({"id": "b", "name": "Keep"}), json!({"id": "c", "name": "Gone Too"})];
+    let state = (models, serde_json::Map::from_iter([(PRUNE.to_string(), json!(true)), (SELECTED.to_string(), json!(1))]), false);
+    let mut h = Harness::builder()
+        .with_size(vec2(900.0, 600.0))
+        .with_context_setup(|ctx| PhotocraftApp::setup_context(ctx, Default::default()))
+        .build_ui_state(
+            |ui, (models, f, went): &mut (Vec<Value>, Map<String, Value>, bool)| {
+                *went |= prune_question(ui.ctx(), models, f, &[0, 2]);
+            },
+            state,
+        );
+    h.run();
+    // It names them, and changes nothing until Remove.
+    assert!(h.query_by_label("•  Left Over").is_some() && h.query_by_label("•  Gone Too").is_some());
+    assert_eq!(h.state().0.len(), 3);
+    h.get_by_label("Remove").click();
+    h.run();
+    let (models, f, went) = h.state();
+    assert!(*went);
+    assert_eq!(models, &vec![json!({"id": "b", "name": "Keep"})]);
+    assert_eq!(f[ACTION], json!("panelLoras:a\nc"));
+    assert!(f.get(PRUNE).is_none() && f.get(SELECTED).is_none());
+    assert!(f[STATUS]["text"].as_str().unwrap().starts_with("2 models"));
+}
