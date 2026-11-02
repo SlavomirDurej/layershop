@@ -67,6 +67,7 @@ fn automation_may_look_at_the_local_ai_setup_but_not_run_it() {
         ("ai.setup.plan", json!({"extraModelsDirs": ["C:/Users"]})),
         ("ai.setup.manifest", json!({"extraModelsDirs": []})),
         ("ai.setup.modelFolders", json!({"folders": []})),
+        ("ai.setup.openModelFolder", json!({"folder": "C:/Users"})),
     ] {
         let e = authorize_engine_command(id, &params).unwrap_err().to_string();
         assert!(e.contains(id) && e.contains("the user's to do"), "{id} {params}: {e}");

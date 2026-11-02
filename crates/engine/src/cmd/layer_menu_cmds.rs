@@ -397,6 +397,30 @@ pub(crate) fn reveal(path: &str, dry_run: bool) -> Result<Value> {
     Ok(json!({"path": path}))
 }
 
+/// Open the folder `path` itself in the platform file manager (where [`reveal`] shows a file in
+/// the folder that has it); `dry_run` answers the program and arguments instead (tests).
+pub(crate) fn open_folder(path: &str, dry_run: bool) -> Result<Value> {
+    let (program, args) = open_folder_command_on(std::env::consts::OS, path);
+    if dry_run {
+        return Ok(json!({"program": program, "args": args}));
+    }
+    if !std::path::Path::new(path).is_dir() {
+        return Err(other(format!("{path} is not a folder, so it can't be opened in the file manager")));
+    }
+    spawn(program, &args)?;
+    Ok(json!({"path": path}))
+}
+
+/// The file-manager invocation that opens the folder `path` on the platform `os`.
+fn open_folder_command_on(os: &str, path: &str) -> (&'static str, Vec<String>) {
+    match os {
+        "macos" => ("open", vec!["--".into(), path.into()]),
+        // A folder alone, no switches: Explorer opens it.
+        "windows" => ("explorer", vec![path.replace('/', "\\")]),
+        _ => ("xdg-open", vec![path.into()]),
+    }
+}
+
 /// `xdg-open` opens whatever it is given in its default application, so it only gets a folder: a
 /// linked path such as `tool.jar/a.png` would otherwise launch `tool.jar` instead of showing it.
 fn ensure_folder(program: &str, args: &[String]) -> Result<()> {

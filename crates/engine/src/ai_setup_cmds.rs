@@ -822,8 +822,13 @@ mod native {
         let env = env(s)?;
         let m = manifest(s)?;
         let mut record = s.ai_setup.record();
+        let list = flag_param(p, "list", false, cmd)?;
         let Some(asked) = folders_param(p, "folders", cmd)? else {
-            return Ok(json!({"folders": record.choices.extra_models_dirs, "applied": false, "restarted": false}));
+            let mut out = json!({"folders": record.choices.extra_models_dirs, "applied": false, "restarted": false});
+            if list {
+                out["listing"] = listing(&record);
+            }
+            return Ok(out);
         };
         if record.choices.route == Route::Existing && record.phase != Phase::None {
             return Err(EngineError::Other(
@@ -884,12 +889,56 @@ mod native {
         }
         let files = files_of(&record.choices);
         let count = |folder: &str| files.get(folder).map_or(0, Vec::len);
-        Ok(json!({
+        let mut out = json!({
             "folders": record.choices.extra_models_dirs, "applied": !engines.is_empty(), "restarted": restarted,
             "diffusionModels": count("diffusion_models") + count("checkpoints"), "loras": count("loras"),
             "added": configured.as_ref().map(|c| c.added), "unlisted": configured.as_ref().map(|c| c.unlisted),
             "ready": configured.map(|c| c.ready),
-        }))
+        });
+        if list {
+            out["listing"] = listing(&record);
+        }
+        Ok(out)
+    }
+
+    /// Every models folder local models are read from, with what each has: the setup's own
+    /// (`setup`: the one it downloads into; with the user's own ComfyUI, `comfy`, that ComfyUI's),
+    /// then the user's own folders (`yours`), only read. `found: false` is a folder that isn't
+    /// there now (a drive that isn't plugged in, say): it lists nothing.
+    fn listing(record: &SetupState) -> Value {
+        let entry = |path: &str, kind: &str, files: BTreeMap<String, Vec<String>>| {
+            json!({"path": path, "kind": kind, "found": Path::new(path).is_dir(), "files": files})
+        };
+        let mut out = Vec::new();
+        let own = record.choices.models_dir.trim();
+        if record.phase != Phase::None && !own.is_empty() {
+            let kind = if record.choices.route == Route::Existing { "comfy" } else { "setup" };
+            out.push(entry(own, kind, runtime::list_models(Path::new(own))));
+        }
+        for dir in &record.choices.extra_models_dirs {
+            out.push(entry(dir, "yours", runtime::list_linked_models(Path::new(dir))));
+        }
+        Value::Array(out)
+    }
+
+    /// `ai.setup.openModelFolder`: one of the folders [`listing`] names, opened in the file
+    /// manager. No other folder: what is opened is what the Model Folders page shows.
+    pub(super) fn open_model_folder(s: &mut Session, p: &Value) -> Result<Value> {
+        let cmd = "ai.setup.openModelFolder";
+        let wanted = p.get("folder").and_then(Value::as_str).map(str::trim).filter(|f| !f.is_empty()).ok_or_else(|| bad(cmd, "missing \"folder\""))?;
+        let record = s.ai_setup.record();
+        let known = listing(&record);
+        let path = known
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| e.get("path").and_then(Value::as_str))
+            .find(|path| *path == wanted)
+            .ok_or_else(|| bad(cmd, format!("`{wanted}` is not one of the models folders local AI reads (see ai.setup.modelFolders)")))?;
+        if !Path::new(path).is_dir() {
+            return Err(EngineError::Other(format!("{path} isn't there: is its drive plugged in?")));
+        }
+        crate::layer_menu_cmds::open_folder(path, flag_param(p, "dryRun", false, cmd)?)
     }
 
     pub(super) fn set_token(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1111,6 +1160,10 @@ mod web {
         Err(unsupported())
     }
 
+    pub(super) fn open_model_folder(_: &mut Session, _: &Value) -> Result<Value> {
+        Err(unsupported())
+    }
+
     pub(super) fn set_token(_: &mut Session, _: &Value) -> Result<Value> {
         Err(unsupported())
     }
@@ -1242,9 +1295,19 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Use My Models Folders",
             menu: &[],
             shortcut: None,
-            params: r##"{"folders":[path,…]? (at most 16; a ComfyUI folder stands for the models folder in it; [] removes them all),"scan":bool=true} → {folders,applied (the installed engine reads them now),restarted (the engine this app started was stopped, to read them when next needed),diffusionModels,loras (files the engine has now, its own and these),added,unlisted,ready:[model id]? (the model list followed the files, as Scan Server does)}: models folders the user already has, which the engine this app installed reads beside its own. Nothing is ever written to them or deleted from them, and a file a setup needs that one has is not downloaded. Without folders: the ones set. Not for the user's own ComfyUI, whose own settings name its folders"##,
+            params: r##"{"folders":[path,…]? (at most 16; a ComfyUI folder stands for the models folder in it; [] removes them all),"scan":bool=true,"list":bool=false} → {folders,listing:[{path,kind:setup|comfy|yours (setup: the one the setup downloads into; comfy: the user's own ComfyUI's; yours: added, only read),found (false: not there now, e.g. an unplugged drive),files:{folder:[file]}}]? (with list),applied (the installed engine reads them now),restarted (the engine this app started was stopped, to read them when next needed),diffusionModels,loras (files the engine has now, its own and these),added,unlisted,ready:[model id]? (the model list followed the files, as Scan Server does)}: models folders the user already has, which the engine this app installed reads beside its own. Nothing is ever written to them or deleted from them, and a file a setup needs that one has is not downloaded. Without folders: the ones set. Not for the user's own ComfyUI, whose own settings name its folders"##,
             enabled: can_install,
             run: imp::model_folders,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.setup.openModelFolder",
+            label: "Show Models Folder",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"folder":path (one of ai.setup.modelFolders' listing),"dryRun":bool=false} → {path}: opens that models folder in the file manager (Explorer, Finder). No other folder"##,
+            enabled: can_install,
+            run: imp::open_model_folder,
             journal: false,
         },
         CommandSpec {

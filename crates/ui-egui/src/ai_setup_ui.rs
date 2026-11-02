@@ -529,10 +529,19 @@ pub fn summary(app: &PhotocraftApp) -> Value {
         ("done", None) => format!("{} · {installed} {}", tr("Using your own ComfyUI"), tr("of the recommended models")),
         _ => tr("Not set up yet. The wizard installs ComfyUI and the recommended models for you.").to_string(),
     };
+    // Whose engine runs local models: the one the setup installed, the user's own ComfyUI (the
+    // setup only downloaded models for it), or none set up yet.
+    let route = match (text(status, "/record/phase"), text(status, "/record/route")) {
+        ("" | "none", _) => "",
+        (_, route) => route,
+    };
+    let engine = list(status, "/engines").first().cloned().unwrap_or(Value::Null);
     json!({
         "available": available(app), "text": line, "installed": text(status, "/state") == "done", "managed": !list(status, "/engines").is_empty(),
         "modelFiles": status.get("modelFiles").cloned().unwrap_or(Value::Null), "catalog": catalog(app),
         "extraModelsDirs": status.pointer("/record/extraModelsDirs").cloned().unwrap_or_else(|| json!([])),
+        "route": route, "engineVersion": text(&engine, "/version"), "engineFolder": text(&engine, "/folder"),
+        "modelsDir": text(status, "/record/modelsDir"), "models": installed,
     })
 }
 

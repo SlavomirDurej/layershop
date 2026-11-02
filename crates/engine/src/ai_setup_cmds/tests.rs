@@ -14,7 +14,7 @@ mod native {
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::{Duration, Instant};
 
-    const COMMANDS: [&str; 15] = [
+    const COMMANDS: [&str; 16] = [
         "ai.setup.probe",
         "ai.setup.manifest",
         "ai.setup.plan",
@@ -24,6 +24,7 @@ mod native {
         "ai.setup.repair",
         "ai.setup.remove",
         "ai.setup.modelFolders",
+        "ai.setup.openModelFolder",
         "ai.setup.setToken",
         "ai.setup.hfStatus",
         "ai.setup.hfAccess",
@@ -533,6 +534,41 @@ mod native {
     }
 
     #[test]
+    fn each_models_folder_is_listed_with_its_files_and_only_those_can_be_opened() {
+        let mut rig = Rig::new();
+        fake_engine(&rig);
+        let mine = rig.dir.path().join("ComfyUI").join("models");
+        write(&mine.join("unet").join("z_image_turbo_int8_convrot.safetensors"), b"model");
+        write(&mine.join("loras").join("styles").join("pixel_art.safetensors"), b"lora");
+        write(&mine.join("loras").join("notes.txt"), b"not a model");
+        rig.run("ai.setup.modelFolders", json!({"folders": [mine.to_string_lossy()], "scan": false})).unwrap();
+        let sub = format!("styles{}pixel_art.safetensors", std::path::MAIN_SEPARATOR);
+        // The Model Folders page's list: the setup's own folder, then the user's, each with its
+        // files; a folder that went (an unplugged drive) says so and lists nothing.
+        let listed = rig.run("ai.setup.modelFolders", json!({"list": true})).unwrap();
+        let kinds: Vec<_> = listed["listing"].as_array().unwrap().iter().map(|e| (e["kind"].clone(), e["found"].clone())).collect();
+        assert_eq!(kinds, [(json!("setup"), json!(true)), (json!("yours"), json!(true))]);
+        assert_eq!(listed["listing"][1]["path"], mine.to_string_lossy().as_ref());
+        assert_eq!(listed["listing"][1]["files"]["loras"], json!([sub]));
+        assert_eq!(listed["listing"][1]["files"]["diffusion_models"], json!(["z_image_turbo_int8_convrot.safetensors"]));
+        assert!(!listed["listing"][0]["files"].as_object().unwrap().is_empty(), "{listed}");
+        // Only those folders can be opened in the file manager.
+        let open = rig.run("ai.setup.openModelFolder", json!({"folder": mine.to_string_lossy(), "dryRun": true})).unwrap();
+        assert!(open["args"].as_array().unwrap().iter().any(|a| a.as_str().is_some_and(|a| a.ends_with("models"))), "{open}");
+        for bad in [json!({}), json!({"folder": rig.dir.path().to_string_lossy()}), json!({"folder": 3})] {
+            assert!(rig.run("ai.setup.openModelFolder", bad.clone()).is_err(), "{bad}");
+        }
+        let elsewhere = rig.dir.path().join("Moved");
+        std::fs::rename(&mine, &elsewhere).unwrap();
+        let gone = rig.run("ai.setup.modelFolders", json!({"list": true})).unwrap();
+        assert_eq!((gone["listing"][1]["found"].clone(), gone["listing"][1]["files"].clone()), (json!(false), json!({})));
+        let e = rig.run("ai.setup.openModelFolder", json!({"folder": mine.to_string_lossy()})).unwrap_err().to_string();
+        assert!(e.contains("plugged in"), "{e}");
+        std::fs::rename(&elsewhere, &mine).unwrap();
+
+    }
+
+    #[test]
     fn removing_deletes_only_what_the_setup_installed_and_says_what_it_freed() {
         let mut rig = Rig::new();
         let root = fake_engine(&rig);
@@ -818,6 +854,7 @@ fn every_setup_command_is_registered_with_its_parameters_documented() {
             "ai.setup.repair",
             "ai.setup.remove",
             "ai.setup.modelFolders",
+            "ai.setup.openModelFolder",
             "ai.setup.setToken",
             "ai.setup.hfStatus",
             "ai.setup.hfAccess",

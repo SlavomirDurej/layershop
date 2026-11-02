@@ -956,3 +956,48 @@ fn a_models_folder_of_ones_own_is_read_beside_the_setups_and_never_offered_for_d
     assert!(app.ui.ai_setup.extra_models_dirs.is_empty());
     assert_eq!(model(&app, "z-image-turbo")["installed"], false);
 }
+
+#[test]
+fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
+    let (mut app, dir) = app(demo::Scale::Small);
+    assert!(demo::show(&mut app, dir.path(), "installed-prefs-own"));
+    let mine = dir.path().join("ComfyUIModels").join("models").to_string_lossy().into_owned();
+    // Which engine it is, for the Engine page.
+    let s = summary(&app);
+    assert_eq!((s["route"].as_str(), s["managed"].as_bool()), (Some("managed"), Some(true)));
+    assert!(!s["engineVersion"].as_str().unwrap().is_empty() && !s["engineFolder"].as_str().unwrap().is_empty(), "{s}");
+    let d = app.ui.dialogs.iter().position(|d| crate::prefs_ui::is_preferences(&d.fields)).unwrap();
+    let mut f = std::mem::take(&mut app.ui.dialogs[d].fields);
+    let c = ctx();
+    // A few frames of the page and what it asks for after it: the folders are read once.
+    let frames = |app: &mut PhotocraftApp, f: &mut serde_json::Map<String, Value>| {
+        for _ in 0..3 {
+            c.run_ui(Default::default(), |ui| {
+                let mut values = f.get("values").cloned().unwrap();
+                let obj = values.get_mut("integrations").and_then(Value::as_object_mut).unwrap();
+                crate::ai_gen_ui::prefs_section(ui, obj, f, 480.0);
+                f.insert("values".into(), values);
+            })
+            .textures_delta
+            .clear();
+            crate::ai_gen_ui::after_body(app, f);
+        }
+    };
+    frames(&mut app, &mut f);
+    let listing = f["__aiFolderListing"].as_array().unwrap().clone();
+    let kinds: Vec<_> = listing.iter().map(|e| (e["kind"].as_str().unwrap(), e["found"].as_bool().unwrap())).collect();
+    assert_eq!(kinds, [("setup", true), ("yours", true)]);
+    assert_eq!(listing[1]["path"], mine.as_str());
+    assert_eq!(listing[1]["files"]["loras"], json!(["krea2_darkbrush.safetensors", "pixel_art_style_z_image_turbo.safetensors"]));
+    // Removing it from its row: the engine no longer reads it, and the page lists the setup's own.
+    f.insert("__aiAction".into(), json!("ownFolderRemove:0"));
+    crate::ai_gen_ui::after_body(&mut app, &mut f);
+    assert!(app.ui.ai_setup.extra_models_dirs.is_empty());
+    assert_eq!(f["__aiFolderListing"].as_array().map(Vec::len), Some(1));
+    assert_eq!(f["__aiFolderOpened"], json!([]));
+    assert!(std::path::Path::new(&mine).is_dir(), "nothing of the folder is deleted");
+    // The Engine page draws for it too.
+    f.insert("__aiPage".into(), json!("server"));
+    f.remove("__aiAction");
+    frames(&mut app, &mut f);
+}

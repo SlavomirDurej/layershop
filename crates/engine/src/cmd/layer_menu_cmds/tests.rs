@@ -540,6 +540,11 @@ fn reveal_follows_linked_paths_like_the_link_and_passes_paths_as_paths() {
     s.active_mut().unwrap().path = Some(r"\\192.0.2.1\share\doc.psd".into());
     s.execute("file.revealInFinder", json!({"dryRun": true})).unwrap();
 
+    // A folder opened as itself, not selected in its parent.
+    assert_eq!(open_folder_command_on("windows", "C:/m/models"), ("explorer", vec![r"C:\m\models".to_string()]));
+    assert_eq!(open_folder_command_on("macos", "-m"), ("open", vec!["--".to_string(), "-m".into()]));
+    assert_eq!(open_folder_command_on("linux", "/m"), ("xdg-open", vec!["/m".to_string()]));
+
     assert_eq!(reveal_command_on("macos", "-a.png").unwrap(), ("open", vec!["-R".to_string(), "--".into(), "-a.png".into()]));
     assert_eq!(reveal_command_on("windows", r"C:\pics\a.png").unwrap(), ("explorer", vec!["/select,".to_string(), r"C:\pics\a.png".to_string()]));
     for path in [r"C:\pics\a,b.png", r#"C:\pics\a".png"#] {

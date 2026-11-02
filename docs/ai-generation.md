@@ -27,8 +27,20 @@ back end you set up, and places the answer on a new layer.
      recommended models that are missing, and changes nothing else; **Recommended Order** sorts
      the list best and newest first. A local model whose file the server doesn't have is marked.
    - **API Keys**: one key per provider.
-   - **Local Server**: the ComfyUI address, **Connect**, the timeout, and starting ComfyUI
-     automatically (below).
+   - **Engine**: which ComfyUI runs local models, in a card at the top: the one the setup
+     installed (**Installed by PhotoCraft**, its version and folder, **Repair**, **Remove Local
+     AI…**), your own ComfyUI (**Added by you**), or none yet (**Set Up Local AI…**). Under it
+     the address, **Connect**, the timeout, and starting ComfyUI automatically (below). For the
+     installed engine its Python, folder and arguments are folded under **Launch settings**: the
+     setup fills them in.
+   - **Model Folders**: every models folder local models are read from, one row each: the
+     setup's own (**Installed by PhotoCraft**) and the ones you added (**Added by you · read
+     only**). A row shows its path and what it has (diffusion models, LoRAs, text encoders, …);
+     click it to list its files. **Refresh** reads it again, the arrow opens it in Explorer /
+     Finder, the bin stops reading an added folder (nothing in it is deleted). A folder that
+     isn't there now (a drive that isn't plugged in) says so. **Add Folder…** and **Download
+     Models…** (the setup wizard) are underneath. With your own ComfyUI there is only its
+     folder: its own `extra_model_paths.yaml` names any others.
 2. **Window › AI Gen** — a tab next to Properties and Adjustments. It has two tabs of its own:
    **Create** makes a new image from a prompt, **Edit** changes a picture that is there (below).
    Pick a model, write a prompt, press **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt
@@ -380,8 +392,9 @@ heard of ComfyUI: a private copy of ComfyUI with its own Python, and the model f
 terminal, no Python install, nothing added to `PATH`, no administrator rights. Desktop only, and
 installing the engine is Windows only for now ("Use my ComfyUI" works on any desktop).
 
-It opens from four places: the File menu; **Preferences › Generative AI › Local Server**
-(**Set Up Local AI…**, or **Add Models…**, **Repair** and **Remove Local AI…** once set up;
+It opens from four places: the File menu; **Preferences › Generative AI › Engine**
+(**Set Up Local AI…**, or **Repair** and **Remove Local AI…** once set up; **Download
+Models…** is on the Model Folders page;
 the dialog is saved first); the line under Generate in the AI Gen panel, until local AI is set
 up; and by itself, once, on the first launch after installing (`--setup-ai` on the command line
 opens it at any launch; an app started with `--control` is not asked). It is a window, not a
@@ -539,8 +552,9 @@ folder at theirs would make the setup's downloads and deletions land in it. So t
 app installs can read **models folders of the user's own** beside its own (up to 16):
 
 - **Where:** the wizard's Location page (**Models you already have › Add Folder…**), and
-  **Preferences › Generative AI › Local Server › Your models folders** once the engine is
-  installed (**Add Folder…**, **Remove**). Picking a ComfyUI folder picks the `models` folder in
+  **Preferences › Generative AI › Model Folders** once the engine is installed (**Add
+  Folder…**, and the bin on a folder's row). Agents read them with `ai.setup.modelFolders
+  {list: true}` and open one with `ai.setup.openModelFolder`. Picking a ComfyUI folder picks the `models` folder in
   it; a folder with none of the model folders in it (`checkpoints`, `diffusion_models`, `loras`,
   …) is refused with why.
 - **Only read:** nothing is ever written into them or deleted from them. Downloads still go to
@@ -565,7 +579,7 @@ app installs can read **models folders of the user's own** beside its own (up to
 
 ## Starting ComfyUI for you
 
-On the **Local Server** page, switch on **Start ComfyUI when a local model needs it and it isn't
+On the **Engine** page, switch on **Start ComfyUI when a local model needs it and it isn't
 running**. Then you don't open ComfyUI yourself: the first local generation starts it hidden
 (the panel shows "Starting ComfyUI…", typically half a minute), later ones reuse it, and it is
 stopped when PhotoCraft quits.
@@ -629,7 +643,7 @@ the names are the models' own, and so is the tag in the name of the layer a gene
 
 **Only models that can run are offered.** A ticked model is in the panel's list when it can run
 now: a cloud model once its provider's API key is there; a local one once local AI is ready (set
-up by the wizard or the Local Server page, or a ComfyUI has answered) and, when the server has
+up by the wizard or the Engine page, or a ComfyUI has answered) and, when the server has
 said which files it has, its file is among them. The panel asks the ComfyUI in the settings for
 its files, without starting it (`ai.comfyModels` with `start: false`), when it is first shown,
 after a Local AI setup ends, and when the app gets the focus back (at most once a minute); a

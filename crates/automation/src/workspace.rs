@@ -388,7 +388,8 @@ pub fn authorize_engine_command(id: &str, params: &Value) -> Result<(), Automati
 /// automation (`ai.setup.probe`, `ai.setup.manifest`, `ai.setup.status`, `ai.setup.modelFolders`
 /// without folders, and `ai.setup.plan` for the folders the user already chose); installing,
 /// stopping, repairing, removing, signing in and pointing the engine at models folders are not,
-/// and neither is planning for a folder or a server listing of the agent's choosing.
+/// and neither is planning for a folder or a server listing of the agent's choosing, nor opening
+/// a models folder in the file manager (the Model Folders page's button).
 fn installs_local_ai(id: &str, params: &Value) -> bool {
     match id {
         // Signing in to Hugging Face, or using a token found on the PC, is the user's too.
@@ -399,7 +400,8 @@ fn installs_local_ai(id: &str, params: &Value) -> bool {
         | "ai.setup.setToken"
         | "ai.setup.hfSignIn"
         | "ai.setup.hfSignOut"
-        | "ai.setup.hfUseFound" => true,
+        | "ai.setup.hfUseFound"
+        | "ai.setup.openModelFolder" => true,
         "ai.setup.plan" => ["engineDir", "modelsDir", "serverFiles", "extraModelsDirs"].iter().any(|key| params.get(key).is_some()),
         "ai.setup.manifest" => params.get("extraModelsDirs").is_some(),
         "ai.setup.modelFolders" => params.get("folders").is_some(),

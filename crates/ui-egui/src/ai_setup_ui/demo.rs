@@ -478,7 +478,8 @@ pub fn own_models_folder(app: &mut PhotocraftApp, dir: &Path) -> Option<std::pat
 /// `models-moved` and `sign-in-moved` signed in with FLUX.3 Klein's file moved by its maker,
 /// `installed-own`, `installed-location-own` and `installed-models-own` those (and the Location
 /// screen) with a models folder of the user's own beside the setup's, `installed-prefs-own` the
-/// Local Server preferences page that lists it,
+/// Model Folders preferences page that lists it (opened to its files), `installed-prefs-engine-own`
+/// the Engine page,
 /// `models-light` the Models screen on an 8 GB card (the Light preset, MOSS Image first),
 /// `sign-in` and `sign-in-licence` the question Install asks then; `close` the question Close
 /// asks while a setup runs; `aigen-empty` the AI Gen panel with nothing set up and no ComfyUI
@@ -630,12 +631,16 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         if own && own_models_folder(app, dir).is_none() {
             return false;
         }
-        // The Preferences page that adds and removes them, not the wizard.
-        if screen == "-prefs-own" {
+        // The Preferences pages: Model Folders, which adds and removes them (with the user's
+        // folder opened to its files), and Engine.
+        if screen == "-prefs-own" || screen == "-prefs-engine-own" {
             super::refresh_status(app);
             let id = crate::prefs_ui::open_preferences(app, "generativeAi");
+            let mine = app.ui.ai_setup.extra_models_dirs.clone();
             if let Some(d) = app.ui.dialog_mut(id) {
-                d.fields.insert("__aiPage".into(), json!("server"));
+                let engine = screen == "-prefs-engine-own";
+                d.fields.insert("__aiPage".into(), json!(if engine { "server" } else { "folders" }));
+                d.fields.insert("__aiFolderOpened".into(), json!(mine));
             }
             return true;
         }

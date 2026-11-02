@@ -2104,8 +2104,10 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
     }
 }
 
-/// The pages of the Generative AI section: (key, title).
-const PAGES: [(&str, &str); 3] = [("models", "Manage Models"), ("keys", "API Keys"), ("server", "Local Server")];
+/// The pages of the Generative AI section: (key, title). `server` is the Engine page: the
+/// ComfyUI that runs local models (the key is older than the name); `folders` the models folders
+/// it reads.
+const PAGES: [(&str, &str); 4] = [("models", "Manage Models"), ("keys", "API Keys"), ("server", "Engine"), ("folders", "Model Folders")];
 
 /// What the Manage Models list is narrowed to: every model, or the ones that do one of the AI Gen
 /// panel's jobs. A model that does several (FLUX.2 generates, edits and inpaints) is listed
@@ -2217,8 +2219,8 @@ fn is_local_model(m: &Value) -> bool {
 
 /// The Generative AI section's body: draws and edits `integrations.ai` in the dialog's draft
 /// (`obj` is the Integrations object; `f` the dialog's fields), in the `height` the dialog has
-/// for it. Three pages: Manage Models (every model in a list beside the selected one's
-/// settings), API keys, and the local server.
+/// for it. Four pages: Manage Models (every model in a list beside the selected one's
+/// settings), API keys, the engine (the ComfyUI that runs local models) and its models folders.
 pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>, height: f32) {
     let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
     let widths = page_widths(ui.available_width());
@@ -2239,11 +2241,13 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
     ui.add_space(8.0);
     match page.as_str() {
         "models" => models_page(ui, &mut ai, f, bottom),
-        // These two are longer than a small window: they scroll in what is left.
+        // The others are longer than a small window: they scroll in what is left.
         other => {
             let room = (bottom - ui.cursor().top()).max(MIN_PANE_HEIGHT);
+            let busy = f.get(JOB).is_some();
             egui::ScrollArea::vertical().id_salt(("ai-page", other)).max_height(room).auto_shrink([false, true]).show(ui, |ui| match other {
                 "keys" => keys_page(ui, &ai, f),
+                "folders" => folders::page(ui, f, busy),
                 _ => server_page(ui, &mut ai, f),
             });
         }
@@ -2274,107 +2278,115 @@ fn status_line(ui: &mut egui::Ui, f: &Map<String, Value>, hint: &str, width: f32
     });
 }
 
-/// The engine PhotoCraft installed: models folders the user already has, which it reads too.
-/// Adding or removing one is done at once (`ai.setup.modelFolders`), then scanned like Scan Server.
-fn own_folders(ui: &mut egui::Ui, setup: &Value, f: &mut Map<String, Value>, busy: bool) {
+/// Which engine runs local models, at the top of the Engine page: the ComfyUI the setup
+/// installed, the user's own one, or none yet; with what can be done about it.
+fn engine_card(ui: &mut egui::Ui, setup: &Value, f: &mut Map<String, Value>, width: f32) {
     let t = Tokens::get(ui.ctx());
-    widgets::section_label(ui, tr("Your models folders"));
-    ui.add_space(2.0);
-    let dirs: Vec<String> =
-        setup.get("extraModelsDirs").and_then(Value::as_array).map(|l| l.iter().filter_map(Value::as_str).map(str::to_string).collect()).unwrap_or_default();
-    ui.scope(|ui| {
-        ui.set_max_width(520.0);
-        for (i, dir) in dirs.iter().enumerate() {
-            ui.horizontal(|ui| {
-                let room = ui.available_width() - 70.0;
-                ui.add_sized([room, 20.0], egui::Label::new(RichText::new(dir).font(crate::theme::mono(12.0)).color(t.text_dim)).truncate()).on_hover_text(dir);
-                let remove = ui.add_enabled(!busy, egui::Label::new(RichText::new(tr("Remove")).color(t.text_faint).size(11.5).underline()).sense(egui::Sense::click()));
-                if remove.clicked() {
-                    f.insert(ACTION.into(), json!(format!("{FOLDER_REMOVE}{i}")));
+    let text = |key: &str| setup.get(key).and_then(Value::as_str).unwrap_or("").to_string();
+    let managed = setup.get("managed").and_then(Value::as_bool) == Some(true);
+    let installed = setup.get("installed").and_then(Value::as_bool) == Some(true);
+    let route = text("route");
+    let models = setup.get("models").and_then(Value::as_u64).unwrap_or(0);
+    let (title, whose, about) = if managed {
+        (
+            format!("ComfyUI {}", text("engineVersion")).trim().to_string(),
+            Some((tr("Installed by PhotoCraft"), t.accent_text)),
+            text("engineFolder"),
+        )
+    } else if route == "existing" {
+        (
+            tr("Your own ComfyUI").to_string(),
+            Some((tr("Added by you"), t.text_dim)),
+            tr("PhotoCraft uses the ComfyUI at the address below. The setup only downloaded models for it; the ComfyUI itself is yours to update.").to_string(),
+        )
+    } else {
+        (
+            tr("No engine set up yet").to_string(),
+            None,
+            tr("The setup installs ComfyUI, the engine, with the models you choose. To use a ComfyUI you already have, fill in its address below.").to_string(),
+        )
+    };
+    egui::Frame::new().fill(t.card).stroke(egui::Stroke::new(1.0, t.card_border)).corner_radius(t.radius).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(width - 26.0);
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.add(crate::icons::image("monitor", 24.0, if route.is_empty() && !managed { t.text_faint } else { t.icon }));
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 6.0;
+                    ui.label(RichText::new(title).font(crate::theme::medium(13.5)).color(t.text));
+                    if let Some((whose, color)) = whose {
+                        folders::badge(ui, whose, color);
+                    }
+                });
+                if managed {
+                    ui.add(egui::Label::new(RichText::new(&about).font(crate::theme::mono(11.5)).color(t.text_dim)).truncate()).on_hover_text(&about);
+                } else {
+                    ui.add(egui::Label::new(RichText::new(&about).color(t.text_dim).size(11.5)).wrap());
+                }
+                // A setup that is running or stopped halfway says so; a finished one, what it has.
+                let (line, color) = if !route.is_empty() && !installed {
+                    (text("text"), t.warning)
+                } else if managed || route == "existing" {
+                    (format!("{models} {} · {}", tr("recommended models installed"), tr("Model Folders lists every model file")), t.text_faint)
+                } else {
+                    (String::new(), t.text_faint)
+                };
+                if !line.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(line).color(color).size(11.0)).wrap());
                 }
             });
-        }
-        let full = dirs.len() >= photocraft_aisetup::plan::MAX_EXTRA_MODELS_DIRS;
-        if ui.add_enabled_ui(!busy && !full, |ui| widgets::secondary_button(ui, tr("Add Folder…"), 120.0)).inner.clicked() {
-            f.insert(ACTION.into(), json!(FOLDER_ADD));
-        }
-        ui.add_space(3.0);
+        });
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if managed {
+                if widgets::secondary_button(ui, tr("Repair"), 80.0)
+                    .on_hover_text(tr("Check every installed file against its checksum, and download again what is damaged or missing"))
+                    .clicked()
+                {
+                    f.insert(ACTION.into(), json!("setupRepair"));
+                }
+                if widgets::secondary_button(ui, tr("Remove Local AI…"), 150.0).on_hover_text(tr("Delete the engine and the models PhotoCraft downloaded")).clicked() {
+                    f.insert(ACTION.into(), json!("setupRemove"));
+                }
+            } else {
+                let open = if route.is_empty() { widgets::primary_button(ui, tr("Set Up Local AI…"), 150.0) } else { widgets::secondary_button(ui, tr("Set Up Local AI…"), 150.0) };
+                if open
+                    .on_hover_text(tr("Opens the setup wizard: it installs ComfyUI and the recommended models for you. These preferences are saved first"))
+                    .clicked()
+                {
+                    f.insert(ACTION.into(), json!("setup"));
+                }
+            }
+        });
+    });
+}
+
+/// Engine: the ComfyUI that runs local models, how PhotoCraft reaches it, and how it starts it.
+fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>) {
+    let t = Tokens::get(ui.ctx());
+    let busy = f.get(JOB).is_some();
+    // As wide as the dialog lets it be: it follows the dialog when that is resized.
+    let width = ui.available_width();
+    ui.scope(|ui| {
+        ui.set_max_width(width);
         ui.add(
             egui::Label::new(
-                RichText::new(tr(
-                    "Models folders you already have, such as another ComfyUI's. The engine reads them too: their models and LoRAs are listed beside its own, and nothing in them is changed or deleted.",
-                ))
-                .color(t.text_faint)
-                .size(11.5),
+                RichText::new(tr("Local models are run by ComfyUI, the engine. PhotoCraft sends it the workflow and collects the image; it can also start it for you, hidden."))
+                    .color(t.text_dim),
             )
             .wrap(),
         );
     });
-}
-
-const FOLDER_ADD: &str = "ownFolderAdd";
-const FOLDER_REMOVE: &str = "ownFolderRemove:";
-
-/// The user's own models folders changed to `folders`: saved, then the page scans as Scan Server
-/// does, so the models and LoRAs in them are listed (and the engine started on the new folders).
-fn own_folders_changed(app: &mut PhotocraftApp, f: &mut Map<String, Value>, folders: &[String]) {
-    match crate::ai_setup_ui::set_own_folders(app, folders) {
-        Ok(_) => {
-            f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
-            f.insert(STATUS.into(), json!({"error": false, "text": tr("Reading the models folders…")}));
-            f.insert(ACTION.into(), json!("detect"));
-        }
-        Err(e) => failed(f, &e),
-    }
-}
-
-/// Local Server: where local models run, and how PhotoCraft starts it.
-fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>) {
-    let t = Tokens::get(ui.ctx());
-    let busy = f.get(JOB).is_some();
-    ui.label(
-        RichText::new(tr("Local models are run by ComfyUI. PhotoCraft sends it the workflow and collects the image; it can also start it for you, hidden."))
-            .color(t.text_dim),
-    );
-    ui.add_space(8.0);
-    // ----- having it all set up for you -----
+    ui.add_space(10.0);
     let setup = f.get(SETUP).cloned().unwrap_or(Value::Null);
+    let managed = setup.get("managed").and_then(Value::as_bool) == Some(true);
     if setup.get("available").and_then(Value::as_bool) == Some(true) {
-        widgets::section_label(ui, tr("Local AI setup"));
-        ui.add_space(2.0);
-        ui.scope(|ui| {
-            ui.set_max_width(520.0);
-            ui.add(egui::Label::new(RichText::new(setup.get("text").and_then(Value::as_str).unwrap_or("")).color(t.text_faint).size(11.5)).wrap());
-        });
-        ui.add_space(4.0);
-        let installed = setup.get("installed").and_then(Value::as_bool).unwrap_or(false);
-        ui.horizontal(|ui| {
-            let open = if installed { tr("Add Models…") } else { tr("Set Up Local AI…") };
-            if widgets::secondary_button(ui, open, 150.0)
-                .on_hover_text(tr("Opens the setup wizard: it installs ComfyUI and the recommended models for you. These preferences are saved first"))
-                .clicked()
-            {
-                f.insert(ACTION.into(), json!("setup"));
-            }
-            if installed
-                && widgets::secondary_button(ui, tr("Repair"), 80.0)
-                    .on_hover_text(tr("Check every installed file against its checksum, and download again what is damaged or missing"))
-                    .clicked()
-            {
-                f.insert(ACTION.into(), json!("setupRepair"));
-            }
-            if setup.get("managed").and_then(Value::as_bool) == Some(true) && widgets::secondary_button(ui, tr("Remove Local AI…"), 150.0).clicked() {
-                f.insert(ACTION.into(), json!("setupRemove"));
-            }
-        });
-        if setup.get("managed").and_then(Value::as_bool) == Some(true) {
-            ui.add_space(10.0);
-            own_folders(ui, &setup, f, busy);
-        }
-        ui.add_space(10.0);
-        widgets::section_label(ui, tr("Server"));
-        ui.add_space(2.0);
+        engine_card(ui, &setup, f, width);
+        ui.add_space(14.0);
     }
+    widgets::section_label(ui, tr("Connection"));
+    ui.add_space(2.0);
     egui::Grid::new("ai-server").num_columns(2).spacing([14.0, 8.0]).show(ui, |ui| {
         label(ui, "Address");
         ui.horizontal(|ui| {
@@ -2399,67 +2411,45 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
     });
 
     // ----- starting it -----
-    ui.add_space(10.0);
-    widgets::section_label(ui, tr("Starting ComfyUI"));
+    ui.add_space(12.0);
+    widgets::section_label(ui, tr("Starting the engine"));
     ui.add_space(2.0);
     let mut autostart = ai.get("comfyAutostart").and_then(Value::as_bool).unwrap_or(false);
     widgets::checkbox(ui, &mut autostart, tr("Start ComfyUI when a local model needs it and it isn't running"));
     ai.insert("comfyAutostart".into(), json!(autostart));
-    ui.label(
-        RichText::new(tr("A ComfyUI that is already running (ComfyUI Desktop, for example) is used as it is and left running. One that PhotoCraft starts runs hidden, on the port of the address above, and is stopped when PhotoCraft quits."))
-            .color(t.text_faint)
-            .size(11.0),
-    );
-    ui.add_space(6.0);
-    let mut launch = ai.get("comfyLaunch").and_then(Value::as_object).cloned().unwrap_or_default();
-    egui::Grid::new("ai-launch").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
-        // (key, title, tooltip, what Browse asks for)
-        for (key, title, tip, browse) in [
-            ("python", "Python", "The Python that has ComfyUI's packages: its virtual environment's, or the portable build's python_embeded", "browsePython"),
-            ("folder", "Folder", "The folder ComfyUI is started in: the one with main.py, unless the arguments name the script with a path", "browseScript"),
-        ] {
-            label(ui, title);
-            ui.horizontal(|ui| {
-                let mut v = text_of(&launch, key);
-                // "Not set", not a sample path: a sample reads as if the field were filled in.
-                ui.add(egui::TextEdit::singleline(&mut v).desired_width(300.0).hint_text(tr("Not set"))).on_hover_text(tr(tip));
-                launch.insert(key.into(), json!(v));
-                // Python has no file type to filter by outside Windows: there the path is typed.
-                if (key != "python" || cfg!(windows)) && ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Browse…"), 72.0)).inner.clicked() {
-                    f.insert(ACTION.into(), json!(browse));
-                }
-            });
-            ui.end_row();
-        }
-        label(ui, "Arguments");
-        let mut v = text_of(&launch, "args");
-        ui.add(egui::TextEdit::multiline(&mut v).desired_rows(3).desired_width(380.0).hint_text(tr("Not set (main.py)")))
-            .on_hover_text(tr("The script and its options, as on ComfyUI's command line. Leave out --port: the address above decides it"));
-        // One line: a pasted command line with line breaks is still one command.
-        launch.insert("args".into(), json!(v.replace(['\r', '\n'], " ")));
-        ui.end_row();
+    ui.scope(|ui| {
+        ui.set_max_width(width);
+        ui.add(
+            egui::Label::new(
+                RichText::new(tr("A ComfyUI that is already running (ComfyUI Desktop, for example) is used as it is and left running. One that PhotoCraft starts runs hidden, on the port of the address above, and is stopped when PhotoCraft quits."))
+                    .color(t.text_faint)
+                    .size(11.0),
+            )
+            .wrap(),
+        );
     });
-    ai.insert("comfyLaunch".into(), Value::Object(launch));
     ui.add_space(6.0);
     ui.horizontal(|ui| {
-        let find = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Find Installation"), 130.0)).inner;
-        if find
-            .on_hover_text(tr(
-                "Fill these in: from the ComfyUI that is running now, or else from the one ComfyUI Desktop installed. For any other installation use Browse",
-            ))
-            .clicked()
-        {
-            f.insert(ACTION.into(), json!("find"));
-        }
         let started = f.get(STARTED).and_then(Value::as_bool).unwrap_or(false);
         let stop = ui.add_enabled_ui(started && !busy, |ui| widgets::secondary_button(ui, tr("Stop Server"), 100.0)).inner;
         if stop.on_hover_text(tr("Stop the ComfyUI that PhotoCraft started")).on_disabled_hover_text(tr("PhotoCraft has not started a ComfyUI")).clicked() {
             f.insert(ACTION.into(), json!("stop"));
         }
-        if started {
-            ui.label(RichText::new(tr("Running, started by PhotoCraft")).color(t.text_faint).size(11.5));
-        }
+        let state = if started { tr("Running, started by PhotoCraft") } else { tr("Not started by PhotoCraft") };
+        ui.label(RichText::new(state).color(t.text_faint).size(11.5));
     });
+    ui.add_space(8.0);
+    // How it is started. The setup fills these in for its own engine, so there they are folded
+    // away: they are for starting another ComfyUI.
+    if managed {
+        egui::CollapsingHeader::new(RichText::new(tr("Launch settings")).color(t.text_dim)).id_salt("ai-launch-settings").default_open(false).show(ui, |ui| {
+            ui.label(RichText::new(tr("Filled in by the setup for its engine. Change them only to start another ComfyUI.")).color(t.text_faint).size(11.0));
+            ui.add_space(4.0);
+            launch_settings(ui, ai, f, busy);
+        });
+    } else {
+        launch_settings(ui, ai, f, busy);
+    }
     // What Find, Browse or Stop did, where the eye is: right under the buttons.
     if let Some(status) = f.get(LAUNCH_STATUS).and_then(Value::as_object) {
         let error = status.get("error").and_then(Value::as_bool).unwrap_or(false);
@@ -2492,6 +2482,47 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             .color(t.text_faint)
             .size(11.0),
         );
+    }
+}
+
+/// The Python, folder and arguments ComfyUI is started with, and Find Installation.
+fn launch_settings(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>, busy: bool) {
+    let mut launch = ai.get("comfyLaunch").and_then(Value::as_object).cloned().unwrap_or_default();
+    egui::Grid::new("ai-launch").num_columns(2).spacing([14.0, 6.0]).show(ui, |ui| {
+        // (key, title, tooltip, what Browse asks for)
+        for (key, title, tip, browse) in [
+            ("python", "Python", "The Python that has ComfyUI's packages: its virtual environment's, or the portable build's python_embeded", "browsePython"),
+            ("folder", "Folder", "The folder ComfyUI is started in: the one with main.py, unless the arguments name the script with a path", "browseScript"),
+        ] {
+            label(ui, title);
+            ui.horizontal(|ui| {
+                let mut v = text_of(&launch, key);
+                // "Not set", not a sample path: a sample reads as if the field were filled in.
+                ui.add(egui::TextEdit::singleline(&mut v).desired_width(300.0).hint_text(tr("Not set"))).on_hover_text(tr(tip));
+                launch.insert(key.into(), json!(v));
+                // Python has no file type to filter by outside Windows: there the path is typed.
+                if (key != "python" || cfg!(windows)) && ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Browse…"), 72.0)).inner.clicked() {
+                    f.insert(ACTION.into(), json!(browse));
+                }
+            });
+            ui.end_row();
+        }
+        label(ui, "Arguments");
+        let mut v = text_of(&launch, "args");
+        ui.add(egui::TextEdit::multiline(&mut v).desired_rows(3).desired_width(380.0).hint_text(tr("Not set (main.py)")))
+            .on_hover_text(tr("The script and its options, as on ComfyUI's command line. Leave out --port: the address above decides it"));
+        // One line: a pasted command line with line breaks is still one command.
+        launch.insert("args".into(), json!(v.replace(['\r', '\n'], " ")));
+        ui.end_row();
+    });
+    ai.insert("comfyLaunch".into(), Value::Object(launch));
+    ui.add_space(6.0);
+    let find = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Find Installation"), 130.0)).inner;
+    if find
+        .on_hover_text(tr("Fill these in: from the ComfyUI that is running now, or else from the one ComfyUI Desktop installed. For any other installation use Browse"))
+        .clicked()
+    {
+        f.insert(ACTION.into(), json!("find"));
     }
 }
 
@@ -3275,7 +3306,7 @@ fn connect_failed(f: &mut Map<String, Value>, action: &str, why: &str) {
     let text = if autostart {
         tr("ComfyUI isn't running. PhotoCraft will start it when you generate or press Scan Server.")
     } else {
-        tr("ComfyUI isn't running. Start it to pick files from lists, or set PhotoCraft up to start it on the Local Server page.")
+        tr("ComfyUI isn't running. Start it to pick files from lists, or set PhotoCraft up to start it on the Engine page.")
     };
     f.insert(STATUS.into(), json!({"error": false, "text": text}));
 }
@@ -3392,37 +3423,8 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
             Err(e) => launch_status(f, true, &e.to_string()),
         },
         "browsePython" | "browseScript" => browse(app, f, action == "browsePython"),
-        FOLDER_ADD => {
-            let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: None }, |app, answer| {
-                let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer else { return Ok(Value::Null) };
-                let mut folders = app.ui.ai_setup.extra_models_dirs.clone();
-                let picked = crate::ai_setup_ui::own_folder(&path);
-                let Some(d) = app.ui.dialogs.iter().position(|d| crate::prefs_ui::is_preferences(&d.fields)) else { return Ok(Value::Null) };
-                let mut fields = std::mem::take(&mut app.ui.dialogs[d].fields);
-                match picked {
-                    Ok(dir) => {
-                        folders.push(dir);
-                        own_folders_changed(app, &mut fields, &folders);
-                    }
-                    Err(why) => failed(&mut fields, &why),
-                }
-                if let Some(dialog) = app.ui.dialogs.get_mut(d) {
-                    dialog.fields = fields;
-                }
-                Ok(Value::Null)
-            });
-            if let Err(e) = asked {
-                failed(f, &format!("{}: {e}", tr("Could not open the folder dialog")));
-            }
-        }
-        _ if action.starts_with(FOLDER_REMOVE) => {
-            let at: usize = action.trim_start_matches(FOLDER_REMOVE).parse().unwrap_or(usize::MAX);
-            let mut folders = app.ui.ai_setup.extra_models_dirs.clone();
-            if at < folders.len() {
-                folders.remove(at);
-                own_folders_changed(app, f, &folders);
-            }
-        }
+        // The Model Folders page's rows.
+        _ if folders::act(app, f, &action) => {}
         // The wizard is a window: the dialog is confirmed first, then it opens (see `ai_setup_ui`).
         "setup" => crate::ai_setup_ui::request_from_prefs(app, "open"),
         "setupRepair" => crate::ai_setup_ui::request_from_prefs(app, "repair"),
@@ -3524,6 +3526,7 @@ pub fn load_keys(app: &mut PhotocraftApp) {
     }
 }
 
+mod folders;
 mod loras;
 mod refs;
 pub mod regions;

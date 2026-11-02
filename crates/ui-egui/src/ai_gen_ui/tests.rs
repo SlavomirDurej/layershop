@@ -394,7 +394,7 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     f["values"]["integrations"]["ai"]["comfyAutostart"] = json!(false);
     f.insert(ACTION.into(), json!("peek"));
     after_body(&mut app, &mut f);
-    assert!(f[STATUS]["text"].as_str().unwrap().contains("Local Server page"), "{}", f[STATUS]);
+    assert!(f[STATUS]["text"].as_str().unwrap().contains("Engine page"), "{}", f[STATUS]);
     // A long status wraps inside the page instead of running off it.
     f.insert(STATUS.into(), json!({"error": true, "text": "word ".repeat(120)}));
     draw_section(&mut f);
@@ -851,7 +851,7 @@ fn the_list_says_what_each_model_is_used_for_and_can_be_narrowed_to_it() {
     add_model(&mut app, Model { id: "qwen".into(), ..Family::QwenInpaint.preset() });
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     // One page lists every model; the pages for local, inpainting and cloud models are gone.
-    assert_eq!(PAGES.map(|(key, title)| (key, title)), [("models", "Manage Models"), ("keys", "API Keys"), ("server", "Local Server")]);
+    assert_eq!(PAGES.map(|(key, title)| (key, title)), [("models", "Manage Models"), ("keys", "API Keys"), ("server", "Engine"), ("folders", "Model Folders")]);
     let models = app.session.prefs().integrations.ai.models.clone();
     let listed = |filter: Filter| models.iter().filter(|m| filter.shows(Some(m))).map(|m| m.id.as_str()).collect::<Vec<_>>();
     assert_eq!(listed(Filter::All), ["z", "gpt", "fill", "qwen", "flux"]);
@@ -1520,6 +1520,55 @@ mod clicks {
         let at = h.get_by_label(LOAD).rect().center();
         click(&mut h, at);
         assert_eq!(h.state().ui.ai_gen.prompt, "a pond");
+    }
+
+    /// Each button of a Model Folders row does its own thing: none of them opens the list, which
+    /// only the chevron and the rest of the header do.
+    #[test]
+    fn a_folder_rows_buttons_do_their_own_thing_and_the_header_opens_its_list() {
+        let fields = serde_json::Map::from_iter([
+            (SETUP.to_string(), json!({"available": true, "route": "managed", "managed": true})),
+            (
+                "__aiFolderListing".to_string(),
+                json!([
+                    {"path": "C:/LayerShop/models", "kind": "setup", "found": true, "files": {"vae": ["v.safetensors"]}},
+                    {"path": "D:/mine/models", "kind": "yours", "found": true, "files": {"loras": ["a.safetensors"]}},
+                ]),
+            ),
+        ]);
+        let mut h = Harness::builder()
+            .with_size(vec2(900.0, 600.0))
+            .with_context_setup(|ctx| PhotocraftApp::setup_context(ctx, Default::default()))
+            .build_ui_state(|ui, f: &mut Map<String, Value>| folders::page(ui, f, false), fields);
+        h.run();
+        let opened = |h: &Harness<'_, Map<String, Value>>| h.state().get("__aiFolderOpened").cloned().unwrap_or(json!([]));
+        // Pointer clicks, not accessibility actions: what lies over a button is what the pointer hits.
+        let click = |h: &mut Harness<'_, Map<String, Value>>, at: Pos2| {
+            h.hover_at(at);
+            h.run();
+            for pressed in [true, false] {
+                h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Modifiers::NONE });
+                h.run();
+            }
+        };
+        let press = |h: &mut Harness<'_, Map<String, Value>>, label: &str, nth: usize| {
+            h.state_mut().remove(ACTION);
+            let at = h.query_all_by_label(label).nth(nth).unwrap_or_else(|| panic!("no {label}")).rect().center();
+            click(h, at);
+            h.state_mut().remove(ACTION)
+        };
+        assert_eq!(press(&mut h, "Read the folder again", 1), Some(json!("folderList")));
+        let open = if cfg!(windows) { "Open in Explorer" } else if cfg!(target_os = "macos") { "Open in Finder" } else { "Open Folder" };
+        assert_eq!(press(&mut h, open, 1), Some(json!("folderShow:D:/mine/models")));
+        assert_eq!(press(&mut h, "Stop reading this folder (nothing in it is deleted)", 0), Some(json!("ownFolderRemove:0")));
+        assert_eq!(opened(&h), json!([]), "no button opened a list");
+        // The chevron, and a click on the folder's name, open and close it.
+        press(&mut h, "List its files", 1);
+        assert_eq!(opened(&h), json!(["D:/mine/models"]));
+        assert!(h.query_by_label("a.safetensors").is_some());
+        let name = h.get_by_label("Your models folder").rect().center();
+        click(&mut h, name);
+        assert_eq!(opened(&h), json!([]));
     }
 }
 
