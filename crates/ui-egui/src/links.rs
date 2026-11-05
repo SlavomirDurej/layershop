@@ -13,6 +13,8 @@ use crate::PhotocraftApp;
 pub const DISCORD: &str = "https://discord.gg/artcraft";
 pub const ARTCRAFT_WEBSITE: &str = "https://getartcraft.com";
 pub const APP_PAGE: &str = "https://layershop.aardvarkstudios.net";
+/// The Home screen's Learn item: LayerShop's guides.
+pub const TUTORIALS: &str = "https://layershop.aardvarkstudios.net/learn/";
 pub const GITHUB: &str = "https://github.com/SlavomirDurej/layershop";
 pub const ISSUES: &str = "https://github.com/SlavomirDurej/layershop/issues";
 
