@@ -25,13 +25,7 @@
   <img src="docs/images/layershop/references.webp" alt="LayerShop's AI Gen panel in Edit mode: a beret and a scarf from two other pictures are named references, @Hat and @Scarf, and the prompt 'Add @Hat and @Scarf to the girl in the picture' is generating on a street photograph with Qwen Image 2.1 running locally" width="100%">
 </p>
 
-https://github.com/user-attachments/assets/476dd370-8cc9-4476-8401-1771848b3de3
-
-
-
 https://github.com/user-attachments/assets/06c6911d-703a-4104-beec-8ddfe200468f
-
-
 
 > [!NOTE]
 > **Preview.** LayerShop is early software: the AI integration is new and has been tested on only a few PCs. It runs on **Windows 10 and 11 (x64)** only. Please [report what breaks](https://github.com/SlavomirDurej/layershop/issues).
