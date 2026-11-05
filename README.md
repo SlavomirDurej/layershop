@@ -27,7 +27,11 @@
 
 https://github.com/user-attachments/assets/476dd370-8cc9-4476-8401-1771848b3de3
 
-▶ [Watch the 3½-minute walkthrough on YouTube](https://youtu.be/dCBiipZ03dA)
+
+
+https://github.com/user-attachments/assets/06c6911d-703a-4104-beec-8ddfe200468f
+
+
 
 > [!NOTE]
 > **Preview.** LayerShop is early software: the AI integration is new and has been tested on only a few PCs. It runs on **Windows 10 and 11 (x64)** only. Please [report what breaks](https://github.com/SlavomirDurej/layershop/issues).
