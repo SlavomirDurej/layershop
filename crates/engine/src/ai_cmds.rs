@@ -22,7 +22,8 @@
 //!   the selection before it runs.
 //! - `ai.models` lists the models and whether each can run now.
 //! - `ai.comfyModels` asks the ComfyUI server which model files it has (the settings' pickers).
-//! - `ai.setKey` / `ai.keys` hold the cloud API keys for this session.
+//! - `ai.setKey` / `ai.keys` hold the cloud API keys for this session (also the ones prompt
+//!   enhancement uses, see [`crate::ai_enhance_cmds`]).
 //!
 //! The network is the app's to provide: [`AiRuntime::transport`] is set by the desktop shell and
 //! is `None` in the browser, in tests and in a plain headless session, where `ai.generate`
@@ -32,7 +33,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use photocraft_aigen::{Control, Generated, Job, LocalServer, LoraUse, Model, Provider, ServerState, Settings, Source, Transport};
+use photocraft_aigen::{Control, Generated, Job, LocalServer, LoraUse, Model, Provider, ServerState, Settings, Source, TextProvider, Transport};
 use photocraft_aisetup::hf::{Credentials as HfCredentials, Via as HfVia};
 use photocraft_algo::resample::{Resample, crop_surface, resize_surface_in_canvas, translate_surface};
 use photocraft_codecs::{ChannelLayout, EncodeOptions, Format, Image};
@@ -133,6 +134,38 @@ impl AiRuntime {
         String::new()
     }
 
+    /// Store (or, with an empty key, forget) the API key prompt enhancement uses with `provider`:
+    /// for OpenAI, xAI and Gemini their image models' key.
+    pub fn set_text_key(&mut self, provider: TextProvider, key: &str) {
+        if let Some(image) = provider.image_provider() {
+            return self.set_key(image, key);
+        }
+        let key = key.trim();
+        if key.is_empty() {
+            self.keys.remove(provider.key());
+        } else {
+            self.keys.insert(provider.key().to_string(), key.to_string());
+        }
+    }
+
+    /// The key prompt enhancement uses with `provider`: the stored one, else its environment
+    /// variable (desktop).
+    pub fn text_key(&self, provider: TextProvider) -> String {
+        if let Some(image) = provider.image_provider() {
+            return self.key(image);
+        }
+        if let Some(k) = self.keys.get(provider.key()) {
+            return k.clone();
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Ok(k) = std::env::var(provider.key_env())
+            && !k.trim().is_empty()
+        {
+            return k.trim().to_string();
+        }
+        String::new()
+    }
+
     /// Store (or, with an empty token, forget) an access token pasted by hand: what downloads a
     /// gated model's files in the Local AI setup, as the fallback to Sign in with Hugging Face.
     pub fn set_hf_token(&mut self, token: &str) {
@@ -198,6 +231,12 @@ impl AiRuntime {
                 self.set_key(p, k);
             }
         }
+        // The keys only prompt enhancement uses (OpenRouter, Anthropic).
+        for p in TextProvider::ALL.into_iter().filter(|p| p.image_provider().is_none()) {
+            if let Some(k) = m.get(p.key()).and_then(Value::as_str).filter(|k| k.len() <= 2048 && !k.chars().any(char::is_control)) {
+                self.set_text_key(p, k);
+            }
+        }
         for k in [HF_TOKEN, HF_REFRESH, HF_EXPIRES, HF_USER, HF_VIA] {
             if let Some(v) = m.get(k).and_then(Value::as_str).map(str::trim).filter(|v| !v.is_empty() && v.len() <= 2048 && !v.chars().any(char::is_control)) {
                 self.keys.insert(k.to_string(), v.to_string());
@@ -217,11 +256,11 @@ impl AiRuntime {
     }
 }
 
-fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
+pub(crate) fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
-fn ai_error(e: photocraft_aigen::Error) -> EngineError {
+pub(crate) fn ai_error(e: photocraft_aigen::Error) -> EngineError {
     match e {
         photocraft_aigen::Error::Cancelled => EngineError::Cancelled,
         e => EngineError::Other(e.to_string()),
@@ -244,7 +283,7 @@ pub(crate) fn settings(s: &Session) -> Settings {
     s.prefs().integrations.ai.clone()
 }
 
-fn transport(s: &Session) -> Result<Arc<dyn Transport>> {
+pub(crate) fn transport(s: &Session) -> Result<Arc<dyn Transport>> {
     s.ai.transport.clone().ok_or_else(|| EngineError::Other("AI generation is not available here: it needs the desktop app's network access".into()))
 }
 
@@ -1373,6 +1412,12 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             bad(cmd, format!("no AI model `{id}`"))
         }
     })?;
+    // A prompt Enhance already rewrote is not rewritten again by the model's own prompt writer.
+    match p.get("enhanced") {
+        None | Some(Value::Bool(false)) => {}
+        Some(Value::Bool(true)) => model.enhancer.clear(),
+        Some(_) => return Err(bad(cmd, "`enhanced` must be true or false")),
+    }
     let transport = transport(s)?;
     let server = s.ai.server.clone().filter(|_| model.provider.is_local());
     let key = s.ai.key(model.provider);
@@ -1435,6 +1480,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     // The prompt says which references go (those it mentions by name, else all), and the model
     // is told them by number.
     let (lora_uses, loras, triggers) = loras_param(cmd, p, &model)?;
+    let style = style_param(cmd, p)?;
+    let count = count_param(cmd, p)?;
     let mut resolved = crate::ai_refs::resolve(&prompt, &references.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>());
     let sent: Vec<&Given> = resolved.sent.iter().filter_map(|i| references.get(*i)).map(|(given, _)| given).collect();
     if sent.len() > model.max_references() {
@@ -1519,6 +1566,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
     // The LoRAs' trigger words go with the prompt (with regions: the scene).
     resolved.prompt = with_triggers(resolved.prompt, &triggers);
+    // The style preset's sentence goes after the prompt (with regions: after the scene).
+    resolved.prompt = photocraft_aigen::style::styled(&resolved.prompt, style);
     // With regions, the prompt is the scene and the boxes in the model's layout format, the boxes
     // made relative to the area generated.
     let model_prompt = match layout {
@@ -1542,7 +1591,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let mode = kind.key();
     // What the new layer keeps of its generation (`Layer::generation`), for the panel to load back.
-    let mut generation = Generation {
+    let generation = Generation {
         mode: kind,
         model: model.id.clone(),
         model_name: model.name.clone(),
@@ -1563,6 +1612,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         quality,
         regions,
         loras,
+        style: style.map(|s| s.id.to_string()).unwrap_or_default(),
     };
     // A draft runs part of a local model's schedule, detail a little more of it.
     if model.provider.is_local() {
@@ -1610,63 +1660,150 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             if let Some(server) = &server {
                 server.ensure(transport.as_ref(), &settings, &control).map_err(ai_error)?;
             }
-            let mut refused = 0;
-            let image = loop {
-                let image =
-                    photocraft_aigen::generate(transport.as_ref(), &settings, &model, &key, &job, &control).map_err(|e| lost_server(server.as_ref(), e))?;
-                ctx.check()?;
-                if !model.family.draws_refusal() || !is_refusal_picture(&image.bytes) {
-                    break image;
+            // One image, then the next of a batch: each with a seed of its own (a new one each
+            // time, unless a seed was asked for or the model has a fixed one). An image that
+            // fails after others were made stops the batch, and those made are kept.
+            let mut made: Vec<(Surface, Generated)> = Vec::with_capacity(count);
+            let mut stopped = None;
+            for i in 0..count {
+                if i > 0 && reseed {
+                    job.seed = photocraft_aigen::random_seed();
                 }
-                // The words are in the picture, not in an error: never put them on a layer. The
-                // next seed usually draws the image; a seed the user fixed is theirs to change.
-                refused += 1;
-                if !reseed || refused > REFUSAL_RETRIES {
-                    let what = if reseed { format!("on {refused} seeds in a row") } else { format!("at seed {}", job.seed) };
-                    return Err(EngineError::Other(format!(
-                        "{} drew its own \"Image blocked by safety filter\" picture {what}. The refusal is part of the model, not a PhotoCraft or ComfyUI filter, and it can fire on harmless prompts: \
-                         generate again with another seed, or reword the prompt.",
-                        model.name
-                    )));
+                let step = |f: f32, m: &str| {
+                    if count == 1 {
+                        ctx.progress(f, m);
+                    } else {
+                        ctx.progress((i as f32 + f.clamp(0.0, 1.0)) / count as f32, &format!("Image {} of {count}: {m}", i + 1));
+                    }
+                };
+                let control = Control { cancelled: &|| ctx.cancelled(), progress: &step, sleep: &|d| std::thread::sleep(d) };
+                match render_one(transport.as_ref(), &settings, &model, &key, &mut job, &control, server.as_ref(), reseed) {
+                    Ok(image) => {
+                        ctx.check()?;
+                        step(0.98, "Placing the image\u{2026}");
+                        // What was given a picture answers in its shape: it goes back where that came from.
+                        let surface = fit(&image.bytes, fmt, area, kind != GenerationMode::Txt2img)?;
+                        made.push((surface, image));
+                    }
+                    Err(e) if !made.is_empty() && !ctx.cancelled() => {
+                        stopped = Some(e.to_string());
+                        break;
+                    }
+                    Err(e) => return Err(e),
                 }
-                job.seed = photocraft_aigen::random_seed();
-                ctx.progress(0.0, &format!("{} refused that seed; trying another…", model.name));
-            };
-            ctx.progress(0.98, "Placing the image…");
-            // What was given a picture answers in its shape: it goes back where that came from.
-            let surface = fit(&image.bytes, fmt, area, kind != GenerationMode::Txt2img)?;
-            Ok((surface, image))
+            }
+            Ok((made, stopped))
         },
-        move |s, (surface, image): (Surface, Generated)| {
-            let layer = s.edit(label, |doc, active| {
-                let mut l = Layer::raster(name, surface.format());
-                *crate::pixels_mut(&mut l)? = surface;
-                // The seed the image was rendered with (a random one is only known now).
-                generation.seed = image.seed;
-                l.generation = Some(Box::new(generation));
-                // Like Generative Fill: the selection becomes the new layer's mask, so a lasso or
-                // feathered selection shapes the result and stays editable.
-                if masked && let Some(sel) = selection {
-                    l.mask = Some(LayerMask { surface: sel, ..LayerMask::reveal_all() });
+        move |s, (made, stopped): (Vec<(Surface, Generated)>, Option<String>)| {
+            let mut render = (0, 0);
+            let (layers, seeds, costs) = s.edit(label, |doc, active| {
+                let (mut layers, mut seeds, mut costs) = (Vec::new(), Vec::new(), Vec::new());
+                for (surface, image) in made {
+                    let mut l = Layer::raster(name.clone(), surface.format());
+                    *crate::pixels_mut(&mut l)? = surface;
+                    // The seed the image was rendered with (a random one is only known now).
+                    let mut kept = generation.clone();
+                    kept.seed = image.seed;
+                    l.generation = Some(Box::new(kept));
+                    // Like Generative Fill: the selection becomes the new layer's mask, so a lasso or
+                    // feathered selection shapes the result and stays editable.
+                    if masked && let Some(sel) = &selection {
+                        l.mask = Some(LayerMask { surface: sel.clone(), ..LayerMask::reveal_all() });
+                    }
+                    let id = doc.insert_above(*active, l);
+                    *active = Some(id);
+                    layers.push(id.0);
+                    seeds.push(image.seed);
+                    costs.push(image.cost);
+                    render = (image.width, image.height);
                 }
-                let id = doc.insert_above(*active, l);
-                *active = Some(id);
-                Ok(id)
+                Ok((layers, seeds, costs))
             })?;
+            // What the images cost together, when the provider said what each did.
+            let cost: Option<f64> = costs.iter().copied().sum();
             Ok(json!({
-                "layer": layer.0,
+                "layer": layers.last(),
+                "layers": layers,
                 "bounds": [area.x0, area.y0, area.width(), area.height()],
                 "model": model_id,
                 "mode": mode,
-                "seed": image.seed,
-                "renderSize": [image.width, image.height],
+                "seed": seeds.last(),
+                "seeds": seeds,
+                "renderSize": [render.0, render.1],
                 // What the model was told: the mentions of references written out.
                 "modelPrompt": model_prompt,
                 // US dollars, when the provider reported what it billed (OpenAI).
-                "cost": image.cost,
+                "cost": cost,
+                // Why a batch ended before all its images were made (those made were kept).
+                "stopped": stopped,
             }))
         },
     )
+}
+
+/// The most images one `ai.generate` makes (its `count`, the panel's batch menu).
+pub const MAX_BATCH: usize = 10;
+
+/// `ai.generate`'s `count`: how many images to make, 1 to [`MAX_BATCH`].
+fn count_param(cmd: &str, p: &Value) -> Result<usize> {
+    match p.get("count") {
+        None | Some(Value::Null) => Ok(1),
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (1..=MAX_BATCH as u64).contains(n))
+            .map(|n| n as usize)
+            .ok_or_else(|| bad(cmd, format!("`count` must be a whole number from 1 to {MAX_BATCH}"))),
+    }
+}
+
+/// `ai.generate`'s `style`: a preset of `photocraft_aigen::STYLES`, by id (empty or null: none).
+fn style_param(cmd: &str, p: &Value) -> Result<Option<&'static photocraft_aigen::Style>> {
+    match p.get("style") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(id)) if id.trim().is_empty() => Ok(None),
+        Some(Value::String(id)) => photocraft_aigen::style::find(id)
+            .map(Some)
+            .ok_or_else(|| bad(cmd, format!("no style `{}`: ai.styles lists them", id.chars().take(64).collect::<String>()))),
+        Some(_) => Err(bad(cmd, "`style` must be a style id (ai.styles lists them)")),
+    }
+}
+
+/// One image of a generation, asked of the model again on a new seed while it draws its own
+/// refusal instead (only a random seed is changed: one the user fixed is theirs).
+#[allow(clippy::too_many_arguments)]
+fn render_one(
+    transport: &dyn photocraft_aigen::Transport,
+    settings: &Settings,
+    model: &Model,
+    key: &str,
+    job: &mut Job,
+    control: &Control,
+    server: Option<&Arc<dyn LocalServer>>,
+    reseed: bool,
+) -> Result<Generated> {
+    let mut refused = 0;
+    loop {
+        let image = photocraft_aigen::generate(transport, settings, model, key, job, control).map_err(|e| lost_server(server, e))?;
+        if (control.cancelled)() {
+            return Err(EngineError::Cancelled);
+        }
+        if !model.family.draws_refusal() || !is_refusal_picture(&image.bytes) {
+            return Ok(image);
+        }
+        // The words are in the picture, not in an error: never put them on a layer. The next
+        // seed usually draws the image; a seed the user fixed is theirs to change.
+        refused += 1;
+        if !reseed || refused > REFUSAL_RETRIES {
+            let what = if reseed { format!("on {refused} seeds in a row") } else { format!("at seed {}", job.seed) };
+            return Err(EngineError::Other(format!(
+                "{} drew its own \"Image blocked by safety filter\" picture {what}. The refusal is part of the model, not a PhotoCraft or ComfyUI filter, and it can fire on harmless prompts: \
+                 generate again with another seed, or reword the prompt.",
+                model.name
+            )));
+        }
+        job.seed = photocraft_aigen::random_seed();
+        (control.progress)(0.0, &format!("{} refused that seed; trying another\u{2026}", model.name));
+    }
 }
 
 /// `ai.sources`: what an image-to-image (or, with `"mode": "imgEdit"`, an edit) can start from now.
@@ -1680,6 +1817,16 @@ fn sources(s: &mut Session, p: &Value) -> Result<Value> {
     let default = default_img2img_source(s);
     let list: Vec<Value> = offered.into_iter().map(|(source, name)| json!({"source": source, "name": name, "default": Some(source) == default})).collect();
     Ok(json!({"sources": list}))
+}
+
+/// `ai.styles`: the style presets.
+fn styles(_: &mut Session, _: &Value) -> Result<Value> {
+    let list: Vec<Value> = photocraft_aigen::STYLES
+        .iter()
+        .map(|st| json!({"id": st.id, "name": st.name, "group": st.group.key(), "groupName": st.group.label(), "description": st.description, "prompt": st.prompt}))
+        .collect();
+    let groups: Vec<Value> = photocraft_aigen::StyleGroup::ALL.iter().map(|g| json!({"key": g.key(), "name": g.label()})).collect();
+    Ok(json!({"styles": list, "groups": groups}))
 }
 
 fn models(s: &mut Session, _: &Value) -> Result<Value> {
@@ -1794,18 +1941,40 @@ fn provider_param(p: &Value, cmd: &str) -> Result<Provider> {
 
 fn set_key(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "ai.setKey";
-    let provider = provider_param(p, cmd)?;
+    // The keys only prompt enhancement uses are named like the image providers'.
+    let text_only = p.get("provider").and_then(Value::as_str).and_then(TextProvider::from_key).filter(|t| t.image_provider().is_none());
+    let provider = match text_only {
+        Some(_) => None,
+        None => Some(provider_param(p, cmd).map_err(|_| bad(cmd, format!("`provider` must be {}|{}", Provider::cloud_keys(), text_only_keys())))?),
+    };
     let key = p.get("key").and_then(Value::as_str).ok_or_else(|| bad(cmd, "missing \"key\" (an empty string removes it)"))?;
     if key.len() > 1024 || key.chars().any(char::is_control) {
         return Err(bad(cmd, "that is not an API key"));
     }
-    s.ai.set_key(provider, key);
-    Ok(json!({"provider": provider.key(), "set": !key.trim().is_empty()}))
+    let name = match (provider, text_only) {
+        (Some(provider), _) => {
+            s.ai.set_key(provider, key);
+            provider.key()
+        }
+        (None, Some(text)) => {
+            s.ai.set_text_key(text, key);
+            text.key()
+        }
+        (None, None) => return Err(bad(cmd, "missing \"provider\"")),
+    };
+    Ok(json!({"provider": name, "set": !key.trim().is_empty()}))
+}
+
+/// `openrouter|anthropic`: the providers whose key only prompt enhancement uses.
+fn text_only_keys() -> String {
+    TextProvider::ALL.into_iter().filter(|t| t.image_provider().is_none()).map(TextProvider::key).collect::<Vec<_>>().join("|")
 }
 
 /// Which providers have a key (stored or from the environment). Never the keys themselves.
 fn keys(s: &mut Session, _: &Value) -> Result<Value> {
-    Ok(Value::Object(Provider::ALL.into_iter().filter(|p| !p.is_local()).map(|p| (p.key().to_string(), json!(!s.ai.key(p).is_empty()))).collect()))
+    let image = Provider::ALL.into_iter().filter(|p| !p.is_local()).map(|p| (p.key().to_string(), json!(!s.ai.key(p).is_empty())));
+    let text = TextProvider::ALL.into_iter().filter(|t| t.image_provider().is_none()).map(|t| (t.key().to_string(), json!(!s.ai.text_key(t).is_empty())));
+    Ok(Value::Object(image.chain(text).collect()))
 }
 
 fn always(_: &Session) -> std::result::Result<(), String> {
@@ -1834,7 +2003,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-4..4?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt)} → {layer,bounds,model,mode,seed,renderSize,modelPrompt (the prompt the model was given, mentions or layout written out),cost (USD billed, when the provider reports or publishes it; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}])}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"style":id?=none (a style preset of ai.styles: its sentence is added after the prompt, and the layer keeps its id),"enhanced":bool=false (the prompt is one ai.enhancePrompt wrote: a model with a prompt writer of its own, such as HiDream O1, leaves it as it is),"count":1..10=1 (how many images to make, one layer each, in one undo step; each gets a new random seed unless "seed" is given or the model has a fixed one, when they all render alike; an image that fails after others were made ends the batch and keeps those),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-10..10?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt)} → {layer (the last made, on top),layers:[id,…] (bottom to top),bounds,model,mode,seed (the last image's),seeds:[…],renderSize,modelPrompt (the prompt the model was given, mentions, layout and style written out),cost (USD billed for all the images, when the provider reports or publishes it; else null),stopped (why a batch ended early; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}]),style (when it had one)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -1857,6 +2026,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"mode":"img2img|imgEdit|reference"="img2img"} → {sources:[{source:{"layer":id}|{"document":id}|{"document":id,"layer":id},name,default}]}: what ai.generate can start from in that mode: the active document's layers that have pixels and the other open documents; for imgEdit the active document itself, all layers together, comes first; reference (what an edit's references are chosen from) adds the layers with pixels of the other open documents, each after its document"##,
             enabled: always,
             run: sources,
+            journal: false,
+        },
+        CommandSpec {
+            id: "ai.styles",
+            label: "AI Style Presets",
+            menu: &[],
+            shortcut: None,
+            params: r##"{} → {styles:[{id,name,group,groupName,description,prompt (the sentence ai.generate adds after the prompt)}],groups:[{key,name}]}: the style presets ai.generate's style takes, in the AI Gen panel's order"##,
+            enabled: always,
+            run: styles,
             journal: false,
         },
         CommandSpec {
@@ -1914,7 +2093,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set AI API Key",
             menu: &[],
             shortcut: None,
-            params: r##"{"provider":"openai|gemini|xai|meta|bfl","key":str (empty removes it)} (kept for this session; the app saves it apart from the preferences)"##,
+            params: r##"{"provider":"openai|gemini|xai|meta|bfl|openrouter|anthropic","key":str (empty removes it)} (kept for this session; the app saves it apart from the preferences; openrouter and anthropic are used by prompt enhancement only, openai, xai and gemini by both)"##,
             enabled: always,
             run: set_key,
             journal: false,
@@ -1924,7 +2103,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI API Keys",
             menu: &[],
             shortcut: None,
-            params: r##"{} → {openai:bool,gemini:bool} (whether a key is set, never the key)"##,
+            params: r##"{} → {openai:bool,gemini:bool,xai:bool,meta:bool,bfl:bool,openrouter:bool,anthropic:bool} (whether a key is set, never the key)"##,
             enabled: always,
             run: keys,
             journal: false,

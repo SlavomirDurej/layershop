@@ -358,9 +358,15 @@ mod tests {
         assert!(m.asset("nvidia").is_ok() && m.asset("voodoo").is_err());
         // Measured from each archive's header (`--example archive_contents`).
         assert!(m.comfy.assets.values().all(|a| a.unpacked_bytes > a.size && (100..=200).contains(&a.longest_path)));
-        // Every file is used by a model: nothing is listed that nobody would download.
-        let used: BTreeSet<&str> = m.models.iter().flat_map(|x| x.files.iter().map(String::as_str)).collect();
+        // Every file is used by a model or by prompt enhancement on this computer: nothing is
+        // listed that nobody would download.
+        let enhancers: Vec<String> = photocraft_aigen::enhance::local::MODELS.iter().map(|x| x.manifest_key()).collect();
+        let used: BTreeSet<&str> = m.models.iter().flat_map(|x| x.files.iter().map(String::as_str)).chain(enhancers.iter().map(String::as_str)).collect();
         assert_eq!(used.len(), m.files.len());
+        // Each local enhancer is pinned at the size the app knows it by.
+        for x in photocraft_aigen::enhance::local::MODELS {
+            assert_eq!(m.files.get(&x.manifest_key()).map(|f| f.size), Some(x.size), "{}", x.id);
+        }
     }
 
     /// The table of the plan (D4), from the real sizes: shared files are counted once.

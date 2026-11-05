@@ -136,7 +136,35 @@ scopes the change.
 Steps, CFG, sampler, scheduler and the other rendering parameters are per model, in its settings
 (the gear).
 
-**Alpha Channel** asks the model for a transparent background. It is available for models marked
+**The Generate row** has, left to right, a restyle's Strength (in a narrow panel on a row of its
+own above), **Style**, the **batch** menu and **Generate**. Alpha Channel is the last row of
+**Advanced** (for a new picture or an edit):
+
+- **Style** opens the style picker: 24 presets as thumbnails, one subject (a woman in a mustard
+  jacket with a red mug, by a plant, before a teal café wall) throughout so the treatments
+  compare, under a tab list of their groups: **All | Photography | Illustration | Traditional art
+  | 3D & craft | Graphic & experimental**. **No preset** (the default, first in every tab) leaves
+  the prompt alone. Hovering a tile shows it larger with a few words about the look; the chosen
+  one is framed in the accent with a check, and the button then shows its name. A preset is a
+  sentence about the medium and its marks added after the prompt (`Style: a watercolour painting
+  with translucent layered washes…`), so the prompt stays about the subject; it works with any
+  model, and the layer keeps the preset (Load from layer chooses it again). `ai.styles` lists
+  them with their sentences.
+- **The batch menu** (1× to 10×) makes that many images from the prompt in one go, each on a
+  layer of its own (the last on top), with a new seed each, in one undo step. That only makes
+  sense with a random seed: while the seed is locked (Advanced › Seed) or the model has a fixed
+  one, the status bar warns that all of them would come out the same. The images are rendered
+  one after another, not as one ComfyUI batch, so each layer keeps a seed that renders it again
+  on its own, and ten big images never need ten times the graphics memory. If one fails after
+  others were made (a cloud refusal, a lost connection), the batch stops there and keeps those.
+
+**The status bar** at the panel's foot, under a hairline, says what will be rendered (`Canvas
+1920 × 1080 px → 16:9, 1K`), how a generation goes, why Generate is off, or the batch warning.
+On its right, for a cloud model, a **cost** icon: its tooltip has the estimate and what the last
+image cost (*Est. cost …*, *Last image $0.004*), where the provider says. After an enhancement a
+**sparkles** icon says who wrote the prompt; clicking it puts back the one typed.
+
+**Alpha Channel** (Advanced) asks the model for a transparent background. It is available for models marked
 *Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
 Gemini models cannot). If a provider rejects the option, untick it there. Of the local models
 **Ming Image** has it on: see *Ming Image* under *Local models*.
@@ -384,8 +412,9 @@ says so in its console, as "lora key not loaded"). So each local model keeps its
   trained with; those are added to the prompt the model is given (`, ink drawing`), unless the
   prompt has them already. The layer keeps the prompt as typed.
 - **Added per generation, in the panel** (Advanced › **LoRAs**, local models that take them): **+**
-  lists the model's LoRAs; each added one has a **strength** slider from 0 to 2 (1 as it was
-  trained; the field takes −4 to 4, and below 0 steers away from what it learnt), an **eye** that
+  lists the model's LoRAs; each added one has a **strength** slider and field from −10 to 10 (it
+  starts at the strength the model's settings give the LoRA; 1 as it was trained, and below 0
+  steers away from what it learnt), an **eye** that
   leaves it out without removing it, and a **bin**. Up to five. What was added is kept for each
   model, so a model comes back with its own.
 - **The order doesn't matter.** Each LoRA adds its changes to the weights, and a sum is the same
@@ -920,8 +949,8 @@ Each provider has one key, on the **API Keys** page (`XAI_API_KEY`, `META_API_KE
   inpainting**, they are sent the mask as a second picture with an instruction to change only
   that region, as Gemini is; the layer's mask hides whatever else they changed.
 - **Cost.** xAI's answer says what the request cost and Black Forest Labs' how many credits
-  it used (one cent each); the panel shows that as *Last image $…* under Generate. Muse Image
-  is a flat $0.01 an image, shown as *Cost $0.010*.
+  it used (one cent each); the cost icon in the status bar shows that as *Last image $…*. Muse
+  Image is a flat $0.01 an image, shown as *Cost $0.010*.
 
 These were added from the providers' documentation on 2026-10-13 and then run against the live
 APIs from the app (text to image, one model each). They are among the recommended models.
@@ -937,7 +966,7 @@ Not offered: Midjourney (no public API), Microsoft's MAI-Image (each user would 
 Foundry deployment and its endpoint, not just a key), and Seedream and Qwen-Image 3.0 (possible
 later: ByteDance's and Alibaba's APIs take a key, the latter one per region).
 
-**Cost (OpenAI).** Under Generate the panel shows what the image should cost at the model's
+**Cost (OpenAI).** The cost icon in the status bar shows what the image should cost at the model's
 quality and the selection's size, and what the last one was billed (`Est. cost ≈ $0.041–$0.053
 (medium) · last $0.047`). The billed amount is exact: it comes from the tokens OpenAI reports in
 its answer. The estimate uses OpenAI's published figures, which cover the three sizes of the GPT
@@ -951,8 +980,141 @@ The **Model ID** is editable, so a newer model of the same API works without an 
 **API keys** are stored in `ai-keys.json` in the settings directory, apart from
 `preferences.json`: preferences can be read by agents (`prefs.get`), keys cannot (`ai.keys`
 reports only whether one is set). Without a stored key the provider's environment variable is used
-(`OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `META_API_KEY`, `BFL_API_KEY`). A key is sent only to its provider. The file is plain text;
+(`OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `META_API_KEY`, `BFL_API_KEY`, and for
+prompt enhancement `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`). A key is sent only to its provider. The file is plain text;
 protect it like any other credential on the machine.
+
+## Prompt enhancement
+
+**Enhance prompt**, beside the model at the top of the panel (the sparkles alone in a narrow
+panel), has a cloud text model rewrite the prompt in the box: it adds what
+an image model needs (the subject's details, the setting, composition, light, colour, style)
+and keeps what the user wrote, their names, the text in quotes and `@mentions`. The rewrite
+follows the task in front: a new image (Create), an instruction to an edit model (Change: it
+stays an instruction, saying what to change and what to keep), what to paint in a selection
+(Fill) or what a picture should become (Restyle). The image model chosen is named too.
+
+**With a style preset chosen**, the prompt is written for it. The preset decides the look (its
+sentence goes after the prompt when the image is generated), so the text model is told that
+sentence and to describe only the content: the subject, what happens, the setting,
+composition, mood and light. It must not repeat the preset's sentence or name a medium of its
+own, and it drops the user's words for another look ("photorealistic", "shot on 85mm",
+"cinematic 3D render" under Anime or Watercolour), since the preset replaces them. What the
+preset can't show is spelled out: no colours for a monochrome one (Black & White, Pencil
+Sketch, Line Art), a few broad colours for a limited palette (Pixel Art, Printmaking, Retro
+Poster, Flat Vector), and no camera or lens words unless it is a photograph. It also gets a list
+of look words to leave out, minus the ones the preset's own sentence uses (Cinematic keeps
+"cinematic", Clay Model "photographed"): fast models follow a list better than a rule. A model
+that copies the preset's sentence into its answer anyway has it taken out, so it isn't there
+twice. Checked live on 2026-11-05 with OpenAI, Grok and Gemini: before, all three pasted the
+sentence back, listed vivid colours under Black & White, and OpenAI and Grok kept
+"photorealistic, 85mm" under Anime; after, none did. One case still slips through: a prompt
+that names a different style outright (*an anime girl* with Natural Photo) can keep that style
+with Grok's fast model.
+
+Choosing another preset after an enhancement (or none) shows a warning in the status bar, with
+**Enhance again**, which rewrites the prompt as it was typed for the preset chosen now.
+
+While the answer is awaited the prompt box is veiled: a band of light sweeps across it and a
+bar runs along its foot (no service says how long it will take), with what it is waiting for
+and for how long (*Waiting for OpenAI (gpt-5.4-mini)… 3 s of 60 s*) and **Cancel**, which ends
+the wait at once and leaves the prompt as it was. The answer replaces the prompt. **Shift-click** the
+button to put back the one typed (it reads *Restore prompt* while Shift is held over it, and its
+tooltip says so); the sparkles in the status bar say who wrote the prompt and do the same when
+clicked. Typing in the prompt makes it yours again, with nothing to go back to.
+
+**Preferences › Generative AI › Prompt Enhancement** has three tabs:
+
+- **Local Models**: a text model on this computer, run by the local engine (below). One row
+  per model: its radio button (one choice across this tab and Cloud Models), how fast it is
+  (Fastest, Slowest, Slower with more detail), what it is for, its size, and **Installed** (a
+  green check) or **Install**. The page opens on this tab when a local model is installed or
+  chosen, else on Cloud Models.
+- **Cloud Models**: one row per service. Its radio button chooses the one that enhances (a radio
+  group); then its model in a dropdown, a refresh button that asks the service for its models
+  again, and its key: a key icon with a green check when it has one, a greyed key with a plus
+  when not. A service without a key is greyed out: its radio button, model and refresh do
+  nothing, and only the key button works. Either key button opens the API Keys
+  page at that key (OpenAI, xAI and Gemini share their image models' cards there).
+- **Settings** (Save at the right, Restore Default before it): the prompt length (at most about
+  10 to 400 words, 120 by default), the timeout
+  (5 to 600 s, 60 by default) and the instructions the text model is given. The box starts with
+  the built-in ones as editable text; **Save** keeps an edit at once (until then the tab says
+  "Not saved"), **Restore Default** puts the built-in ones back in the box. Instructions equal to
+  the built-in ones are stored as none, so they follow the app's when they improve. The length
+  is a line of its own after the instructions, so it holds with the user's own too.
+
+| Service | Default model | Key |
+|---|---|---|
+| OpenRouter | `google/gemini-3.5-flash-lite` (any of its models by id, e.g. `anthropic/claude-haiku-5.5`) | its own (`OPENROUTER_API_KEY`) |
+| OpenAI | `gpt-5.4-mini` | the OpenAI image models' key |
+| xAI (Grok) | `grok-4.20-0309-non-reasoning` | the xAI image models' key |
+| Google Gemini | `gemini-flash-lite-latest` | the Gemini image models' key |
+| Anthropic (Claude) | `claude-haiku-5-5` | its own (`ANTHROPIC_API_KEY`) |
+
+The defaults are fast models that write well: measured on 2026-11-04 with the live APIs, OpenAI
+answered in 1.6 to 2.9 s, Grok 4.20 non-reasoning in 1.2 s and Gemini Flash Lite in about 1 s
+(Grok 4.7 and Gemini Flash took 4 to 8 s for prompts no better). OpenRouter and Anthropic were
+built from their documentation and checked against fakes only: no key for them was at hand.
+Opening a service's model dropdown the first time asks it which of its models answer in text
+(with its saved key; OpenRouter's list is public), and the refresh button asks again. The
+dropdown has the default first, then what was listed, filtered by what is typed in its field;
+an id it doesn't list can be typed there and chosen with **Use "…"**.
+
+### On this computer
+
+With a local model chosen, Enhance needs no key and sends nothing away. The engine the Local
+AI setup installed (or the user's own ComfyUI) is started if it isn't running, as for a local
+image model, and runs a three-node workflow (`comfy::text_workflow`): **Load CLIP** with the
+model's file, **Generate Text** and **Preview as Text**, whose output is read back from
+`/history/<id>` (`comfy::parse_text_history`). No image model runs. It is the same Load CLIP →
+Generate Text code HiDream O1's own prompt writer uses (`comfy::write`). Generate Text runs
+with thinking off, the built-in chat template, the instructions above as its system prompt,
+and the answer capped at `words × 1.6 + 64` tokens (64 to 1024); a random seed each time. With
+a style preset, its rules are also put after the prompt, as a short reminder: small models
+follow what is next to the prompt better than the system prompt. Progress says "Loading …",
+then "Writing with … N s of T s"; Cancel interrupts the engine and takes the job off its queue.
+The engine keeps only the last workflow's model loaded and frees it for image generation when
+that needs the memory.
+
+| Model | Role | File (`text_encoders/`) | Size |
+|---|---|---|---|
+| Gemma 4 E2B IT (default) | the smallest; everyday enhancement | `gemma4_e2b_it_int8_convrot.safetensors` | 5.2 GB |
+| Qwen3 4B | an alternative to compare instruction following and writing | `qwen_3_4b_fp8_mixed.safetensors` | 5.6 GB |
+| Gemma 4 E4B IT | larger, for more memory | `gemma4_e4b_it_fp8_scaled.safetensors` | 9.1 GB |
+
+Checked against the pinned engine, ComfyUI 0.43.0: its text encoder loader recognises Gemma 4
+E2B and E4B and Qwen3 4B (`detect_te_model`; Qwen3 4B loads as Z-Image's encoder, whose
+tokenizer takes a system prompt and closes the thinking block when thinking is off), and Generate
+Text (`comfy_extras/nodes_textgen.py`) and Preview as Text (`nodes_preview_any.py`) are core
+nodes. Run live on 2026-11-05 on that engine (RTX, models already on disk), model load
+included: Gemma 4 E2B 1.5 to 6 s, Gemma 4 E4B 5 to 7 s, Qwen3 4B 10 to 18 s. Under Anime, E2B
+dropped "photorealistic, shot on 85mm" once the reminder followed the prompt; under Black & White
+E4B named no colours, E2B kept "blue vase" and Qwen3 4B kept the colours the user typed: the
+small models follow the style rules less surely than the cloud ones.
+
+The files are found the way Manage Models finds image models: Local Models reads the models
+folders the dialog lists (`ai.setup.modelFolders`), and `ai.enhanceLocalModels` checks the
+setup's folder and the user's added ones on disk (at the pinned size). **Install** downloads a
+missing one with the Local AI setup's downloader (`ai.enhanceInstall`, a cancellable job): the
+files are pinned in the manifest with their sizes and sha256s, from Comfy-Org's `gemma-4` and
+`Z-Image-Turbo` repositories, and a stopped download resumes. Without a Local AI setup the tab
+offers **Set Up Local AI…** instead.
+
+A prompt Enhance wrote is not rewritten again inside the image workflow: the panel passes
+`ai.generate {"enhanced": true}` while the prompt is the enhanced one (typing in it makes it the
+user's again), and a model with a prompt writer of its own (HiDream O1) then leaves it as it is.
+
+Words the user quoted (text to be drawn) keep their quotes: a model that kept the words but
+dropped the quotes has them put back (`enhance::keep_quotes`, for every service).
+
+Requests go to each provider's chat API: OpenAI, xAI and OpenRouter the Chat Completions shape
+(`/v1/chat/completions`, a system and a user message), Anthropic `/v1/messages` (`x-api-key`,
+`anthropic-version: 2023-06-01`), Gemini `models/{id}:generateContent` with
+`systemInstruction` (the key in `x-goog-api-key`, never in the address). The answer is cleaned
+of code fences, a "Prompt:" label and quotes around it. The request is sent on a helper thread
+that the job watches ten times a second: that is how Cancel and the timeout end the wait at
+once, and how the elapsed time is reported, over a transport that blocks.
 
 ## For agents
 
@@ -973,10 +1135,16 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.layoutPrompt {"prompt", "model"?, "regions"?, "rect"?}` → `{text, format, area}` | what `ai.generate {"regions": true}` would send that model: the panel's copy button |
 | `ai.setLayerPrompt {"layer", "prompt", "coalesce"?}` → `{layer, prompt}` | change the prompt an AI layer keeps (what Load from layer brings back); refused for a layer not made with AI Gen. `ai.setRegions` and `ai.region.set` take `"layer"` too: that AI layer gets the document's regions in the same History step |
 | `ai.generate {"prompt", "regions": true or [...], …}` | a text to image laid out in the document's regions (or those given), with a model trained on boxes; `modelPrompt` in the result is the layout sent |
-| `ai.generate {"prompt", "loras": [{"lora", "strength"?}, …], …}` | stack up to five LoRAs on a local model: `lora` is one of the model's (by file or name, see `ai.models`) or a file of the server's `models/loras`; `strength` −4 to 4, unasked the one its settings start it at, else 1. Their trigger words are added to `modelPrompt`. Refused for a model that takes none |
+| `ai.generate {"prompt", "loras": [{"lora", "strength"?}, …], …}` | stack up to five LoRAs on a local model: `lora` is one of the model's (by file or name, see `ai.models`) or a file of the server's `models/loras`; `strength` −10 to 10, unasked the one its settings start it at, else 1. Their trigger words are added to `modelPrompt`. Refused for a model that takes none |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
-| `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one |
+| `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one (`openrouter` and `anthropic` are prompt enhancement's own; `openai`, `xai` and `gemini` serve both) |
+| `ai.enhancePrompt {"prompt", "mode"?: "txt2img"/"imgEdit"/"inpaint"/"img2img", "model"?, "provider"?, "textModel"?, "timeout"?, "words"?, "style"?}` → `{prompt, original, provider, textModel, style}` (`provider: "local"`: a local model on the engine) | rewrite a prompt with the service in `integrations.ai.enhance` (or the one given); a background job, cancellable, that changes no document |
+| `ai.enhanceModels {"provider"?}` → `{provider, models, default}` | the models a service offers for enhancing |
+| `window.panel.aiGen.enhance` / `window.panel.aiGen.restorePrompt` → `{restored}` | shell commands (the running app): press the panel's Enhance (its prompt, task and model; the answer lands in the prompt box) / put back the prompt typed before it (Shift-click on the button) |
+| `window.panel.aiGen.style {"style": id\|""}` → `{style}` / `window.panel.aiGen.batch {"count": 1..10}` → `{count}` | shell commands (the running app): choose the panel's style preset (`""`: No preset) / how many images Generate makes |
+| `ai.styles` → `{styles: [{id, name, group, groupName, description, prompt}], groups}` | the style presets `ai.generate`'s `style` takes, in the picker's order, with the sentence each adds |
+| `ai.generate {"prompt", "style"?: id, "count"?: 1..10, …}` | `style` adds that preset's sentence after the prompt (`modelPrompt` shows it; the layer keeps the id); `count` makes that many images, a layer each, in one undo step: the result's `layers` and `seeds` list them bottom to top, `layer` and `seed` are the last's, `cost` is their total, and `stopped` says why a batch ended early (the images made are kept) |
 | `ai.setup.probe` | what this machine has for local models: system, graphics card and memory, drives, an existing ComfyUI, whether the download hosts answer; and the rows the wizard's first screen shows. Changes nothing; a background job |
 | `ai.setup.manifest {"vramGb"?}` | what the setup can install: models with their files, sizes, licences, whether each is installed (`linked`: only because the user's own models folders have its files) and how it suits a card of that size; presets with shared files counted once |
 | `ai.setup.modelFolders` | the user's own models folders the installed engine reads. **Setting them (`folders`) is refused to agents**, like the rest of the setup |
@@ -996,14 +1164,17 @@ section; `edit.preferences.generativeAi` returns them, and in the app opens the 
 `change` or `restyle`), `method` (`instruct` or `fill`, for a model that changes a picture both
 ways), `model` (Create and Restyle), `editModel` (Change), `strength`, `context`, `maskBrush`,
 `imgSource`, `imgStrength`, `editSource`, `editReferences`, `editQuality`, `prompt`, `alpha`,
-`seed`, `lastSeed`, `advanced`, `loras` (by model id: `[{file, strength, on}]`), `createTask` (Create's: `prompt` or `regions`), `region` (the
-region selected). The panel's tabs and tasks are the shell's; `ai.generate`'s `mode`
+`seed`, `lastSeed`, `advanced`, `loras` (by model id: `[{file, strength, on}]`), `style` (the
+preset's id; empty: none), `batch` (1 to 10), `createTask` (Create's: `prompt` or `regions`), `region` (the
+region selected), `beforeEnhance` (the prompt typed before the last Enhance, while it can be
+restored). Prompt enhancement's settings are `integrations.ai.enhance`: `provider`, `models`
+(by provider), `timeoutSeconds`, `words`, `instructions`. The panel's tabs and tasks are the shell's; `ai.generate`'s `mode`
 names the technique (`txt2img`, `inpaint`, `img2img`, `imgEdit`), as before.
 
 A generated layer carries its settings as `generation` in the layer tree (`document.inspect`
 and the like): `{mode, model, modelName, prompt, strength, context, alpha, seed, source, references, quality}`
-(and `regions`, for one laid out in regions, and `loras`, `[{file, name, strength}]`, for one
-made with LoRAs), named
+(and `regions`, for one laid out in regions, `loras`, `[{file, name, strength}]`, for one
+made with LoRAs, and `style`, for one made with a style preset), named
 as `ai.generate` names its params, so they can be passed straight back to it. In the code it is
 `photocraft_doc::Layer::generation`.
 
@@ -1016,6 +1187,18 @@ as `ai.generate` names its params, so they can be passed straight back to it. In
   `cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188`; add
   `inpaint image.png mask.png [strength]` after the output file to try an inpainting.
 - `crates/engine/src/ai_cmds.rs`: the commands. The app shell sets `Session::ai.transport`.
+- Style presets: `crates/aigen/src/style.rs` (the presets and their sentences),
+  `crates/ui-egui/src/ai_gen_ui/styles.rs` (the Style button and picker), thumbnails in
+  `assets/ai-styles` (512 px JPEGs). `GEMINI_API_KEY=… cargo run -p photocraft-aigen --example
+  style_thumbs -- out/ [id,…]` renders them again with Nano Banana Pro from each preset's own
+  sentence (scale to 512 px and save as JPEG to ship); change the subject in that example.
+- Prompt enhancement: `crates/aigen/src/enhance.rs` (services, settings, requests, answers,
+  model lists, the watched send), `crates/engine/src/ai_enhance_cmds.rs` (`ai.enhancePrompt`,
+  `ai.enhanceModels`), `crates/ui-egui/src/ai_gen_ui/enhance.rs` (Enhance, the veil, the
+  settings page). `cargo run -p photocraft-aigen --example enhance -- openai,xai,gemini "a cat"`
+  tries the real services (keys from the environment; `list` in place of the prompt lists
+  models). The snapshot's `--ai-setup-demo enhance|enhanced|enhance-prefs` draws the panel
+  waiting, the panel after, and the settings page, against a stand-in service.
 - `crates/ui-egui/src/ai_gen_ui.rs`: the panel and the Preferences › Generative AI page.
 - `crates/aisetup` (L4, on top of `aigen`): the Local AI setup. `manifest.json` and
   `manifest.rs` (what can be installed: the pinned ComfyUI builds and the model files, each

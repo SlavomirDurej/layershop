@@ -159,6 +159,10 @@ pub struct Generation {
     /// them back in the panel.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub loras: Vec<GenerationLora>,
+    /// The style preset added to the prompt (`ai.generate`'s `style`, an id of
+    /// `photocraft_aigen::STYLES`); empty: none. Load Prompt chooses it again.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub style: String,
 }
 
 /// A LoRA a generation was rendered with ([`Generation::loras`]).

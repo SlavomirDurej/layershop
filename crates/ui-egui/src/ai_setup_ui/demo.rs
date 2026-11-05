@@ -263,6 +263,60 @@ pub fn slow_engine(app: &mut PhotocraftApp, dir: &Path, details: bool) -> bool {
     true
 }
 
+/// A text service for prompt enhancement: answers with an enhanced prompt, or (`slow`) keeps the
+/// request waiting for ten minutes, so the panel shows the veil it draws meanwhile.
+struct DemoText {
+    slow: bool,
+}
+
+/// What [`DemoText`] answers with.
+const ENHANCED: &str = "A ginger tabby cat curled up asleep on a deep green velvet sofa, soft afternoon light from a tall window, cozy living room softly blurred behind, warm colours, shallow depth of field, photorealistic";
+
+impl Transport for DemoText {
+    fn send(&self, _: &Request) -> photocraft_aigen::Result<Response> {
+        if self.slow {
+            std::thread::sleep(Duration::from_secs(600));
+        }
+        let body = json!({"choices": [{"message": {"content": ENHANCED}}]});
+        Ok(Response { status: 200, body: body.to_string().into_bytes() })
+    }
+}
+
+/// Prompt enhancement: `enhance` is the AI Gen panel while its prompt is enhanced (the veil, what
+/// it waits for, Cancel), `enhanced` once it has been (the line that offers the prompt typed),
+/// and `enhance-prefs` Preferences › Generative AI › Prompt Enhancement (`enhance-settings` on its
+/// Settings tab, `enhance-local` on Local Models). An OpenAI image model
+/// and key make the panel ready to generate.
+fn enhancement(app: &mut PhotocraftApp, page: &str) -> bool {
+    let slow = page == "enhance";
+    app.session.ai.transport = Some(Arc::new(DemoText { slow }));
+    app.session.ai.set_key(photocraft_aigen::Provider::Openai, "demo");
+    let models: Vec<photocraft_aigen::Model> =
+        photocraft_aigen::Model::cloud_presets().into_iter().filter(|m| m.provider == photocraft_aigen::Provider::Openai).take(1).collect();
+    if let Ok(value) = serde_json::to_value(models) {
+        let _ = app.session.execute("prefs.set", json!({"path": "integrations.ai.models", "value": value}));
+    }
+    let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+    // The panel as someone using it has it: its dock group dragged taller.
+    app.ui.dock.heights.insert(crate::dock::Group::Properties, 430.0);
+    app.ui.ai_gen.prompt = "a cat on a sofa".into();
+    if let Some(tab) = page.strip_prefix("enhance-").filter(|t| matches!(*t, "prefs" | "settings" | "local")) {
+        let id = crate::ai_gen_ui::open_prompt_enhancement(app);
+        if let Some(d) = app.ui.dialog_mut(id) {
+            d.fields.insert("__aiEnhanceTab".into(), json!(if tab == "prefs" { "cloud" } else { tab }));
+        }
+        return true;
+    }
+    // Waiting: in the background, as in the app. Done: inline, so it is there at once.
+    app.background_jobs = slow;
+    let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::enhance::ENHANCE_MENU, &json!({}));
+    if slow {
+        // Long enough for the veil to say how long it has been waiting.
+        std::thread::sleep(Duration::from_millis(2300));
+    }
+    true
+}
+
 /// A ComfyUI that does not answer: a setup against it stops at its last step.
 struct Down;
 
@@ -555,6 +609,9 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
     }
     // The AI Gen panel on a PC with nothing set up: no API key, local AI not installed, and no
     // ComfyUI answering. What it offers is the setup, and a key.
+    if matches!(page, "enhance" | "enhanced" | "enhance-prefs" | "enhance-settings" | "enhance-local") {
+        return enhancement(app, page);
+    }
     if page == "aigen-empty" {
         install(app, dir, Scale::Real);
         app.session.ai.transport = Some(Arc::new(Down));

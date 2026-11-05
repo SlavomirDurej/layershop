@@ -158,6 +158,16 @@
       "size": 9057782194,
       "sha256": "bf0b4fa2e41a25684dc9e9b256cd505564f02fed09be3da95ce024e653e2c52b"
     },
+    "text_encoders/gemma4_e2b_it_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/gemma-4/resolve/main/text_encoders/gemma4_e2b_it_int8_convrot.safetensors",
+      "size": 5199997904,
+      "sha256": "efeca0fcad2f863e5ed0a75e3af952b72bc963604c1dda6d20aee87a32b17566"
+    },
+    "text_encoders/qwen_3_4b_fp8_mixed.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/text_encoders/qwen_3_4b_fp8_mixed.safetensors",
+      "size": 5631994051,
+      "sha256": "72450b19758172c5a7273cf7de729d1c17e7f434a104a00167624cba94f68f15"
+    },
     "diffusion_models/fibo2_dev_int8_convrot.safetensors": {
       "url": "https://huggingface.co/Comfy-Org/Fibo-2.0/resolve/main/diffusion_models/fibo2_dev_int8_convrot.safetensors",
       "size": 8408562474,

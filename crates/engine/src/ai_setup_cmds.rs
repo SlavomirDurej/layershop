@@ -37,14 +37,14 @@ use serde_json::{Value, json};
 use crate::commands::CommandSpec;
 use crate::{EngineError, Result, Session};
 
-const NEEDS_DESKTOP: &str = "Setting up local AI needs the desktop app";
+pub(crate) const NEEDS_DESKTOP: &str = "Setting up local AI needs the desktop app";
 
 fn bad(cmd: &str, msg: impl Into<String>) -> EngineError {
     EngineError::BadParams { cmd: cmd.into(), msg: msg.into() }
 }
 
 /// The manifest this build was made with.
-fn bundled() -> Result<std::sync::Arc<Manifest>> {
+pub(crate) fn bundled() -> Result<std::sync::Arc<Manifest>> {
     static SHARED: std::sync::OnceLock<std::result::Result<std::sync::Arc<Manifest>, String>> = std::sync::OnceLock::new();
     SHARED.get_or_init(|| Manifest::bundled().map(|m| std::sync::Arc::new(m.clone())).map_err(|e| e.to_string())).clone().map_err(EngineError::Other)
 }

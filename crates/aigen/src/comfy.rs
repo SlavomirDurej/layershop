@@ -409,16 +409,33 @@ fn enhanced(g: &mut Graph, model: &Model, job: &Job, prompt: &str) -> Link {
     if file.is_empty() {
         return json!(prompt);
     }
+    write(g, file, ENHANCER_SYSTEM, &json!(prompt), 512, job.seed)
+}
+
+/// A text model in `file` (a text encoder that can write: Gemma 4, Qwen3) loaded and told to
+/// answer `prompt` following `system`, without thinking first, in at most `max_length` tokens
+/// (ComfyUI's Load CLIP and Generate Text nodes). Returns the text it writes.
+fn write(g: &mut Graph, file: &str, system: &str, prompt: &Link, max_length: u32, seed: u64) -> Link {
     let writer = g.node("CLIPLoader", json!({"clip_name": file, "type": "stable_diffusion", "device": "default"}));
-    let system = g.node("PrimitiveStringMultiline", json!({"value": ENHANCER_SYSTEM}));
+    let system = g.node("PrimitiveStringMultiline", json!({"value": system}));
     g.node(
         "TextGenerate",
         json!({
-            "clip": writer, "prompt": prompt, "system_prompt": system, "max_length": 512, "sampling_mode": "on",
+            "clip": writer, "prompt": prompt, "system_prompt": system, "max_length": max_length.clamp(1, 32_768), "sampling_mode": "on",
             "sampling_mode.temperature": 0.7, "sampling_mode.top_k": 64, "sampling_mode.top_p": 0.95, "sampling_mode.min_p": 0.05,
-            "sampling_mode.repetition_penalty": 1.05, "sampling_mode.seed": job.seed, "thinking": false, "use_default_template": true,
+            "sampling_mode.repetition_penalty": 1.05, "sampling_mode.seed": seed, "thinking": false, "use_default_template": true,
         }),
     )
+}
+
+/// A workflow that only writes text: the text model in `file` answers `prompt` following
+/// `system` ([`write`]), and a Preview as Text node returns what it wrote
+/// ([`parse_text_history`]). No image model runs.
+pub fn text_workflow(file: &str, system: &str, prompt: &str, max_length: u32, seed: u64) -> Value {
+    let mut g = Graph::default();
+    let text = write(&mut g, file, system, &json!(prompt), max_length, seed);
+    g.add("PreviewAny", json!({"source": text}));
+    Value::Object(g.nodes)
 }
 
 /// `image` gone over by `model`'s refiner ([`Model::refiner`]): Z-Image Turbo, sampled as its
@@ -916,21 +933,8 @@ pub fn parse_history(body: &[u8], id: &str) -> Result<History> {
     let v = json_of(body, "history")?;
     let Some(entry) = v.get(id) else { return Ok(History::Pending) };
     let status = entry.get("status");
-    if status.and_then(|s| s.get("status_str")).and_then(Value::as_str) == Some("error") {
-        let detail = status
-            .and_then(|s| s.get("messages"))
-            .and_then(Value::as_array)
-            .into_iter()
-            .flatten()
-            .filter(|m| m.get(0).and_then(Value::as_str) == Some("execution_error"))
-            .find_map(|m| {
-                let d = m.get(1)?;
-                let node = d.get("node_type").and_then(Value::as_str).unwrap_or("a node");
-                Some(format!("{node}: {}", d.get("exception_message").and_then(Value::as_str).unwrap_or("failed")))
-            })
-            .unwrap_or_else(|| "the workflow failed".into());
-        let fix = what_to_do(&detail).map_or_else(String::new, |fix| format!(" {fix}"));
-        return Err(Error::Server(format!("ComfyUI: {}{fix}", clip(&detail, 400))));
+    if let Some(e) = node_failed(status) {
+        return Err(e);
     }
     let image = entry.get("outputs").and_then(Value::as_object).into_iter().flat_map(|o| o.values()).find_map(|out| {
         let img = out.get("images")?.as_array()?.first()?;
@@ -948,6 +952,52 @@ pub fn parse_history(body: &[u8], id: &str) -> Result<History> {
         }
         None => Ok(History::Pending),
     }
+}
+
+/// Read `GET /history/<id>` for a workflow that answers in text (a Preview as Text node, whose
+/// output is `{"text": [..]}`): `None` while it runs, the text once it finished, an error when
+/// a node failed or it finished without text.
+pub fn parse_text_history(body: &[u8], id: &str) -> Result<Option<String>> {
+    let v = json_of(body, "history")?;
+    let Some(entry) = v.get(id) else { return Ok(None) };
+    let status = entry.get("status");
+    if let Some(e) = node_failed(status) {
+        return Err(e);
+    }
+    let text = entry
+        .get("outputs")
+        .and_then(Value::as_object)
+        .into_iter()
+        .flat_map(|o| o.values())
+        .find_map(|out| out.get("text")?.as_array()?.iter().find_map(Value::as_str).map(str::to_string));
+    match text {
+        Some(t) => Ok(Some(t)),
+        None if status.and_then(|s| s.get("completed")).and_then(Value::as_bool) == Some(true) => {
+            Err(Error::Server("ComfyUI finished the workflow but it returned no text".into()))
+        }
+        None => Ok(None),
+    }
+}
+
+/// The error of a workflow whose node failed, from its history entry's `status`.
+fn node_failed(status: Option<&Value>) -> Option<Error> {
+    if status.and_then(|s| s.get("status_str")).and_then(Value::as_str) == Some("error") {
+        let detail = status
+            .and_then(|s| s.get("messages"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter(|m| m.get(0).and_then(Value::as_str) == Some("execution_error"))
+            .find_map(|m| {
+                let d = m.get(1)?;
+                let node = d.get("node_type").and_then(Value::as_str).unwrap_or("a node");
+                Some(format!("{node}: {}", d.get("exception_message").and_then(Value::as_str).unwrap_or("failed")))
+            })
+            .unwrap_or_else(|| "the workflow failed".into());
+        let fix = what_to_do(&detail).map_or_else(String::new, |fix| format!(" {fix}"));
+        return Some(Error::Server(format!("ComfyUI: {}{fix}", clip(&detail, 400))));
+    }
+    None
 }
 
 /// Percent-encode a query value.
@@ -1142,13 +1192,13 @@ mod tests {
         let use_ = |file: &str, strength: f64| crate::LoraUse { file: file.into(), strength };
         let mut m = Family::QwenImage21.preset();
         m.lora = "lightning.safetensors".into();
-        let stacked = Job { loras: vec![use_("a.safetensors", 0.8), use_(" ", 1.0), use_("off.safetensors", 0.0), use_("b.safetensors", 9.0)], ..job() };
+        let stacked = Job { loras: vec![use_("a.safetensors", 0.8), use_(" ", 1.0), use_("off.safetensors", 0.0), use_("b.safetensors", 25.0)], ..job() };
         let w = workflow(&m, &stacked).unwrap();
         let loras = nodes_with(&w, "LoraLoaderModelOnly");
         // The speed LoRA, then the two that do something: an empty file and a strength of 0 are
         // left out, and an absurd strength is brought into range.
         let names: Vec<_> = loras.iter().map(|n| (n["inputs"]["lora_name"].clone(), n["inputs"]["strength_model"].clone())).collect();
-        assert_eq!(names, [(json!("lightning.safetensors"), json!(1.0)), (json!("a.safetensors"), json!(0.8)), (json!("b.safetensors"), json!(4.0))]);
+        assert_eq!(names, [(json!("lightning.safetensors"), json!(1.0)), (json!("a.safetensors"), json!(0.8)), (json!("b.safetensors"), json!(10.0))]);
         // Each takes the model from the one before it.
         let fed_by = |name: &str| {
             let node = loras.iter().find(|n| n["inputs"]["lora_name"] == name).unwrap();

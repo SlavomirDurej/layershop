@@ -552,8 +552,9 @@ pub const MAX_REFERENCES: usize = 3;
 
 /// The most LoRAs one generation stacks (`ai.generate`'s `loras`, the panel's Advanced rows).
 pub const MAX_LORAS: usize = 5;
-/// The strengths a LoRA may be given: a slider runs 0..=2, a typed value this far.
-pub const LORA_STRENGTHS: std::ops::RangeInclusive<f64> = -4.0..=4.0;
+/// The strengths a LoRA may be given (the panel's slider and field): below 0 steers away from
+/// what the LoRA learnt.
+pub const LORA_STRENGTHS: std::ops::RangeInclusive<f64> = -10.0..=10.0;
 
 /// A LoRA a local model offers the AI Gen panel ([`Model::loras`]): set up once in the model's
 /// settings, then added to a generation with a strength of its own.
@@ -939,6 +940,8 @@ pub struct Settings {
     /// The models, in the order the user gave them: the panel lists the cloud ones first, then
     /// the local ones, each kind in this order ([`Settings::listed`]).
     pub models: Vec<Model>,
+    /// Prompt enhancement: the text model that rewrites the AI Gen panel's prompt.
+    pub enhance: crate::enhance::EnhanceSettings,
 }
 
 impl Default for Settings {
@@ -959,6 +962,7 @@ impl Settings {
             show_local: true,
             list_collapsed: Vec::new(),
             models: Vec::new(),
+            enhance: Default::default(),
         }
     }
 

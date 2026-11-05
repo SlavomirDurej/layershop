@@ -22,8 +22,8 @@ use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::widgets;
 
-/// The strengths the panel's slider runs over; the field beside it takes [`LORA_STRENGTHS`].
-const SLIDER: std::ops::RangeInclusive<f32> = 0.0..=2.0;
+/// The strengths the panel's slider and the field beside it run over: [`LORA_STRENGTHS`].
+const SLIDER: std::ops::RangeInclusive<f32> = *LORA_STRENGTHS.start() as f32..=*LORA_STRENGTHS.end() as f32;
 
 /// A LoRA added to the panel's generations with a model.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,11 +160,10 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Mode
                 let slider = (ui.available_width() - field - 22.0 - 2.0 * ui.spacing().item_spacing.x).max(30.0);
                 let mut v = lora.strength as f32;
                 ui.allocate_ui_with_layout(vec2(slider, 22.0), egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    widgets::slider(ui, &mut v, SLIDER, None).on_hover_text(tr("Strength: 1 as the LoRA was trained, 0 not at all"));
+                    widgets::slider(ui, &mut v, SLIDER, None).on_hover_text(tr("Strength: 1 as the LoRA was trained, 0 not at all, below 0 away from it"));
                 });
-                let range = *LORA_STRENGTHS.start() as f32..=*LORA_STRENGTHS.end() as f32;
-                widgets::value_field(ui, &mut v, range, "", field)
-                    .on_hover_text(tr("Strength. Type a value from −4 to 4; below 0 steers away from what the LoRA learnt"));
+                widgets::value_field(ui, &mut v, SLIDER, "", field)
+                    .on_hover_text(tr("Strength, from −10 to 10: 1 as the LoRA was trained; below 0 steers away from what it learnt"));
                 if v.is_finite() && (f64::from(v) - lora.strength).abs() > 1e-4 {
                     lora.strength = (f64::from(v) * 100.0).round() / 100.0;
                 }

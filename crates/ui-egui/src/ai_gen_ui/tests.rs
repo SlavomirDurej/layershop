@@ -841,9 +841,9 @@ fn the_panel_asks_for_room_for_its_generate_button() {
     app.ui.ai_gen.edit_model = "flux".into();
     app.ui.ai_gen.method = Method::Fill;
     assert_eq!(wanted_height(&app), base + 5.0 * ROW);
-    // Create: the seed and the LoRAs heading.
+    // Create: the seed, Alpha Channel and the LoRAs heading.
     app.ui.ai_gen.mode = Mode::Create;
-    assert_eq!(wanted_height(&app), base + 2.0 * ROW);
+    assert_eq!(wanted_height(&app), base + 3.0 * ROW);
 }
 
 #[test]
@@ -855,7 +855,7 @@ fn the_list_says_what_each_model_is_used_for_and_can_be_narrowed_to_it() {
     add_model(&mut app, Model { id: "qwen".into(), ..Family::QwenInpaint.preset() });
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     // One page lists every model; the pages for local, inpainting and cloud models are gone.
-    assert_eq!(PAGES.map(|(key, title)| (key, title)), [("models", "Manage Models"), ("keys", "API Keys"), ("server", "Engine"), ("folders", "Model Folders")]);
+    assert_eq!(PAGES.map(|(key, title)| (key, title)), [("models", "Manage Models"), ("keys", "API Keys"), ("enhance", "Prompt Enhancement"), ("server", "Engine"), ("folders", "Model Folders")]);
     let models = app.session.prefs().integrations.ai.models.clone();
     let listed = |filter: Filter| models.iter().filter(|m| filter.shows(Some(m))).map(|m| m.id.as_str()).collect::<Vec<_>>();
     assert_eq!(listed(Filter::All), ["z", "gpt", "fill", "qwen", "flux"]);
@@ -1318,18 +1318,20 @@ fn the_advanced_section_opens_the_settings_of_the_task_in_front() {
     let closed = wanted_height(&app);
     app.ui.ai_gen.advanced = true;
     app.ui.ai_gen.seed = Some(7);
-    assert_eq!((rows(&app), wanted_height(&app)), (1, closed + ROW));
+    // (Create: the seed and Alpha Channel.)
+    assert_eq!((rows(&app), wanted_height(&app)), (2, closed + 2.0 * ROW));
     draw_panel(&mut app);
     (app.ui.ai_gen.mode, app.ui.ai_gen.task) = (Mode::Edit, EditTask::Restyle);
     assert_eq!(rows(&app), 1);
     draw_panel(&mut app);
     app.ui.ai_gen.task = EditTask::Change;
     for (id, method, want) in [
-        ("flux", Method::Instruct, 3),
+        // (An instruction also has Alpha Channel; a fill paints what is there.)
+        ("flux", Method::Instruct, 4),
         ("flux", Method::Fill, 3),
         ("fill", Method::Instruct, 2),
-        ("q21", Method::Fill, 2),
-        ("gpt", Method::Instruct, 3),
+        ("q21", Method::Fill, 3),
+        ("gpt", Method::Instruct, 4),
         ("gpt", Method::Fill, 3),
     ] {
         app.ui.ai_gen.edit_model = id.into();
@@ -1524,6 +1526,70 @@ mod clicks {
         let at = h.get_by_label(LOAD).rect().center();
         click(&mut h, at);
         assert_eq!(h.state().ui.ai_gen.prompt, "a pond");
+    }
+
+    /// A harness over `app` with the AI Gen panel showing, tall enough for all its rows.
+    fn showing(mut app: PhotocraftApp) -> Harness<'static, PhotocraftApp> {
+        menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+        app.ui.dock.heights.insert(crate::dock::Group::Properties, 760.0);
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
+            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
+            app
+        });
+        h.run_steps(8);
+        h
+    }
+
+    #[test]
+    fn shift_click_on_enhance_prompt_restores_the_prompt_typed() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        app.ui.ai_gen.prompt = "A ginger cat asleep on a sunlit windowsill".into();
+        app.ui.ai_gen.before_enhance = Some("cat window".into());
+        app.ui.ai_gen.enhanced_by = "Claude (claude-haiku-5-5)".into();
+        let mut h = showing(app);
+        // The button sits beside the model, and the status bar says who wrote the prompt.
+        let enhance = h.get_by_label("Enhance Prompt").rect();
+        let model = h.get_by_label("Model").rect();
+        assert!((enhance.center().y - model.center().y).abs() < 4.0, "{enhance:?} beside {model:?}");
+        let at = enhance.center();
+        h.event(egui::Event::ModifiersChanged(Modifiers::SHIFT));
+        h.hover_at(at);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::SHIFT });
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::SHIFT });
+        h.event(egui::Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(3);
+        assert_eq!(h.state().ui.ai_gen.prompt, "cat window");
+        assert!(h.state().ui.ai_gen.before_enhance.is_none());
+    }
+
+    #[test]
+    fn the_style_picker_chooses_a_preset_by_tab_and_no_preset_clears_it() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let mut h = showing(app);
+        let at = h.get_by_label("Style").rect().center();
+        click(&mut h, at);
+        // All the presets, and No preset first.
+        assert!(h.query_by_label("No preset").is_some() && h.query_by_label("Pixel Art").is_some());
+        let at = h.get_by_label("Traditional art").rect().center();
+        click(&mut h, at);
+        assert!(h.query_by_label("Pixel Art").is_none(), "the tab shows its group only");
+        let at = h.get_by_label("Watercolour").rect().center();
+        click(&mut h, at);
+        assert_eq!(h.state().ui.ai_gen.style, "watercolour");
+        assert!(h.query_by_label("No preset").is_none(), "choosing closes the picker");
+        // The tab stays; No preset takes the style away.
+        let at = h.get_by_label("Style").rect().center();
+        click(&mut h, at);
+        assert!(h.query_by_label("Pixel Art").is_none());
+        let at = h.get_by_label("No preset").rect().center();
+        click(&mut h, at);
+        assert_eq!(h.state().ui.ai_gen.style, "");
     }
 
     /// Each button of a Model Folders row does its own thing: none of them opens the list, which
@@ -1895,6 +1961,7 @@ fn the_panels_own_look_at_the_server_ends_quietly() {
         label: "Connect to ComfyUI".into(),
         document: None,
         outcome,
+        error: None,
     };
     // Someone else's job is not the panel's.
     assert!(!on_job_event(&mut app, &event(4, JobOutcome::Failed("refused".into()))));
@@ -2055,6 +2122,7 @@ fn the_dialogs_own_look_at_the_server_is_not_reported_twice() {
         label: "Connect to ComfyUI".into(),
         document: None,
         outcome: JobOutcome::Failed("Could not reach ComfyUI".into()),
+        error: None,
     };
     assert!(on_job_event(&mut app, &event(21)), "the dialog says how its connect ended");
     assert!(!on_job_event(&mut app, &event(22)));
@@ -2387,14 +2455,15 @@ fn loras_are_added_per_model_with_a_strength_and_come_back_with_load_prompt() {
     // Open, Advanced has a LoRAs heading for a local model, and a row for each LoRA added.
     let closed = wanted_height(&app);
     app.ui.ai_gen.advanced = true;
-    assert_eq!(wanted_height(&app), closed + 2.0 * ROW);
+    // (The seed, Alpha Channel and the LoRAs heading.)
+    assert_eq!(wanted_height(&app), closed + 3.0 * ROW);
     let added = vec![
         PanelLora { file: "ink_v1.safetensors".into(), strength: 0.8, on: true },
         PanelLora { file: "styles/oil_paint.safetensors".into(), strength: 1.2, on: false },
         PanelLora { file: "gone.safetensors".into(), strength: 0.5, on: true },
     ];
     app.ui.ai_gen.loras.insert("z".into(), added.clone());
-    assert_eq!(wanted_height(&app), closed + 5.0 * ROW);
+    assert_eq!(wanted_height(&app), closed + 6.0 * ROW);
     draw_panel(&mut app);
     // Drawing leaves them as they are.
     assert_eq!(app.ui.ai_gen.loras["z"], added);
@@ -2409,7 +2478,8 @@ fn loras_are_added_per_model_with_a_strength_and_come_back_with_load_prompt() {
 
     // Another model has LoRAs of its own; a cloud model none, and no heading.
     app.ui.ai_gen.model = "gpt".into();
-    assert_eq!(wanted_height(&app), closed + ROW);
+    // (The seed and Alpha Channel.)
+    assert_eq!(wanted_height(&app), closed + 2.0 * ROW);
     assert!(loras::param(&app, current_model(&app).unwrap()).is_none());
     draw_panel(&mut app);
 
@@ -2566,4 +2636,326 @@ fn model_settings_offer_the_files_of_the_folders_as_well_as_the_servers() {
     assert_eq!(known_files(&f).unwrap()["loras"], json!(["A.safetensors", "b.safetensors", "server_only.safetensors"]));
     // Nothing known: typed names.
     assert!(known_files(&Map::new()).is_none());
+}
+
+// ---------- Prompt enhancement ----------
+
+/// A text service: answers chat requests with one prompt (after `wait`, unless `release` says
+/// go first) and model listings with two models.
+struct FakeText {
+    wait: std::time::Duration,
+    release: Arc<std::sync::atomic::AtomicBool>,
+    asked: Mutex<Vec<String>>,
+}
+
+impl FakeText {
+    fn new(wait_ms: u64) -> Arc<Self> {
+        Arc::new(Self { wait: std::time::Duration::from_millis(wait_ms), release: Default::default(), asked: Mutex::new(Vec::new()) })
+    }
+}
+
+impl Transport for FakeText {
+    fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+        self.asked.lock().unwrap().push(String::from_utf8_lossy(&r.body).into_owned());
+        let start = std::time::Instant::now();
+        while start.elapsed() < self.wait && !self.release.load(std::sync::atomic::Ordering::Relaxed) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let body = if r.url.contains("/models") {
+            json!({"data": [{"id": "claude-opus-5-5"}, {"id": "claude-haiku-5-5"}]})
+        } else {
+            json!({"content": [{"type": "text", "text": "A ginger cat asleep on a sunlit windowsill"}]})
+        };
+        Ok(Response { status: 200, body: body.to_string().into_bytes() })
+    }
+}
+
+/// [`app`] with prompts enhanced by Claude through `fake`, and a prompt typed.
+fn enhancing_app(fake: &Arc<FakeText>) -> PhotocraftApp {
+    let mut app = app();
+    app.session.ai.transport = Some(fake.clone());
+    app.session.ai.set_text_key(TextProvider::Anthropic, "ak");
+    app.run("prefs.set", json!({"path": "integrations.ai.enhance.provider", "value": "anthropic"})).unwrap();
+    add_model(&mut app, z_image("z"));
+    app.ui.ai_gen.prompt = "cat window".into();
+    app
+}
+
+/// Let the jobs end and their events reach the panel, until `done` or about four seconds.
+fn tick_until(app: &mut PhotocraftApp, done: impl Fn(&PhotocraftApp) -> bool) {
+    let ctx = egui::Context::default();
+    for _ in 0..400 {
+        crate::jobs_ui::tick(app, &ctx);
+        if done(app) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn enhance_puts_the_answer_in_the_prompt_and_the_original_can_come_back() {
+    let fake = FakeText::new(0);
+    let mut app = enhancing_app(&fake);
+    assert_eq!(enhance::blocked(&app), None);
+    let r = menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().unwrap();
+    assert_eq!(r["prompt"], "A ginger cat asleep on a sunlit windowsill");
+    assert_eq!(app.ui.ai_gen.prompt, "A ginger cat asleep on a sunlit windowsill");
+    assert_eq!(app.ui.ai_gen.before_enhance.as_deref(), Some("cat window"));
+    let line = enhance::enhanced_by(&app).unwrap();
+    assert!(line.contains("Claude (claude-haiku-5-5)"), "{line}");
+    assert!(enhance::restore_tip(&app).contains("Shift-click"));
+    // The task and the image model go with the prompt.
+    let asked = fake.asked.lock().unwrap().last().cloned().unwrap();
+    assert!(asked.contains("a new image") && asked.contains("The image model is Z-Image"), "{asked}");
+    draw_panel(&mut app);
+    assert_eq!(menu(&mut app, enhance::RESTORE_MENU, &json!({})), Some(Ok(json!({"restored": true}))));
+    assert_eq!(app.ui.ai_gen.prompt, "cat window");
+    assert_eq!(menu(&mut app, enhance::RESTORE_MENU, &json!({})), Some(Ok(json!({"restored": false}))));
+    // An edit's instruction is enhanced as one.
+    app.ui.ai_gen.mode = Mode::Edit;
+    menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().unwrap();
+    assert!(fake.asked.lock().unwrap().last().unwrap().contains("Keep it an instruction"));
+}
+
+#[test]
+fn enhance_says_why_it_cant_run() {
+    let fake = FakeText::new(0);
+    let mut app = enhancing_app(&fake);
+    app.ui.ai_gen.prompt = "  ".into();
+    assert!(enhance::blocked(&app).unwrap().contains("Write a prompt"));
+    assert!(menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().is_err());
+    app.ui.ai_gen.prompt = "cat".into();
+    if std::env::var("OPENROUTER_API_KEY").is_err() {
+        app.run("prefs.set", json!({"path": "integrations.ai.enhance.provider", "value": "openrouter"})).unwrap();
+        assert!(enhance::blocked(&app).unwrap().contains("OpenRouter needs an API key"));
+    }
+    app.session.ai.transport = None;
+    assert!(enhance::blocked(&app).unwrap().contains("desktop app"));
+    draw_panel(&mut app);
+    assert!(fake.asked.lock().unwrap().is_empty());
+}
+
+#[test]
+fn a_background_enhancement_veils_the_prompt_and_cancel_keeps_it() {
+    let fake = FakeText::new(20_000);
+    let mut app = enhancing_app(&fake);
+    app.background_jobs = true;
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let r = menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().unwrap();
+    assert_eq!(r["pending"], true);
+    assert!(enhance::running(&app).is_some());
+    assert!(menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().is_err(), "one at a time");
+    // The panel draws the veil over the prompt, in a wide panel and a narrow one.
+    draw_panel(&mut app);
+    let ctx = egui::Context::default();
+    PhotocraftApp::setup_context(&ctx, Default::default());
+    for width in [220.0, 520.0] {
+        ctx.run_ui(Default::default(), |ui| {
+            ui.set_max_width(width);
+            panel(&mut app, ui, false);
+        })
+        .textures_delta
+        .clear();
+    }
+    let id = enhance::running(&app).unwrap().id;
+    assert!(crate::jobs_ui::cancel(&mut app, id));
+    fake.release.store(true, std::sync::atomic::Ordering::Relaxed);
+    tick_until(&mut app, |app| app.ui.ai_gen.enhance_job.is_none());
+    assert_eq!(app.ui.ai_gen.enhance_job, None);
+    assert_eq!(app.ui.ai_gen.prompt, "cat window", "a cancel leaves the prompt as it was");
+    assert_eq!(app.ui.ai_gen.before_enhance, None);
+}
+
+#[test]
+fn a_background_enhancement_lands_in_the_prompt() {
+    let fake = FakeText::new(0);
+    let mut app = enhancing_app(&fake);
+    app.background_jobs = true;
+    menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().unwrap();
+    tick_until(&mut app, |app| app.ui.ai_gen.enhance_job.is_none());
+    assert_eq!(app.ui.ai_gen.prompt, "A ginger cat asleep on a sunlit windowsill");
+    assert!(app.ui.notices.is_empty());
+}
+
+#[test]
+fn enhancement_job_events_are_the_panels() {
+    use photocraft_engine::jobs::{JobEvent, JobId, JobOutcome};
+    let mut app = app();
+    app.ui.ai_gen.prompt = "cat".into();
+    let event = |id: u64, outcome: JobOutcome| JobEvent { id: JobId(id), command: enhance::ENHANCE.into(), label: "Enhance Prompt".into(), document: None, outcome, error: None };
+    assert!(!on_job_event(&mut app, &event(3, JobOutcome::Cancelled)), "not the panel's");
+    app.ui.ai_gen.enhance_job = Some(3);
+    assert!(on_job_event(&mut app, &event(3, JobOutcome::Failed("Claude refused the request: bad key.".into()))));
+    assert_eq!(app.ui.ai_gen.enhance_job, None);
+    assert_eq!(app.ui.ai_gen.prompt, "cat");
+    assert!(app.ui.notices.iter().any(|n| n.plain_text().contains("bad key")));
+    app.ui.ai_gen.enhance_job = Some(4);
+    assert!(on_job_event(&mut app, &event(4, JobOutcome::Done(json!({"prompt": "  ", "provider": "xai"})))));
+    assert_eq!(app.ui.ai_gen.prompt, "cat", "an empty answer changes nothing");
+    app.ui.ai_gen.enhance_job = Some(5);
+    assert!(on_job_event(&mut app, &event(5, JobOutcome::Done(json!({"prompt": "A cat", "provider": "xai", "textModel": "grok-4.7"})))));
+    assert_eq!((app.ui.ai_gen.prompt.as_str(), app.ui.ai_gen.before_enhance.as_deref()), ("A cat", Some("cat")));
+    assert!(enhance::enhanced_by(&app).unwrap().contains("Grok (grok-4.7)"));
+}
+
+#[test]
+fn the_prompt_enhancement_page_chooses_one_service_lists_models_and_saves_keys() {
+    let fake = FakeText::new(0);
+    let mut app = enhancing_app(&fake);
+    let (_, mut f) = dialog_fields(&mut app);
+    // Each tab draws with each service chosen, and so does every other page.
+    for tab in ["local", "cloud", "settings", "nope"] {
+        f.insert("__aiEnhanceTab".into(), json!(tab));
+        for p in TextProvider::ALL {
+            f["values"]["integrations"]["ai"]["enhance"]["provider"] = json!(p.key());
+            draw_page(&mut f, "enhance");
+        }
+    }
+    assert!(f.get("__aiEnhanceTab").is_none(), "an unknown tab is dropped: the page opens on the default one");
+    draw_section(&mut f);
+    // Settings keeps the timeout and the length in their ranges.
+    f.insert("__aiEnhanceTab".into(), json!("settings"));
+    f["values"]["integrations"]["ai"]["enhance"] =
+        json!({"provider": "anthropic", "models": {"anthropic": "claude-opus-5-5"}, "timeoutSeconds": 99999, "words": 0, "instructions": ""});
+    draw_page(&mut f, "enhance");
+    assert_eq!(f["values"]["integrations"]["ai"]["enhance"]["timeoutSeconds"], 600);
+    assert_eq!(f["values"]["integrations"]["ai"]["enhance"]["words"], photocraft_aigen::enhance::MIN_WORDS);
+    // The refresh button asks the service for its models.
+    f.insert("__aiEnhanceTab".into(), json!("cloud"));
+    f.insert(ACTION.into(), json!("enhanceModels:anthropic"));
+    after_body(&mut app, &mut f);
+    assert_eq!(f["__aiEnhanceListed"]["anthropic"], json!(["claude-opus-5-5", "claude-haiku-5-5"]));
+    assert_eq!(f["__aiEnhanceStatus"]["error"], false);
+    draw_page(&mut f, "enhance");
+    f.insert(ACTION.into(), json!("enhanceModels:nope"));
+    after_body(&mut app, &mut f);
+    // Save keeps the edited instructions at once; the built-in ones are kept as none.
+    f["values"]["integrations"]["ai"]["enhance"]["instructions"] = json!("Write haiku.");
+    f.insert(ACTION.into(), json!(enhance::SAVE_INSTRUCTIONS));
+    after_body(&mut app, &mut f);
+    assert_eq!(app.session.prefs().integrations.ai.enhance.instructions, "Write haiku.");
+    f["values"]["integrations"]["ai"]["enhance"]["instructions"] = json!(photocraft_aigen::enhance::DEFAULT_INSTRUCTIONS);
+    f.insert(ACTION.into(), json!(enhance::SAVE_INSTRUCTIONS));
+    after_body(&mut app, &mut f);
+    assert_eq!(app.session.prefs().integrations.ai.enhance.instructions, "");
+    // Edits in the box wait for Save, and are drawn until then.
+    f["values"]["integrations"]["ai"]["enhance"]["instructions"] = json!("");
+    f.insert("__aiEnhanceTab".into(), json!("settings"));
+    f.insert("__aiEnhanceEditing".into(), json!("Draft words"));
+    draw_page(&mut f, "enhance");
+    assert_eq!(f["__aiEnhanceEditing"], "Draft words");
+    assert_eq!(f["values"]["integrations"]["ai"]["enhance"]["instructions"], "", "not saved yet");
+    // An OpenRouter key typed on the API Keys page is saved with the others, never in the preferences.
+    f[KEYS]["openrouter"] = json!("or-secret");
+    prefs_confirmed(&mut app, &f).unwrap();
+    assert_eq!(app.session.ai.text_key(TextProvider::Openrouter), "or-secret");
+    assert_eq!(app.session.execute("ai.keys", json!({})).unwrap()["openrouter"], true);
+    assert!(!app.session.prefs_to_json().contains("or-secret"));
+    // The draft is what the engine enhances with once it is saved.
+    let ai: Settings = serde_json::from_value(f["values"]["integrations"]["ai"].clone()).unwrap();
+    assert_eq!(ai.enhance.model(TextProvider::Anthropic), "claude-opus-5-5");
+}
+
+#[test]
+fn a_batch_and_a_style_go_with_generate_and_a_fixed_seed_warns() {
+    let mut app = app();
+    add_model(&mut app, z_image("z"));
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    app.ui.ai_gen.prompt = "a fox".into();
+    assert_eq!(menu(&mut app, BATCH_MENU, &json!({"count": 3})), Some(Ok(json!({"count": 3}))));
+    for bad in [json!({}), json!({"count": 0}), json!({"count": 11}), json!({"count": "2"})] {
+        assert!(menu(&mut app, BATCH_MENU, &bad).unwrap().is_err(), "{bad}");
+    }
+    assert_eq!(menu(&mut app, styles::STYLE_MENU, &json!({"style": "Anime"})), Some(Ok(json!({"style": "anime"}))));
+    assert!(menu(&mut app, styles::STYLE_MENU, &json!({"style": "nope"})).unwrap().is_err());
+    assert!(menu(&mut app, styles::STYLE_MENU, &json!({"style": 4})).unwrap().is_err());
+    assert_eq!(app.ui.ai_gen.style, "anime", "a bad id leaves the choice");
+    let r = generate(&mut app).unwrap();
+    assert_eq!(r["layers"].as_array().unwrap().len(), 3);
+    assert!(r["modelPrompt"].as_str().unwrap().contains("Style: an anime illustration"));
+    // Load from layer chooses the style it was made with again.
+    menu(&mut app, styles::STYLE_MENU, &json!({"style": ""})).unwrap().unwrap();
+    assert!(load_prompt(&mut app, r["layer"].as_u64().unwrap()));
+    assert_eq!(app.ui.ai_gen.style, "anime");
+    // Out of range in a saved state, the batch is still one Generate can ask for.
+    app.ui.ai_gen.batch = 99;
+    assert_eq!(app.ui.ai_gen.batch(), 10);
+    app.ui.ai_gen.batch = 0;
+    assert_eq!(app.ui.ai_gen.batch(), 1);
+
+    // A batch of one seed warns, until the seed is random again; one image never does.
+    let current = current_model(&app).cloned().unwrap();
+    app.ui.ai_gen.batch = 4;
+    app.ui.ai_gen.seed = Some(5);
+    assert!(batch_warning(&app, &current).unwrap().contains("all 4 images will come out the same"));
+    app.ui.ai_gen.seed = None;
+    assert!(batch_warning(&app, &current).is_none());
+    assert!(batch_warning(&app, &Model { seed: 42, ..current.clone() }).is_some(), "a model's own fixed seed");
+    app.ui.ai_gen.batch = 1;
+    assert!(batch_warning(&app, &Model { seed: 42, ..current }).is_none());
+    draw_panel(&mut app);
+}
+
+#[test]
+fn a_style_chosen_after_enhancing_warns_and_enhance_again_writes_for_it_from_the_typed_prompt() {
+    let fake = FakeText::new(0);
+    let mut app = enhancing_app(&fake);
+    // Enhanced without a style: nothing to warn about.
+    menu(&mut app, enhance::ENHANCE_MENU, &json!({})).unwrap().unwrap();
+    assert!(!fake.asked.lock().unwrap().last().unwrap().contains("A style preset decides"));
+    assert_eq!(enhance::style_mismatch(&app), None);
+    // A style chosen since: the prompt may fight it.
+    menu(&mut app, styles::STYLE_MENU, &json!({"style": "anime"})).unwrap().unwrap();
+    let warning = enhance::style_mismatch(&app).unwrap();
+    assert!(warning.contains("without a style") && warning.contains("Anime"), "{warning}");
+    draw_panel(&mut app);
+    // Enhance again: the prompt as typed goes, written for Anime; it stays the one to go back to.
+    menu(&mut app, enhance::ENHANCE_MENU, &json!({"again": true})).unwrap().unwrap();
+    let asked = fake.asked.lock().unwrap().last().cloned().unwrap();
+    assert!(asked.contains("\"cat window\"") && asked.contains("the Anime preset replaces them"), "{asked}");
+    assert_eq!(app.ui.ai_gen.before_enhance.as_deref(), Some("cat window"));
+    assert_eq!((app.ui.ai_gen.enhanced_style.as_str(), enhance::style_mismatch(&app)), ("anime", None));
+    // Another style, or none, warns again; typing makes the prompt the user's, with no warning.
+    menu(&mut app, styles::STYLE_MENU, &json!({"style": "watercolour"})).unwrap().unwrap();
+    assert!(enhance::style_mismatch(&app).unwrap().contains("enhanced for Anime and may work against Watercolour"));
+    menu(&mut app, styles::STYLE_MENU, &json!({"style": ""})).unwrap().unwrap();
+    assert!(enhance::style_mismatch(&app).unwrap().contains("no longer chosen"));
+    app.ui.ai_gen.before_enhance = None;
+    assert_eq!(enhance::style_mismatch(&app), None);
+    // The button's tooltip names the style it writes for.
+    menu(&mut app, styles::STYLE_MENU, &json!({"style": "anime"})).unwrap().unwrap();
+    assert!(enhance::tip(&app).contains("It writes for the Anime style chosen."));
+}
+
+#[test]
+fn local_models_are_chosen_in_their_tab_need_no_key_and_install_with_the_setup() {
+    let fake = FakeText::new(0);
+    let mut app = enhancing_app(&fake);
+    let (_, mut f) = dialog_fields(&mut app);
+    f.insert("__aiEnhanceTab".into(), json!("local"));
+    // Not set up: every model offers Install, greyed, and the page offers the setup.
+    for id in ["gemma-4-e2b", "qwen3-4b", "gemma-4-e4b"] {
+        f["values"]["integrations"]["ai"]["enhance"] = json!({"provider": "local", "models": {"local": id}});
+        draw_page(&mut f, "enhance");
+    }
+    // A model's file in a models folder shows it as installed (the folders the page lists).
+    f.insert("__aiSetup".into(), json!({"route": "managed"}));
+    f.insert("__aiFolderListing".into(), json!([{"kind": "setup", "files": {"text_encoders": ["gemma4_e4b_it_fp8_scaled.safetensors"]}}]));
+    draw_page(&mut f, "enhance");
+    // Installing without the desktop app's setup says why.
+    f.insert(ACTION.into(), json!("enhanceInstall:gemma-4-e2b"));
+    after_body(&mut app, &mut f);
+    let status = &f["__aiEnhanceInstallStatus"];
+    assert_eq!((status["model"].as_str(), status["error"].as_bool()), (Some("gemma-4-e2b"), Some(true)), "{status}");
+    f.insert(ACTION.into(), json!("enhanceInstall:nope"));
+    after_body(&mut app, &mut f);
+    f.insert(ACTION.into(), json!("enhanceStopInstall"));
+    after_body(&mut app, &mut f);
+    // Chosen: Enhance needs no key for it.
+    app.run("prefs.set", json!({"path": "integrations.ai.enhance.provider", "value": "local"})).unwrap();
+    assert_eq!(enhance::blocked(&app), None);
+    // The Cloud Models tab draws with no cloud service chosen.
+    f.insert("__aiEnhanceTab".into(), json!("cloud"));
+    draw_page(&mut f, "enhance");
 }

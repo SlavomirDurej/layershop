@@ -1,6 +1,6 @@
 [package]
 name = "photocraft-aigen"
-description = "Generative image back ends for PhotoCraft: ComfyUI workflows for local models, OpenAI and Gemini image APIs"
+description = "Generative image back ends for PhotoCraft: ComfyUI workflows for local models, cloud image APIs, and prompt enhancement by cloud text models"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

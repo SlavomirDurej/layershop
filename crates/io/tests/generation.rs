@@ -45,6 +45,7 @@ fn document(depth: SampleType) -> Document {
         quality: GenerationQuality::Draft,
         regions: Vec::new(),
         loras: vec![photocraft_doc::GenerationLora { file: "a/b.safetensors".into(), name: "B".into(), strength: 0.5 }],
+        style: "watercolour".into(),
     }));
     // In a group: the walk reaches it.
     doc.layers = vec![photo, other, txt, Layer::group("Group", vec![edit])];

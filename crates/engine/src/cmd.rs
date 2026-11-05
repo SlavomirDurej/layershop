@@ -1390,6 +1390,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::video_cmds::specs());
     v.extend(crate::jobs::specs());
     v.extend(crate::ai_cmds::specs());
+    v.extend(crate::ai_enhance_cmds::specs());
     v.extend(crate::ai_refs_cmds::specs());
     v.extend(crate::ai_regions_cmds::specs());
     v.extend(crate::ai_setup_cmds::specs());

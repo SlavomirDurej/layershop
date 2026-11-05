@@ -921,6 +921,7 @@ fn a_generated_layer_keeps_what_it_was_made_from() {
         quality: GenerationQuality::Standard,
         regions: Vec::new(),
         loras: Vec::new(),
+        style: String::new(),
     };
     assert_eq!(made(&s), Some(txt.clone()));
     // The layer tree reports it, named as `ai.generate` names its params.
@@ -1642,7 +1643,8 @@ fn loras_stack_on_a_local_model_and_stay_with_the_layer() {
         json!("ink"),
         json!([{}]),
         json!([{"lora": ""}]),
-        json!([{"lora": "Ink", "strength": 9}]),
+        json!([{"lora": "Ink", "strength": 11}]),
+        json!([{"lora": "Ink", "strength": -10.5}]),
         json!([{"lora": "Ink", "strength": "x"}]),
         json!([7]),
         json!(six),
@@ -1659,4 +1661,83 @@ fn loras_stack_on_a_local_model_and_stay_with_the_layer() {
     assert_eq!(z["loras"][0], json!({"file": "styles/ink_v1.safetensors", "name": "Ink", "strength": 0.7, "trigger": "ink drawing"}));
     assert_eq!(z["loras"][1]["name"], "oil paint");
     assert!(models["models"].as_array().unwrap().iter().find(|m| m["id"] == "gpt").unwrap()["loras"].is_null());
+}
+
+#[test]
+fn a_batch_makes_a_layer_per_image_each_with_its_own_seed() {
+    let fake = FakeComfy::new(64, 48, [0, 0, 255, 255]);
+    let mut s = session(&fake);
+    let before = s.active().unwrap().doc.layers.len();
+    let v = s.execute("ai.generate", json!({"prompt": "a harbour", "count": 3})).unwrap();
+    let layers: Vec<u64> = v["layers"].as_array().unwrap().iter().map(|l| l.as_u64().unwrap()).collect();
+    assert_eq!(layers.len(), 3);
+    assert_eq!(v["layer"].as_u64(), layers.last().copied());
+    assert!(v["stopped"].is_null());
+    let d = s.active().unwrap();
+    assert_eq!(d.doc.layers.len(), before + 3);
+    // The last made is on top and active; each keeps the seed it was rendered with.
+    assert_eq!(d.active_layer.map(|l| l.0), layers.last().copied());
+    let seeds: Vec<u64> = layers.iter().map(|l| d.doc.layer(photocraft_doc::LayerId(*l)).unwrap().generation.as_ref().unwrap().seed).collect();
+    assert_eq!(v["seeds"], json!(seeds));
+    assert!(seeds[0] != seeds[1] || seeds[1] != seeds[2], "a random seed each time: {seeds:?}");
+    // One undo step takes the whole batch away.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(s.active().unwrap().doc.layers.len(), before);
+
+    // A seed that was asked for is the seed of every image.
+    let v = s.execute("ai.generate", json!({"prompt": "a harbour", "count": 2, "seed": 77})).unwrap();
+    assert_eq!(v["seeds"], json!([77, 77]));
+
+    for bad in [json!(0), json!(11), json!(-1), json!(2.5), json!("3")] {
+        assert!(s.execute("ai.generate", json!({"prompt": "a boat", "count": bad})).is_err(), "{bad}");
+    }
+}
+
+#[test]
+fn a_style_is_added_after_the_prompt_and_kept_with_the_layer() {
+    let fake = FakeComfy::new(64, 48, [0, 0, 255, 255]);
+    let mut s = session(&fake);
+    let v = s.execute("ai.generate", json!({"prompt": "a fox", "style": "Watercolour", "seed": 1})).unwrap();
+    let prompt = v["modelPrompt"].as_str().unwrap();
+    assert!(prompt.starts_with("a fox
+
+Style: a watercolour painting"), "{prompt}");
+    let d = s.active().unwrap();
+    let made = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.as_deref().cloned().unwrap();
+    assert_eq!((made.prompt.as_str(), made.style.as_str()), ("a fox", "watercolour"));
+    // None, or empty: the prompt as it is.
+    for none in [json!(null), json!(""), json!("  ")] {
+        let v = s.execute("ai.generate", json!({"prompt": "a fox", "style": none, "seed": 1})).unwrap();
+        assert_eq!(v["modelPrompt"], "a fox");
+    }
+    for bad in [json!("no-such-style"), json!(3), json!(["anime"]), json!("x".repeat(5000))] {
+        assert!(s.execute("ai.generate", json!({"prompt": "a fox", "style": bad})).is_err(), "{bad}");
+    }
+    let listed = s.execute("ai.styles", json!({})).unwrap();
+    assert_eq!(listed["styles"].as_array().unwrap().len(), photocraft_aigen::STYLES.len());
+    assert_eq!(listed["styles"][0]["id"], "natural-photo");
+    assert_eq!(listed["groups"].as_array().unwrap().len(), 5);
+}
+
+#[test]
+fn an_enhanced_prompt_skips_the_models_own_prompt_writer() {
+    let fake = FakeComfy::new(16, 16, [0, 0, 255, 255]);
+    let mut s = session(&fake);
+    // HiDream O1 has a prompt writer of its own.
+    let model = serde_json::to_value(Model { id: "z".into(), enhancer: "gemma4_e4b_it_fp8_scaled.safetensors".into(), ..Family::HidreamO1.preset() }).unwrap();
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
+    let writes = |fake: &FakeComfy| {
+        let seen = fake.seen.lock().unwrap();
+        let (_, body) = seen.iter().rev().find(|(u, _)| u.ends_with("/prompt")).expect("nothing was queued");
+        String::from_utf8_lossy(body).contains("TextGenerate")
+    };
+    s.execute("ai.generate", json!({"prompt": "sea"})).unwrap();
+    assert!(writes(&fake), "the model's own prompt writer rewrites a typed prompt");
+    s.execute("ai.generate", json!({"prompt": "A calm sea at dusk.", "enhanced": true})).unwrap();
+    assert!(!writes(&fake), "an enhanced prompt is not rewritten again");
+    s.execute("ai.generate", json!({"prompt": "sea", "enhanced": false})).unwrap();
+    assert!(writes(&fake));
+    for bad in [json!("yes"), json!(1)] {
+        assert!(s.execute("ai.generate", json!({"prompt": "sea", "enhanced": bad})).is_err());
+    }
 }

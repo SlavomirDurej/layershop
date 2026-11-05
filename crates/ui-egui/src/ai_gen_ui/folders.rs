@@ -329,7 +329,7 @@ fn files_list(ui: &mut egui::Ui, path: &str, files: &Map<String, Value>) {
 }
 
 /// Read every folder's files again (`ai.setup.modelFolders {list: true}`).
-fn list(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
+pub(super) fn list(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     match app.session.execute("ai.setup.modelFolders", json!({"list": true})) {
         Ok(r) => {
             f.insert(LISTING.into(), r.get("listing").cloned().unwrap_or_else(|| json!([])));

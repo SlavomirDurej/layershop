@@ -17,7 +17,7 @@
 //! catalogs gain them (the `tl!` scan requires every complete language to have each literal).
 
 use egui::{RichText, vec2};
-use photocraft_aigen::{Family, Model, Provider, Settings};
+use photocraft_aigen::{Family, Model, Provider, Settings, TextProvider};
 use photocraft_doc::{GenerationMode, GenerationQuality};
 use photocraft_engine::ai_cmds::SourceRef;
 use photocraft_engine::jobs::JobInfo;
@@ -33,6 +33,8 @@ pub const PANEL: &str = "window.panel.aiGen";
 /// Put the prompt a generated layer was made with into the prompt box: `{"layer": id?}` (the
 /// active layer without it). What the panel's Load Prompt button does.
 pub const LOAD_PROMPT: &str = "window.panel.aiGen.loadPrompt";
+/// How many images Generate makes: `{"count": 1..10}`, the batch menu beside it.
+pub const BATCH_MENU: &str = "window.panel.aiGen.batch";
 /// The tab's position in the Properties dock group (Properties | Adjustments | AI Gen).
 pub const TAB: usize = 2;
 /// The engine command the panel runs.
@@ -212,6 +214,25 @@ pub struct AiGenUi {
     server_seq: u64,
     #[serde(skip)]
     focused: bool,
+    /// The prompt enhancement running (its job id): the prompt box is veiled until it answers.
+    #[serde(skip)]
+    pub(crate) enhance_job: Option<u64>,
+    /// The prompt as it was before the last enhancement, to go back to; dropped once the prompt
+    /// is typed in.
+    pub before_enhance: Option<String>,
+    /// Who wrote the enhanced prompt: "Claude (claude-haiku-5-5)".
+    #[serde(skip)]
+    enhanced_by: String,
+    /// The style preset added to the prompt (an id of `photocraft_aigen::STYLES`; empty: none).
+    pub style: String,
+    /// The style preset the enhanced prompt was written for (empty: none), while
+    /// [`Self::before_enhance`] is kept: a style chosen since may not suit it.
+    pub enhanced_style: String,
+    /// The style picker's tab: 0 All, then the groups in order.
+    #[serde(skip)]
+    style_tab: usize,
+    /// How many images Generate makes, 1 to [`photocraft_engine::ai_cmds::MAX_BATCH`].
+    pub batch: u32,
 }
 
 impl Default for AiGenUi {
@@ -246,6 +267,13 @@ impl Default for AiGenUi {
             server_asked: f64::NEG_INFINITY,
             server_seq: 0,
             focused: true,
+            enhance_job: None,
+            before_enhance: None,
+            enhanced_by: String::new(),
+            style: String::new(),
+            enhanced_style: String::new(),
+            style_tab: 0,
+            batch: 1,
         }
     }
 }
@@ -280,6 +308,11 @@ impl AiGenUi {
     /// The seed to ask for, within what `ai.generate` takes (48 bits).
     fn seed(&self) -> Option<u64> {
         self.seed.map(|s| s & SEED_MASK)
+    }
+
+    /// How many images to make, within what `ai.generate` takes.
+    fn batch(&self) -> u32 {
+        self.batch.clamp(1, photocraft_engine::ai_cmds::MAX_BATCH as u32)
     }
 }
 
@@ -338,6 +371,27 @@ pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
 /// Window › AI Gen: show the panel (its dock group, expanded, on its tab), or hide the group when
 /// it is already showing. `{"show": bool}` sets it instead of toggling.
 pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<Value, String>> {
+    if id == enhance::ENHANCE_MENU {
+        let model = current_model(app).cloned();
+        let kind = technique(&app.ui.ai_gen, model.as_ref());
+        let again = params.get("again").and_then(Value::as_bool).unwrap_or(false);
+        return Some(enhance::start(app, kind, model.as_ref().map(|m| m.id.as_str()), again));
+    }
+    if id == enhance::RESTORE_MENU {
+        return Some(Ok(json!({"restored": enhance::restore(app)})));
+    }
+    if id == styles::STYLE_MENU {
+        let style = params.get("style").map_or(Ok(""), |v| v.as_str().ok_or_else(|| "`style` must be a style id, or \"\" for none".to_string()));
+        return Some(style.and_then(|id| styles::choose(app, id)).map(|s| json!({"style": s.map(|s| s.id)})));
+    }
+    if id == BATCH_MENU {
+        let max = photocraft_engine::ai_cmds::MAX_BATCH as u64;
+        let count = params.get("count").and_then(Value::as_u64).filter(|n| (1..=max).contains(n));
+        return Some(count.ok_or_else(|| format!("`count` must be a whole number from 1 to {max}")).map(|n| {
+            app.ui.ai_gen.batch = n as u32;
+            json!({"count": n})
+        }));
+    }
     if id == LOAD_PROMPT {
         let layer = match params.get("layer") {
             Some(v) => v.as_u64().ok_or_else(|| "`layer` must be a layer id".to_string()),
@@ -499,6 +553,10 @@ fn server_answered(app: &mut PhotocraftApp, found: &Value) {
 /// The end of a job: the panel's own look at the server is taken here, without a notice when it
 /// failed. Returns whether it was that.
 pub fn on_job_event(app: &mut PhotocraftApp, e: &photocraft_engine::jobs::JobEvent) -> bool {
+    // The panel's prompt enhancement: its answer goes in the prompt box.
+    if enhance::on_job_event(app, e) {
+        return true;
+    }
     // A Connect or Scan the Preferences dialog follows: the dialog says how it ended, on the page
     // (where a server that isn't running is not an error when nobody asked to connect).
     let followed = |d: &crate::state::Dialog| d.fields.get(JOB).and_then(|j| j.get("id")).and_then(Value::as_u64) == Some(e.id.0);
@@ -664,6 +722,15 @@ pub fn open_api_keys(app: &mut PhotocraftApp) -> u64 {
     let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
     if let Some(d) = app.ui.dialog_mut(id) {
         d.fields.insert(PAGE.into(), json!("keys"));
+    }
+    id
+}
+
+/// Open Preferences on Generative AI › Prompt Enhancement.
+pub fn open_prompt_enhancement(app: &mut PhotocraftApp) -> u64 {
+    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
+    if let Some(d) = app.ui.dialog_mut(id) {
+        d.fields.insert(PAGE.into(), json!("enhance"));
     }
     id
 }
@@ -843,6 +910,17 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
     if let Some(list) = loras::param(app, &model) {
         params["loras"] = list;
     }
+    if let Some(style) = styles::param(app) {
+        params["style"] = json!(style);
+    }
+    if ui.batch() > 1 {
+        params["count"] = json!(ui.batch());
+    }
+    // The prompt is the one Enhance wrote (typing in it makes it the user's again): the model's
+    // own prompt writer leaves it as it is.
+    if ui.before_enhance.is_some() {
+        params["enhanced"] = json!(true);
+    }
     let result = crate::jobs_ui::run(app, GENERATE, params)?;
     // Inline (no background jobs): the result is here already. A job reports through `finished`.
     if result.get("pending").is_none() {
@@ -855,6 +933,11 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
 pub fn finished(app: &mut PhotocraftApp, result: &Value) {
     app.ui.ai_gen.last_cost = result.get("cost").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0);
     app.ui.ai_gen.last_seed = result.get("seed").and_then(Value::as_u64).map(|s| s & SEED_MASK);
+    // A batch that ended early kept the images it made: say why the rest are missing.
+    if let Some(why) = result.get("stopped").and_then(Value::as_str) {
+        let made = result.get("layers").and_then(Value::as_array).map_or(0, Vec::len);
+        crate::notices::error(app, format!("{}: {} {made} {}: {why}", tr("AI Generate"), tr("stopped after"), tr(if made == 1 { "image" } else { "images" })));
+    }
     // A local model rendered: local AI works, and the offer to set it up has nothing to add.
     let model = result.get("model").and_then(Value::as_str).unwrap_or("");
     if app.session.prefs().integrations.ai.model(model).is_some_and(|m| !model.is_empty() && m.provider.is_local()) {
@@ -875,8 +958,8 @@ fn layer_prompt(app: &PhotocraftApp, layer: u64) -> Option<&str> {
 }
 
 /// Put the prompt `layer` was generated with into the prompt box, in place of what is there,
-/// and choose the model it was made with again (when it is still offered), with the LoRAs it
-/// was made with. A layer laid out in regions brings them back with the Regions tab; the other
+/// and choose the model it was made with again (when it is still offered), with the LoRAs and
+/// the style preset it was made with. A layer laid out in regions brings them back with the Regions tab; the other
 /// settings stay. `false`,
 /// and nothing changes, for a layer that was not generated (or has no prompt) and while a
 /// generation runs (the panel shows that one).
@@ -904,8 +987,10 @@ pub fn load_prompt(app: &mut PhotocraftApp, layer: u64) -> bool {
         .active()
         .and_then(|d| d.doc.layer(photocraft_doc::LayerId(layer)))
         .and_then(|l| l.generation.as_ref())
-        .map(|g| (g.mode, g.model.clone(), g.loras.clone()));
-    if let Some((mode, model, lora_list)) = made {
+        .map(|g| (g.mode, g.model.clone(), g.loras.clone(), g.style.clone()));
+    if let Some((mode, model, lora_list, style)) = made {
+        // Its style preset, as it was made: none, if it had none (or one this build doesn't know).
+        app.ui.ai_gen.style = photocraft_aigen::style::find(&style).map(|s| s.id.to_string()).unwrap_or_default();
         let changing = matches!(mode, GenerationMode::Inpaint | GenerationMode::ImgEdit);
         let offered = app.session.prefs().integrations.ai.listed().into_iter().any(|m| m.id == model && fits(m, changing) && usable(app, m));
         if offered {
@@ -952,12 +1037,17 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
 
 /// Load from layer's width: the icon, and `label` beside it when there is room.
 fn load_button_width(ui: &egui::Ui, label: Option<&str>) -> f32 {
-    let text = label.map_or(0.0, |l| 6.0 + ui.painter().layout_no_wrap(l.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE).size().x);
-    8.0 + 16.0 + text + 8.0
+    match label {
+        Some(l) => 8.0 + 16.0 + 6.0 + ui.painter().layout_no_wrap(l.to_string(), egui::FontId::proportional(12.0), egui::Color32::WHITE).size().x + 8.0,
+        None => 26.0,
+    }
 }
 
+/// The least the model menu keeps, beside the buttons of its row, before they lose their words.
+const MODEL_MIN: f32 = 150.0;
+
 /// Load from layer, beside the model: a button with a frame, the import icon and `label` (only
-/// named, for screen readers and tests, without `words`).
+/// named, for screen readers and tests, without `words`: then the icon is centred).
 fn load_button(ui: &mut egui::Ui, label: &str, words: bool) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     let shown = words.then_some(label);
@@ -969,7 +1059,7 @@ fn load_button(ui: &mut egui::Ui, label: &str, words: bool) -> egui::Response {
     ui.painter().rect_filled(rect, t.radius_sm, fill);
     ui.painter().rect_stroke(rect, t.radius_sm, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
     let color = if on { t.text } else { t.text_faint };
-    let icon = egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0));
+    let icon = if shown.is_some() { egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0)) } else { egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)) };
     crate::icons::paint(ui, icon, "import", 14.0, color);
     if let Some(label) = shown {
         ui.painter().text(icon.right_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), color);
@@ -989,16 +1079,20 @@ const BELOW_PROMPT: f32 = 6.0 + 32.0 + 3.0 + 6.0;
 const ROW: f32 = 24.0 + 6.0;
 /// The brush the mask tools start with when the session's is smaller: a mask is painted broadly.
 const MASK_BRUSH_MIN: f32 = 40.0;
-/// Size of the notes under Generate.
+/// Size of the status bar's text, and of the panel's other notes.
 const NOTE_SIZE: f32 = 11.0;
+/// The status bar's icons, each in a square this wide.
+const STATUS_ICON: f32 = 18.0;
 
 /// The rows the Advanced section opens for a generation of `kind` with `model`: the seed, for a
-/// change also its strength or quality with the context, and the method when the model leaves
-/// that open.
+/// change also its strength or quality with the context, the method when the model leaves that
+/// open, and Alpha Channel for a new picture or an edit.
 fn advanced_rows(model: Option<&Model>, kind: GenerationMode) -> usize {
     match kind {
-        GenerationMode::Txt2img | GenerationMode::Img2img => 1,
-        GenerationMode::Inpaint | GenerationMode::ImgEdit => 2 + usize::from(model.is_some_and(both_ways)),
+        GenerationMode::Txt2img => 2,
+        GenerationMode::Img2img => 1,
+        GenerationMode::Inpaint => 2 + usize::from(model.is_some_and(both_ways)),
+        GenerationMode::ImgEdit => 3 + usize::from(model.is_some_and(both_ways)),
     }
 }
 
@@ -1311,6 +1405,58 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
     egui::ScrollArea::vertical().id_salt("ai-gen-panel").auto_shrink([false, false]).show(ui, |ui| panel_body(app, ui, Some(room).filter(|r| r.is_finite())));
 }
 
+/// The row under the tabs: the model, Enhance prompt, Load from layer and the shortcut to the
+/// model's settings. `chosen` is the model chosen, kept for the task in front (Load from layer may
+/// choose another). Returns what Enhance was pressed for, to act on once the task is known.
+fn model_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, models: &[Model], chosen: &mut String, width: f32, busy: bool) -> Option<enhance::Pressed> {
+    // Model, Enhance prompt, Load from layer, and the shortcut to the model's settings.
+    let mut settings = false;
+    let mut load = false;
+    // Load from layer: what the selected layer was generated with. In a narrow panel the buttons
+    // lose their words (Load's first), so the model keeps room for its name.
+    let source_layer = active_layer(app).filter(|l| layer_prompt(app, *l).is_some());
+    let load_label = tr("Load from layer");
+    let spacing = ui.spacing().item_spacing.x;
+    let fixed = 24.0 + 3.0 * spacing;
+    let (load_full, enhance_full) = (load_button_width(ui, Some(load_label)), enhance::button_width(ui, true));
+    let (load_words, enhance_words) = match width - fixed - MODEL_MIN {
+        room if room >= load_full + enhance_full => (true, true),
+        room if room >= load_button_width(ui, None) + enhance_full => (false, true),
+        _ => (false, false),
+    };
+    let load_w = load_button_width(ui, load_words.then_some(load_label));
+    let enhance_w = enhance::button_width(ui, enhance_words);
+    let mut enhance_pressed = None;
+    ui.horizontal(|ui| {
+        let options: Vec<(String, &str)> = models.iter().map(|m| (m.id.clone(), m.name.as_str())).collect();
+        let headings = model_headings(models);
+        ui.add_enabled_ui(!busy, |ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+            let model_w = (width - fixed - load_w - enhance_w).max(80.0);
+            widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), chosen, &options, &headings, model_w);
+        });
+        enhance_pressed = enhance::button(app, ui, enhance_words, busy);
+        let tip = if source_layer.is_some() {
+            "Load the prompt and model the selected layer was generated with (and its regions)"
+        } else {
+            "Load from layer: select a layer made with AI Gen"
+        };
+        load = ui.add_enabled_ui(!busy && source_layer.is_some(), |ui| load_button(ui, load_label, load_words)).inner.on_hover_text(tr(tip)).clicked();
+        settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
+    });
+    app.ui.ai_gen.chosen_mut().clone_from(chosen);
+    if settings {
+        open_settings(app, chosen);
+    }
+    if let Some(layer) = source_layer.filter(|_| load) {
+        load_prompt(app, layer);
+        if let Some(model) = models.iter().find(|m| m.id == app.ui.ai_gen.chosen()) {
+            chosen.clone_from(&model.id);
+        }
+    }
+    enhance_pressed
+}
+
 /// [`panel`]'s content; `room` is the height it has to fill, when it fills one.
 fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     let t = Tokens::get(ui.ctx());
@@ -1319,6 +1465,8 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     look_at_server(app, ui.ctx());
     let job = running(app);
     let busy = job.is_some();
+    // A prompt being enhanced is veiled, and nothing runs until it is back.
+    let enhancing = enhance::running(app);
     // What the user is there to do. A running generation keeps the tab and task it was started on.
     let mut mode = app.ui.ai_gen.mode;
     mode_tabs(ui, &mut mode, !busy);
@@ -1361,48 +1509,15 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     }
     let width = ui.available_width();
 
-    // Model, Load from layer, and the shortcut to the model's settings.
-    let mut settings = false;
-    let mut load = false;
-    // Load from layer: what the selected layer was generated with. Its words go when the panel is
-    // narrow, so the model keeps room for its name.
-    let source_layer = active_layer(app).filter(|l| layer_prompt(app, *l).is_some());
-    let load_label = tr("Load from layer");
-    let full = load_button_width(ui, Some(load_label));
-    let compact = width - 34.0 - full < 170.0;
-    let load_w = load_button_width(ui, (!compact).then_some(load_label));
-    ui.horizontal(|ui| {
-        let options: Vec<(String, &str)> = models.iter().map(|m| (m.id.clone(), m.name.as_str())).collect();
-        let headings = model_headings(&models);
-        let spacing = ui.spacing().item_spacing.x;
-        ui.add_enabled_ui(!busy, |ui| {
-            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            let model_w = (width - 34.0 - load_w - spacing).max(80.0);
-            widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), &mut chosen, &options, &headings, model_w);
-        });
-        let tip = if source_layer.is_some() {
-            "Load the prompt and model the selected layer was generated with (and its regions)"
-        } else {
-            "Load from layer: select a layer made with AI Gen"
-        };
-        load = ui.add_enabled_ui(!busy && source_layer.is_some(), |ui| load_button(ui, load_label, !compact)).inner.on_hover_text(tr(tip)).clicked();
-        settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
-    });
-    app.ui.ai_gen.chosen_mut().clone_from(&chosen);
-    if settings {
-        open_settings(app, &chosen);
-    }
-    if let Some(layer) = source_layer.filter(|_| load) {
-        load_prompt(app, layer);
-        if let Some(model) = models.iter().find(|m| m.id == app.ui.ai_gen.chosen()) {
-            chosen.clone_from(&model.id);
-        }
-    }
+    let enhance_pressed = model_row(app, ui, &models, &mut chosen, width, busy);
     ui.add_space(6.0);
     let current = models.iter().find(|m| m.id == chosen).cloned().unwrap_or_default();
     // What the model is asked for: the task says what the user is doing, the model how.
     let kind = technique(&app.ui.ai_gen, Some(&current));
     let (inpaint, img2img, edit) = (kind == GenerationMode::Inpaint, kind == GenerationMode::Img2img, kind == GenerationMode::ImgEdit);
+    if let Some(pressed) = enhance_pressed {
+        enhance::act(app, pressed, kind, &current.id);
+    }
     // A restyle: the picture to redraw. A change by instruction: the picture to change.
     if img2img || edit {
         let offered = if edit { photocraft_engine::ai_cmds::edit_sources(&app.session) } else { photocraft_engine::ai_cmds::img2img_sources(&app.session) };
@@ -1444,10 +1559,14 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     // What goes under Generate, worked out first: the prompt box takes the height that is left,
     // so it has to know how tall the notes are (a reason Generate is off can be several lines).
     let why = generate_blocked(app, &current);
-    let note = match (&job, &why) {
-        (Some(job), _) => Some(if job.message.is_empty() { job.label.clone() } else { job.message.clone() }),
-        (None, Some(why)) => Some(why.clone()),
-        (None, None) => target_size(app).map(|(w, h, selection)| {
+    // A prompt enhanced for another style than the one chosen; else a batch of one seed.
+    let mismatch = enhance::style_mismatch(app);
+    let alike = mismatch.clone().or_else(|| batch_warning(app, &current));
+    let note = match (&job, &why, &alike) {
+        (Some(job), _, _) => Some(if job.message.is_empty() { job.label.clone() } else { job.message.clone() }),
+        (None, Some(why), _) => Some(why.clone()),
+        (None, None, Some(alike)) => Some(alike.clone()),
+        (None, None, None) => target_size(app).map(|(w, h, selection)| {
             let given = inpaint || img2img || edit;
             let (rw, rh) = if given { photocraft_aigen::source_size(&current, w, h) } else { render_size(&current, w, h) };
             // An edit of a picture of this document is shown the selection's surroundings, too.
@@ -1473,13 +1592,21 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         Provider::Comfy | Provider::Gemini => None,
     };
     let setup = setup_line(app);
+    let status = Status {
+        tone: match (&job, &why, &alike) {
+            (None, Some(_), _) => Tone::Act,
+            (None, None, Some(_)) => Tone::Warning,
+            _ => Tone::Plain,
+        },
+        text: note.unwrap_or_default(),
+        cost: (!current.provider.is_local()).then(|| cost_tip(&current, price)),
+        enhanced: enhance::enhanced_by(app).filter(|_| enhancing.is_none()),
+        again: mismatch.is_some() && job.is_none() && why.is_none() && enhance::blocked(app).is_none(),
+    };
     let line_gap = ui.spacing().item_spacing.y;
-    let notes_height: f32 = note
-        .iter()
-        .chain(price.iter().map(|(text, _)| text))
-        .chain(setup.iter())
-        .map(|text| ui.painter().layout(text.clone(), egui::FontId::proportional(NOTE_SIZE), t.text_faint, width).size().y + line_gap)
-        .sum();
+    let notes_height: f32 = setup.iter().map(|text| ui.painter().layout(text.clone(), egui::FontId::proportional(NOTE_SIZE), t.text_faint, width).size().y + line_gap).sum::<f32>()
+        + status.height(ui, width)
+        + line_gap;
 
     // Prompt. ⌘/Ctrl+Return generates. Laying out regions, it is the scene, a box of a few lines
     // with the regions under it.
@@ -1500,11 +1627,18 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     }
     let mut submit = false;
     let mut typed = false;
-    ui.add_enabled_ui(!busy, |ui| {
+    let mut prompt_rect = egui::Rect::NOTHING;
+    // A narrow panel gives the option beside Generate a row of its own, when that leaves the
+    // prompt box its least height.
+    // Only a restyle has an option beside Generate (its strength): Alpha Channel is in Advanced.
+    let mut option_row = width < WIDE_BUTTON_ROW && kind == GenerationMode::Img2img;
+    ui.add_enabled_ui(!busy && enhancing.is_none(), |ui| {
         let below = BELOW_PROMPT + rows_below(&app.ui.ai_gen, Some(&current), kind) as f32 * (ROW + line_gap);
-        let height = match room {
+        let left = room.map(|room| room - (ui.cursor().top() - top) - below - notes_height);
+        option_row &= left.is_none_or(|left| left - (ROW + line_gap) >= MIN_PROMPT_HEIGHT);
+        let height = match left {
             _ if laying_out => SCENE_HEIGHT,
-            Some(room) => (room - (ui.cursor().top() - top) - below - notes_height).clamp(MIN_PROMPT_HEIGHT, 1200.0),
+            Some(left) => (left - if option_row { ROW + line_gap } else { 0.0 }).clamp(MIN_PROMPT_HEIGHT, 1200.0),
             None => PROMPT_HEIGHT,
         };
         // A prompt longer than the box scrolls inside it instead of pushing Generate away.
@@ -1515,7 +1649,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         if edit {
             refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
         }
-        egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+        let shown = egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
             let font = egui::TextStyle::Body.resolve(ui.style());
             let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
@@ -1551,7 +1685,9 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 refs::after_prompt(ui, &output, &app.ui.ai_gen.prompt, &names);
             }
         });
+        prompt_rect = shown.inner_rect;
     });
+    enhance::after_prompt(app, ui, prompt_rect, enhancing.as_ref(), typed);
     // The scene of the selected layer made with regions is kept in it as it is typed.
     if laying_out && typed {
         regions::keep_scene(app);
@@ -1585,62 +1721,17 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         }
         seed_row(app, ui, &current, !busy);
         loras::section(app, ui, &current, !busy);
+        // A transparent background, for a new picture or an edit.
+        if matches!(kind, GenerationMode::Txt2img | GenerationMode::ImgEdit) {
+            ui.add_enabled_ui(!busy, |ui| ui.horizontal(|ui| alpha_box(app, ui, &current)));
+            ui.add_space(6.0);
+        }
     }
 
-    // One row, so the button stays in view in a short dock group: an option on the left,
-    // Generate on the right; a running generation shows its progress and Cancel there instead.
-    let mut clicked = false;
-    let mut cancel = None;
-    ui.horizontal(|ui| {
-        if let Some(job) = &job {
-            ui.add(egui::ProgressBar::new(job.progress.clamp(0.0, 1.0)).desired_width((width - 84.0).max(40.0)).desired_height(6.0).fill(t.accent));
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if widgets::secondary_button(ui, tr("Cancel"), 70.0).clicked() {
-                    cancel = Some(job.id);
-                }
-            });
-            return;
-        }
-        match kind {
-            // A restyle: how closely the picture is followed.
-            GenerationMode::Img2img => {
-                // Cloud models are given the picture and the prompt, and no such control.
-                let local = current.provider.is_local();
-                ui.add_enabled_ui(local, |ui| {
-                    ui.label(RichText::new(tr("Strength")).color(t.text_dim));
-                    let mut v = (app.ui.ai_gen.img_strength() * 100.0) as f32;
-                    widgets::value_field(ui, &mut v, 5.0..=100.0, "%", 64.0)
-                        .on_hover_text(tr("How far the result may depart from the picture. Low keeps its shapes and colours and changes the surface; high keeps little more than the composition; 100% ignores it"))
-                        .on_disabled_hover_text(tr("Cloud models are given the picture and the prompt, without a strength"));
-                    if local {
-                        app.ui.ai_gen.img_strength = f64::from(v.round()) / 100.0;
-                    }
-                });
-            }
-            GenerationMode::Txt2img | GenerationMode::ImgEdit => alpha_box(app, ui, &current),
-            // A fill paints what it repaints: there is no background to leave out.
-            GenerationMode::Inpaint => {}
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            clicked = ui.add_enabled_ui(why.is_none(), |ui| widgets::primary_button(ui, tr("Generate"), 96.0).clicked()).inner;
-        });
-    });
-    if let Some(id) = cancel {
-        crate::jobs_ui::cancel(app, id);
-    }
+    let rows = ButtonRow { kind, width, option_row: option_row && job.is_none(), generate: why.is_none() && enhancing.is_none() };
+    let clicked = button_row(app, ui, job.as_ref(), &current, rows);
     ui.add_space(3.0);
 
-    // Under it: the job's status, or why Generate is off, or what will be rendered (so the size
-    // is no surprise).
-    if let Some(note) = note {
-        // A reason Generate is off is something to act on: a shade stronger, and selectable.
-        let color = if job.is_none() && why.is_some() { t.text_dim } else { t.text_faint };
-        ui.add(egui::Label::new(RichText::new(note).color(color).size(NOTE_SIZE)).wrap().selectable(true));
-    }
-    // OpenAI bills per image: what this one should cost, and what the last one did.
-    if let Some((text, tip)) = price {
-        ui.label(RichText::new(text).color(t.text_faint).size(NOTE_SIZE)).on_hover_text(tip);
-    }
     // The way into the Local AI wizard: its progress while it runs, an offer until it has.
     if let Some(text) = setup {
         let line = ui.add(egui::Label::new(RichText::new(text).color(t.accent).size(NOTE_SIZE)).wrap().sense(egui::Sense::click()));
@@ -1649,12 +1740,109 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
             crate::ai_setup_ui::open(app);
         }
     }
+    // At the foot: the status bar.
+    match status_bar(ui, &status) {
+        Some(StatusClick::Restore) => {
+            enhance::restore(app);
+        }
+        Some(StatusClick::Again) => enhance::act(app, enhance::Pressed::Again, kind, &current.id),
+        None => {}
+    }
     if job.is_none()
         && why.is_none()
+        && enhancing.is_none()
         && (clicked || submit)
         && let Err(e) = generate(app)
     {
         crate::notices::error(app, format!("{}: {e}", tr("AI Generate")));
+    }
+}
+
+/// How [`button_row`] is laid out and what it offers.
+struct ButtonRow {
+    kind: GenerationMode,
+    width: f32,
+    /// The task's option has a row of its own above (a narrow panel with the height for it).
+    option_row: bool,
+    /// Generate can run.
+    generate: bool,
+}
+
+/// Generate on the right, with the batch menu and Style before it, and the task's option on the
+/// left: in one row, so the button stays in view in a short dock group, or with the option on a
+/// row of its own above. A running generation shows its progress and Cancel instead. Returns
+/// whether Generate was pressed.
+fn button_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, job: Option<&JobInfo>, current: &Model, row: ButtonRow) -> bool {
+    let t = Tokens::get(ui.ctx());
+    let (mut clicked, mut cancel) = (false, None);
+    if row.option_row {
+        ui.horizontal(|ui| option_of(app, ui, row.kind, current));
+    }
+    ui.horizontal(|ui| {
+        if let Some(job) = job {
+            ui.add(egui::ProgressBar::new(job.progress.clamp(0.0, 1.0)).desired_width((row.width - 84.0).max(40.0)).desired_height(6.0).fill(t.accent));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if widgets::secondary_button(ui, tr("Cancel"), 70.0).clicked() {
+                    cancel = Some(job.id);
+                }
+            });
+            return;
+        }
+        if !row.option_row {
+            option_of(app, ui, row.kind, current);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            clicked = ui.add_enabled_ui(row.generate, |ui| widgets::primary_button(ui, tr("Generate"), 96.0)).inner.clicked();
+            batch_menu(app, ui);
+            // Style says which preset is chosen unless the row is too narrow for its words.
+            styles::button(app, ui, true, row.width >= STYLE_WORDS);
+        });
+    });
+    if let Some(id) = cancel {
+        crate::jobs_ui::cancel(app, id);
+    }
+    clicked
+}
+
+/// Narrower than this, the option beside Generate, the batch menu and Style has a row of its own.
+const WIDE_BUTTON_ROW: f32 = 400.0;
+/// Narrower than this, Style shows its palette alone.
+const STYLE_WORDS: f32 = 250.0;
+
+/// The batch labels: how many images Generate makes.
+const BATCH: [&str; 10] = ["1×", "2×", "3×", "4×", "5×", "6×", "7×", "8×", "9×", "10×"];
+
+/// The batch menu beside Generate: 1× to 10×, each image a layer of its own.
+fn batch_menu(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    let mut n = app.ui.ai_gen.batch();
+    let options: Vec<(u32, &str)> = (1..=photocraft_engine::ai_cmds::MAX_BATCH as u32).zip(BATCH).collect();
+    ui.horizontal(|ui| widgets::dropdown(ui, "ai-gen-batch", tr("Images"), &mut n, &options, 56.0)).response.on_hover_text(tr(
+        "How many images to generate from the prompt, each on a layer of its own, with a new seed each (when the seed is left random). One undo takes them all away",
+    ));
+    app.ui.ai_gen.batch = n;
+}
+
+/// The option the task has beside Generate: how closely a restyle follows the picture. The
+/// others have none there (Alpha Channel is in Advanced).
+fn option_of(app: &mut PhotocraftApp, ui: &mut egui::Ui, kind: GenerationMode, current: &Model) {
+    let t = Tokens::get(ui.ctx());
+    match kind {
+        // A restyle: how closely the picture is followed.
+        GenerationMode::Img2img => {
+            // Cloud models are given the picture and the prompt, and no such control.
+            let local = current.provider.is_local();
+            ui.add_enabled_ui(local, |ui| {
+                ui.label(RichText::new(tr("Strength")).color(t.text_dim));
+                let mut v = (app.ui.ai_gen.img_strength() * 100.0) as f32;
+                widgets::value_field(ui, &mut v, 5.0..=100.0, "%", 64.0)
+                    .on_hover_text(tr("How far the result may depart from the picture. Low keeps its shapes and colours and changes the surface; high keeps little more than the composition; 100% ignores it"))
+                    .on_disabled_hover_text(tr("Cloud models are given the picture and the prompt, without a strength"));
+                if local {
+                    app.ui.ai_gen.img_strength = f64::from(v.round()) / 100.0;
+                }
+            });
+        }
+        GenerationMode::Txt2img | GenerationMode::ImgEdit | GenerationMode::Inpaint => {}
     }
 }
 
@@ -1700,6 +1888,137 @@ fn reported_price_note(app: &PhotocraftApp, model: &Model) -> Option<(String, St
         _ => tr("What the previous image cost, as the provider's answer reported it."),
     };
     Some((text, tip.to_string()))
+}
+
+/// The status bar's warning when a batch would render one seed over and over (the panel's seed
+/// is locked, or the model has a fixed one): the same image each time.
+fn batch_warning(app: &PhotocraftApp, model: &Model) -> Option<String> {
+    let n = app.ui.ai_gen.batch();
+    (n > 1 && (app.ui.ai_gen.seed().is_some() || model.seed >= 0))
+        .then(|| format!("{} {n} {}", tr("The seed is fixed, so all"), tr("images will come out the same. Unlock it (Advanced › Seed) for different ones.")))
+}
+
+/// The cost icon's tooltip for a cloud model: what the next image should cost and what the last
+/// did (`price`, where the provider says), else that the provider bills it.
+fn cost_tip(model: &Model, price: Option<(String, String)>) -> String {
+    match price {
+        Some((text, tip)) => format!("{text}\n\n{tip}"),
+        None => format!("{} {}", model.provider.label(), tr("bills each image to your account; it doesn't report what one cost.")),
+    }
+}
+
+/// How the status bar's text reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Tone {
+    /// What will be rendered, or how a generation goes.
+    Plain,
+    /// Why Generate is off: something to act on.
+    Act,
+    /// Generate can run, but not as the user likely expects (a batch of one seed).
+    Warning,
+}
+
+/// The status bar at the panel's foot.
+struct Status {
+    /// What will be rendered (the area and the size the model is asked for), how the generation
+    /// goes, why Generate is off, or a warning.
+    text: String,
+    tone: Tone,
+    /// A cloud model: the cost icon's tooltip.
+    cost: Option<String>,
+    /// After an enhancement: who wrote the prompt (the sparkles' tooltip; clicked, the prompt as
+    /// it was).
+    enhanced: Option<String>,
+    /// The warning is that the prompt was enhanced for another style: offer Enhance again.
+    again: bool,
+}
+
+/// What was clicked in the status bar.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum StatusClick {
+    /// The sparkles: the prompt as it was before Enhance.
+    Restore,
+    /// Enhance again, for the style chosen now.
+    Again,
+}
+
+/// The status bar's Enhance again.
+const AGAIN: &str = "Enhance again";
+
+impl Status {
+    /// The icons on the right.
+    fn icons(&self) -> usize {
+        usize::from(self.cost.is_some()) + usize::from(self.enhanced.is_some())
+    }
+
+    /// The room the text has beside the icons (and the warning sign).
+    fn text_width(&self, width: f32) -> f32 {
+        let warning = if self.tone == Tone::Warning { STATUS_ICON } else { 0.0 };
+        (width - self.icons() as f32 * STATUS_ICON - warning - 4.0).max(40.0)
+    }
+
+    /// How tall the bar is in a panel `width` wide: the hairline over it and its text, wrapped.
+    fn height(&self, ui: &egui::Ui, width: f32) -> f32 {
+        let text = ui.painter().layout(self.text.clone(), egui::FontId::proportional(NOTE_SIZE), egui::Color32::WHITE, self.text_width(width)).size().y;
+        // Enhance again, on a line of its own under the warning.
+        let again = if self.again { NOTE_SIZE + 6.0 + ui.spacing().item_spacing.y } else { 0.0 };
+        // The spaces and the hairline, with the spacing after it.
+        4.0 + 1.0 + ui.spacing().item_spacing.y + 4.0 + text.max(STATUS_ICON - 2.0) + again
+    }
+}
+
+/// The status bar: a hairline, then the text on the left (wrapping; under a style warning,
+/// Enhance again) and the icons on the right. Returns what was clicked.
+fn status_bar(ui: &mut egui::Ui, status: &Status) -> Option<StatusClick> {
+    let t = Tokens::get(ui.ctx());
+    let width = ui.available_width();
+    ui.add_space(4.0);
+    widgets::hairline(ui);
+    ui.add_space(4.0);
+    let mut clicked = None;
+    ui.horizontal_top(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        if status.tone == Tone::Warning {
+            let (r, _) = ui.allocate_exact_size(vec2(STATUS_ICON, STATUS_ICON - 2.0), egui::Sense::hover());
+            crate::icons::paint(ui, egui::Rect::from_center_size(r.center() - vec2(2.0, 0.0), vec2(14.0, 14.0)), "triangle-alert", 12.0, t.warning);
+        }
+        let text_width = status.text_width(width);
+        let color = match status.tone {
+            Tone::Plain => t.text_faint,
+            Tone::Act => t.text_dim,
+            Tone::Warning => t.warning,
+        };
+        ui.allocate_ui_with_layout(vec2(text_width, 0.0), egui::Layout::top_down(egui::Align::Min), |ui| {
+            ui.set_width(text_width);
+            // A reason Generate is off is something to act on: selectable, to copy.
+            ui.add(egui::Label::new(RichText::new(&status.text).color(color).size(NOTE_SIZE)).wrap().selectable(status.tone != Tone::Plain));
+            if status.again {
+                let link = ui.add(egui::Button::new(RichText::new(format!("\u{2728} {}", tr(AGAIN))).color(t.accent).size(NOTE_SIZE)).frame(false));
+                let tip = tr("Enhance the prompt you typed once more, written for the style chosen now");
+                if link.on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    clicked = Some(StatusClick::Again);
+                }
+            }
+        });
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Min), |ui| {
+            let icon = |ui: &mut egui::Ui, name: &str, color: egui::Color32, sense: egui::Sense| {
+                let (r, resp) = ui.allocate_exact_size(vec2(STATUS_ICON, STATUS_ICON - 2.0), sense);
+                let color = if resp.hovered() { t.text } else { color };
+                crate::icons::paint(ui, egui::Rect::from_center_size(r.center(), vec2(14.0, 14.0)), name, 12.0, color);
+                resp
+            };
+            if let Some(tip) = &status.cost {
+                icon(ui, "circle-dollar-sign", t.text_faint, egui::Sense::hover()).on_hover_text(tip);
+            }
+            if let Some(by) = &status.enhanced {
+                let tip = format!("{by}. {}", tr("Click, or Shift-click Enhance prompt, to restore the original prompt."));
+                if icon(ui, "sparkles", t.accent, egui::Sense::click()).on_hover_text(tip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    clicked = Some(StatusClick::Restore);
+                }
+            }
+        });
+    });
+    clicked
 }
 
 /// Why Generate can't run now (shown under the disabled button), or `None`.
@@ -2123,7 +2442,8 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
 /// The pages of the Generative AI section: (key, title). `server` is the Engine page: the
 /// ComfyUI that runs local models (the key is older than the name); `folders` the models folders
 /// it reads.
-const PAGES: [(&str, &str); 4] = [("models", "Manage Models"), ("keys", "API Keys"), ("server", "Engine"), ("folders", "Model Folders")];
+const PAGES: [(&str, &str); 5] =
+    [("models", "Manage Models"), ("keys", "API Keys"), ("enhance", "Prompt Enhancement"), ("server", "Engine"), ("folders", "Model Folders")];
 
 /// What the Manage Models list is narrowed to: every model, or the ones that do one of the AI Gen
 /// panel's jobs. A model that does several (FLUX.2 generates, edits and inpaints) is listed
@@ -2339,8 +2659,9 @@ fn is_local_model(m: &Value) -> bool {
 
 /// The Generative AI section's body: draws and edits `integrations.ai` in the dialog's draft
 /// (`obj` is the Integrations object; `f` the dialog's fields), in the `height` the dialog has
-/// for it. Four pages: Manage Models (every model in a list beside the selected one's
-/// settings), API keys, the engine (the ComfyUI that runs local models) and its models folders.
+/// for it. Five pages: Manage Models (every model in a list beside the selected one's
+/// settings), API keys, Prompt Enhancement (the text model behind the panel's Enhance), the
+/// engine (the ComfyUI that runs local models) and its models folders.
 pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>, height: f32) {
     let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
     let widths = page_widths(ui.available_width());
@@ -2367,6 +2688,7 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
             let busy = f.get(JOB).is_some();
             egui::ScrollArea::vertical().id_salt(("ai-page", other)).max_height(room).auto_shrink([false, true]).show(ui, |ui| match other {
                 "keys" => keys_page(ui, &ai, f),
+                "enhance" => enhance::page(ui, &mut ai, f),
                 "folders" => folders::page(ui, f, busy),
                 _ => server_page(ui, &mut ai, f),
             });
@@ -2662,7 +2984,7 @@ fn keys_page(ui: &mut egui::Ui, ai: &Map<String, Value>, f: &mut Map<String, Val
         ui.add(
             egui::Label::new(
                 RichText::new(tr(
-                    "Cloud models run on their provider's servers, which bill each image to your account there. Each provider needs its own key: make one on its site and paste it here.",
+                    "Cloud models run on their provider's servers, which bill what they make to your account there. Each provider needs its own key: make one on its site and paste it here.",
                 ))
                 .color(t.text_dim),
             )
@@ -2670,65 +2992,26 @@ fn keys_page(ui: &mut egui::Ui, ai: &Map<String, Value>, f: &mut Map<String, Val
         );
     });
     ui.add_space(8.0);
+    let enhancer = ai.get("enhance").and_then(|e| e.get("provider")).and_then(Value::as_str).and_then(TextProvider::from_key).unwrap_or_default();
+    let enhancing = tr("Prompt Enhancement");
     for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
-        let saved = keys.get(&format!("{}Saved", p.key())).and_then(Value::as_bool).unwrap_or(false);
-        let mut key = text_of(&keys, p.key());
-        let mut remove = keys.get(&format!("{}Remove", p.key())).and_then(Value::as_bool).unwrap_or(false);
-        let (url, host, note) = key_source(p);
-        let names: Vec<&str> = models.iter().filter(|m| m.provider == p).map(|m| m.name.as_str()).collect();
-        let front = focus == p.key();
-        let stroke = if front { egui::Stroke::new(1.5, t.accent) } else { egui::Stroke::new(1.0, t.card_border) };
-        let card = egui::Frame::new().fill(t.card).stroke(stroke).corner_radius(t.radius).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
-            ui.set_width(width - 26.0);
-            // The provider, whether it has a key, and where to get one.
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(p.label()).font(crate::theme::medium(13.0)).color(t.text));
-                let (state, color) = if !key.trim().is_empty() {
-                    (tr("Saved when you press OK"), t.text_dim)
-                } else if saved && remove {
-                    (tr("Removed when you press OK"), t.warning)
-                } else if saved {
-                    (tr("Key saved"), t.accent_text)
-                } else {
-                    (tr("No key"), t.warning)
-                };
-                ui.label(RichText::new(state).color(color).size(11.0));
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.spacing_mut().item_spacing.x = 4.0;
-                    let icon = crate::icons::button(ui, "external-link", 18.0, false, url);
-                    let link = ui.add(
-                        egui::Label::new(RichText::new(format!("{} {host}", tr("Get a key at"))).color(t.accent_text).size(11.5).underline())
-                            .sense(egui::Sense::click()),
-                    );
-                    if icon.clicked() || link.on_hover_text(url).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                        open = Some(url);
-                    }
-                });
-            });
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                let hint = if saved { tr("Saved. Paste a new key to replace it") } else { tr("Paste your API key") };
-                let field_width = if saved { ui.available_width() - 90.0 } else { ui.available_width() };
-                let field = ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(field_width.max(120.0)).hint_text(hint));
-                if front && focus_once {
-                    field.request_focus();
-                    field.scroll_to_me(Some(egui::Align::Center));
-                    focus_once = false;
-                }
-                if saved {
-                    widgets::checkbox(ui, &mut remove, tr("Remove"));
-                }
-            });
-            ui.add_space(4.0);
-            let used = if names.is_empty() { tr("None of the listed models uses it.").to_string() } else { format!("{} {}", tr("For:"), names.join(", ")) };
-            ui.add(egui::Label::new(RichText::new(used).color(t.text_dim).size(11.0)).wrap());
-            ui.add(egui::Label::new(RichText::new(tr(note)).color(t.text_faint).size(11.0)).wrap());
-        });
-        if front && f.get(KEY_FOCUS_ONCE).and_then(Value::as_bool) == Some(true) {
-            card.response.scroll_to_me(Some(egui::Align::Center));
+        let mut names: Vec<&str> = models.iter().filter(|m| m.provider == p).map(|m| m.name.as_str()).collect();
+        // OpenAI, xAI and Gemini also enhance prompts with the same key.
+        if enhancer.image_provider() == Some(p) {
+            names.push(enhancing);
         }
-        keys.insert(p.key().into(), json!(key));
-        keys.insert(format!("{}Remove", p.key()), json!(remove));
+        let used = if names.is_empty() { tr("None of the listed models uses it.").to_string() } else { format!("{} {}", tr("For:"), names.join(", ")) };
+        if let Some(url) = key_card(ui, &mut keys, p.key(), p.label(), key_source(p), &used, focus == p.key(), &mut focus_once, width) {
+            open = Some(url);
+        }
+        ui.add_space(8.0);
+    }
+    // The keys only prompt enhancement uses.
+    for p in TextProvider::ALL.into_iter().filter(|p| p.image_provider().is_none()) {
+        let used = if p == enhancer { format!("{} {enhancing}", tr("For:")) } else { tr("Used for Prompt Enhancement when it is chosen there.").to_string() };
+        if let Some(url) = key_card(ui, &mut keys, p.key(), p.label(), p.key_source(), &used, focus == p.key(), &mut focus_once, width) {
+            open = Some(url);
+        }
         ui.add_space(8.0);
     }
     f.insert(KEYS.into(), Value::Object(keys));
@@ -2739,12 +3022,92 @@ fn keys_page(ui: &mut egui::Ui, ai: &Map<String, Value>, f: &mut Map<String, Val
     ui.label(
         RichText::new(tr("Keys are stored on this computer, apart from the preferences, and are sent only to their provider.")).color(t.text_faint).size(11.0),
     );
-    let variables: Vec<&str> = Provider::ALL.into_iter().filter_map(Provider::key_env).collect();
+    let mut variables: Vec<&str> = Provider::ALL.into_iter().filter_map(Provider::key_env).collect();
+    variables.extend(TextProvider::ALL.into_iter().filter(|p| p.image_provider().is_none()).map(TextProvider::key_env));
     ui.scope(|ui| {
         ui.set_max_width(width);
         let text = format!("{} {}", tr("Without a saved key, a provider's environment variable is used:"), variables.join(", "));
         ui.add(egui::Label::new(RichText::new(text).color(t.text_faint).size(11.0)).wrap());
     });
+}
+
+/// One provider's API key: whether it has one, where to get one, and a field to paste it in.
+/// `name` is the key's name in the dialog's `KEYS` (`{name}`, `{name}Saved`, `{name}Remove`);
+/// `front` outlines it (the page was opened for it), and with `focus_once` the field takes the
+/// focus. Returns the address to open when its link was clicked.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn key_card(
+    ui: &mut egui::Ui,
+    keys: &mut Map<String, Value>,
+    name: &str,
+    label: &str,
+    (url, host, note): (&'static str, &'static str, &'static str),
+    used: &str,
+    front: bool,
+    focus_once: &mut bool,
+    width: f32,
+) -> Option<&'static str> {
+    let t = Tokens::get(ui.ctx());
+    let saved = keys.get(&format!("{name}Saved")).and_then(Value::as_bool).unwrap_or(false);
+    let mut key = text_of(keys, name);
+    let mut remove = keys.get(&format!("{name}Remove")).and_then(Value::as_bool).unwrap_or(false);
+    let mut open = None;
+    let stroke = if front { egui::Stroke::new(1.5, t.accent) } else { egui::Stroke::new(1.0, t.card_border) };
+    let card = egui::Frame::new().fill(t.card).stroke(stroke).corner_radius(t.radius).inner_margin(egui::Margin::symmetric(12, 10)).show(ui, |ui| {
+        ui.set_width(width - 26.0);
+        // The provider, whether it has a key, and where to get one.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(label).font(crate::theme::medium(13.0)).color(t.text));
+            let (state, color) = key_state(&key, saved, remove, &t);
+            ui.label(RichText::new(state).color(color).size(11.0));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 4.0;
+                let icon = crate::icons::button(ui, "external-link", 18.0, false, url);
+                let link = ui.add(
+                    egui::Label::new(RichText::new(format!("{} {host}", tr("Get a key at"))).color(t.accent_text).size(11.5).underline()).sense(egui::Sense::click()),
+                );
+                if icon.clicked() || link.on_hover_text(url).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+                    open = Some(url);
+                }
+            });
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            let hint = if saved { tr("Saved. Paste a new key to replace it") } else { tr("Paste your API key") };
+            let field_width = if saved { ui.available_width() - 90.0 } else { ui.available_width() };
+            let field = ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(field_width.max(120.0)).hint_text(hint));
+            if front && *focus_once {
+                field.request_focus();
+                field.scroll_to_me(Some(egui::Align::Center));
+            }
+            if saved {
+                widgets::checkbox(ui, &mut remove, tr("Remove"));
+            }
+        });
+        ui.add_space(4.0);
+        ui.add(egui::Label::new(RichText::new(used).color(t.text_dim).size(11.0)).wrap());
+        ui.add(egui::Label::new(RichText::new(tr(note)).color(t.text_faint).size(11.0)).wrap());
+    });
+    if front && *focus_once {
+        card.response.scroll_to_me(Some(egui::Align::Center));
+        *focus_once = false;
+    }
+    keys.insert(name.into(), json!(key));
+    keys.insert(format!("{name}Remove"), json!(remove));
+    open
+}
+
+/// What a key card says of its key: typed and waiting for OK, to be removed, saved, or none.
+pub(super) fn key_state(typed: &str, saved: bool, remove: bool, t: &Tokens) -> (&'static str, egui::Color32) {
+    if !typed.trim().is_empty() {
+        (tr("Saved when you press OK"), t.text_dim)
+    } else if saved && remove {
+        (tr("Removed when you press OK"), t.warning)
+    } else if saved {
+        (tr("Key saved"), t.accent_text)
+    } else {
+        (tr("No key"), t.warning)
+    }
 }
 
 /// A filter of the model list: a small pill with the filter's name and how many models it lists.
@@ -3537,7 +3900,7 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
             if takes_loras {
                 file_row(ui, m, "lora", "Speed LoRA", folder("loras"), true);
                 if !text_of(m, "lora").is_empty() {
-                    number_row(ui, m, "loraStrength", "Speed LoRA strength", -4.0..=4.0, false, "Always applied: a few-step LoRA (Qwen's Lightning) that the steps and CFG are set for");
+                    number_row(ui, m, "loraStrength", "Speed LoRA strength", photocraft_aigen::LORA_STRENGTHS, false, "Always applied: a few-step LoRA (Qwen's Lightning) that the steps and CFG are set for");
                 }
                 group(ui, "LoRAs");
                 loras::library(ui, m, folder("loras"));
@@ -3625,6 +3988,9 @@ pub fn prefs_opened(app: &PhotocraftApp, f: &mut Map<String, Value>) {
     let mut keys = Map::new();
     for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
         keys.insert(format!("{}Saved", p.key()), json!(!app.session.ai.key(p).is_empty()));
+    }
+    for p in TextProvider::ALL.into_iter().filter(|p| p.image_provider().is_none()) {
+        keys.insert(format!("{}Saved", p.key()), json!(!app.session.ai.text_key(p).is_empty()));
     }
     f.insert(KEYS.into(), Value::Object(keys));
 }
@@ -3735,6 +4101,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     }
     f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
     folders::ensure_listed(app, f);
+    enhance::follow(app, f);
     // The list's folded groups are a view, not a setting to confirm: kept at once.
     if let Some(folded) = f.get("values").and_then(|v| v.pointer("/integrations/ai/listCollapsed")).and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
         && app.session.prefs().integrations.ai.list_collapsed != folded
@@ -3802,6 +4169,8 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         "browsePython" | "browseScript" => browse(app, f, action == "browsePython"),
         // The Model Folders page's rows.
         _ if folders::act(app, f, &action) => {}
+        // Prompt Enhancement's List Models.
+        _ if enhance::page_action(app, f, &action) => {}
         // Models were reset or removed: the LoRAs added for them in the panel go with their own.
         _ if action.starts_with(PANEL_LORAS) => {
             for id in action.trim_start_matches(PANEL_LORAS).lines() {
@@ -3888,14 +4257,17 @@ fn add_detected(f: &mut Map<String, Value>, folders: &Value) -> (usize, usize, u
 pub fn prefs_confirmed(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<(), String> {
     let Some(keys) = f.get(KEYS).and_then(Value::as_object) else { return Ok(()) };
     let mut changed = false;
-    for p in Provider::ALL.into_iter().filter(|p| !p.is_local()) {
-        let typed = text_of(keys, p.key());
-        let remove = keys.get(&format!("{}Remove", p.key())).and_then(Value::as_bool).unwrap_or(false);
+    // The image providers' keys, then the ones only prompt enhancement uses.
+    let names = Provider::ALL.into_iter().filter(|p| !p.is_local()).map(Provider::key);
+    let names = names.chain(TextProvider::ALL.into_iter().filter(|p| p.image_provider().is_none()).map(TextProvider::key));
+    for name in names {
+        let typed = text_of(keys, name);
+        let remove = keys.get(&format!("{name}Remove")).and_then(Value::as_bool).unwrap_or(false);
         if !typed.trim().is_empty() {
-            app.session.execute("ai.setKey", json!({"provider": p.key(), "key": typed})).map_err(|e| e.to_string())?;
+            app.session.execute("ai.setKey", json!({"provider": name, "key": typed})).map_err(|e| e.to_string())?;
             changed = true;
         } else if remove {
-            app.session.execute("ai.setKey", json!({"provider": p.key(), "key": ""})).map_err(|e| e.to_string())?;
+            app.session.execute("ai.setKey", json!({"provider": name, "key": ""})).map_err(|e| e.to_string())?;
             changed = true;
         }
     }
@@ -3912,9 +4284,11 @@ pub fn load_keys(app: &mut PhotocraftApp) {
     }
 }
 
+pub mod enhance;
 pub(crate) mod folders;
 pub(crate) mod loras;
 mod refs;
 pub mod regions;
+mod styles;
 #[cfg(test)]
 mod tests;
