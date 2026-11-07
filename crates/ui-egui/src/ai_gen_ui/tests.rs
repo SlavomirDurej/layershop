@@ -2012,6 +2012,44 @@ fn a_narrow_panel_keeps_everything_inside_it() {
     }
 }
 
+/// A long model name is cut short in its menu instead of growing it past its share of the row:
+/// grown, it pushed Load from layer, the gear and (the panel laid out that much wider) Generate
+/// out of the dock (LayerShop issue 7).
+#[test]
+fn a_long_model_name_keeps_generate_and_the_gear_in_the_panel() {
+    let mut app = app();
+    let name = "Qwen Image 2.1 viggle turbo v0.3 6step int8 convrot";
+    add_model(&mut app, Model { id: "q21".into(), name: name.into(), ..Family::QwenImage21.preset() });
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    app.run("layer.new.layer", json!({"name": "[moss_image_sft_attn] a frog is eating a fly while it sits on a lily pad"})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("edit.fill", json!({"color": "#336699"})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    app.ui.ai_gen.prompt = "a frog is eating a fly while it sits on a lily pad".into();
+    for mode in [Mode::Edit, Mode::Create] {
+        (app.ui.ai_gen.mode, app.ui.ai_gen.task) = (mode, EditTask::Change);
+        (app.ui.ai_gen.edit_model, app.ui.ai_gen.model) = ("q21".into(), "q21".into());
+        // From where the buttons beside the model keep their words to where the name nearly fits.
+        for width in [300.0, 420.0, 520.0, 600.0, 700.0] {
+            let ctx = egui::Context::default();
+            PhotocraftApp::setup_context(&ctx, Default::default());
+            let input = || egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 900.0))), ..Default::default() };
+            let mut used = 0.0f32;
+            for _ in 0..3 {
+                ctx.run_ui(input(), |ui| {
+                    let inner = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 900.0));
+                    // As the dock draws it: filling its group, in the panel's own scroll area.
+                    let r = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui, true)).response.rect;
+                    used = r.width();
+                })
+                .textures_delta
+                .clear();
+            }
+            assert!(used <= width + 0.5, "{mode:?}: the panel's content is {used} wide in a panel {width} wide");
+        }
+    }
+}
+
 /// Draw the Generative AI section once on `page`, leaving the dialog wherever the frame took it.
 fn draw_page(f: &mut Map<String, Value>, page: &str) {
     let ctx = egui::Context::default();

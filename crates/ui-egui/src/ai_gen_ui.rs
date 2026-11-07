@@ -1597,9 +1597,13 @@ fn model_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, models: &[Model], chose
     ui.horizontal(|ui| {
         let options: Vec<(String, &str)> = models.iter().map(|m| (m.id.clone(), m.name.as_str())).collect();
         let headings = model_headings(models);
+        let model_w = (width - fixed - load_w - enhance_w).max(80.0);
         ui.add_enabled_ui(!busy, |ui| {
+            // The menu's width is only its least: a name is cut short against the room the menu
+            // is in. Held to its share, a long name ends in "…" instead of pushing Load from
+            // layer, the gear and (the panel laid out that much wider) Generate out of view (#7).
+            ui.set_max_width(model_w);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            let model_w = (width - fixed - load_w - enhance_w).max(80.0);
             widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), chosen, &options, &headings, model_w);
         });
         enhance_pressed = enhance::button(app, ui, enhance_words, busy);
@@ -1821,7 +1825,10 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         if edit {
             refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
         }
-        let shown = egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).auto_shrink([false, false]).show(ui, |ui| {
+        // A scroll area is never shorter than its least scrolled height (64 by default): held
+        // to the box's, a short panel gets the two-line box it was measured for.
+        let area = egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).min_scrolled_height(height);
+        let shown = area.auto_shrink([false, false]).show(ui, |ui| {
             let font = egui::TextStyle::Body.resolve(ui.style());
             let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
             let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
@@ -1838,6 +1845,8 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                     GenerationMode::Txt2img => "Describe what to generate…",
                 }))
                 .desired_width(width)
+                // Its height is `min_size`'s: four rows (the default) would scroll a short box.
+                .desired_rows(1)
                 .min_size(vec2(width, height))
                 .margin(egui::Margin::symmetric(4, 2));
             if edit {
