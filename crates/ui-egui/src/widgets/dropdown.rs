@@ -1,7 +1,7 @@
 use super::panel::chevron_icon;
 use super::scrub::take_label_scrub_name;
 use super::slider::wheel_notches_of;
-use super::{Pos2, Rect, Response, Ui, Vec2, type_ahead};
+use super::{Pos2, Rect, Response, Sense, Stroke, Tokens, Ui, Vec2, type_ahead, vec2};
 
 /// A compact labelled dropdown in the studio style.
 pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current: &mut T, options: &[(T, &str)], width: f32) -> bool {
@@ -11,13 +11,13 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current
 /// [`dropdown`] whose option labels are shown exactly as given: names the user typed (a channel
 /// or layer name) must not be translated, unlike the built-in labels [`dropdown`] translates (#5335).
 pub fn dropdown_literal<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current: &mut T, options: &[(T, &str)], width: f32) -> bool {
-    let (chosen, _) = dropdown_with(ui, id, name, current, options, width, false, false, &[]);
+    let (chosen, _) = dropdown_with(ui, id, name, current, options, width, false, false, &[], &|_| false);
     !chosen.is_empty()
 }
 
 /// [`dropdown`], also returning the option under the pointer in its open list (live previews).
 pub fn dropdown_hovered<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current: &mut T, options: &[(T, &str)], width: f32) -> (bool, Option<T>) {
-    let (chosen, hovered) = dropdown_with(ui, id, name, current, options, width, false, true, &[]);
+    let (chosen, hovered) = dropdown_with(ui, id, name, current, options, width, false, true, &[], &|_| false);
     (!chosen.is_empty(), hovered)
 }
 
@@ -33,7 +33,7 @@ pub fn dropdown_sectioned<T: PartialEq + Clone>(
     headings: &[(usize, &str)],
     width: f32,
 ) -> bool {
-    !dropdown_with(ui, id, name, current, options, width, false, true, headings).0.is_empty()
+    !dropdown_with(ui, id, name, current, options, width, false, true, headings, &|_| false).0.is_empty()
 }
 
 /// [`dropdown_hovered`] whose value also steps with the wheel over its button or open list: down
@@ -50,7 +50,22 @@ pub fn dropdown_wheel_hovered<T: PartialEq + Clone>(
     options: &[(T, &str)],
     width: f32,
 ) -> (Vec<T>, Option<T>) {
-    dropdown_with(ui, id, name, current, options, width, true, true, &[])
+    dropdown_with(ui, id, name, current, options, width, true, true, &[], &|_| false)
+}
+
+/// [`dropdown_wheel_hovered`] whose open list draws a line above each option (but the first) that
+/// `starts_group`: Photoshop's blend mode lists group their modes (#5532). The lines are only
+/// drawn: the options, their order and how the wheel, the keys and the pointer pick them stay.
+pub fn dropdown_wheel_grouped<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    id: &str,
+    name: &str,
+    current: &mut T,
+    options: &[(T, &str)],
+    width: f32,
+    starts_group: impl Fn(&T) -> bool,
+) -> (Vec<T>, Option<T>) {
+    dropdown_with(ui, id, name, current, options, width, true, true, &[], &starts_group)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -64,6 +79,7 @@ fn dropdown_with<T: PartialEq + Clone>(
     wheel: bool,
     translate: bool,
     headings: &[(usize, &str)],
+    starts_group: &dyn Fn(&T) -> bool,
 ) -> (Vec<T>, Option<T>) {
     let shown = |l: &str| if translate { tl!(l).to_string() } else { l.to_string() };
     let label = options.iter().find(|(v, _)| v == current).map(|(_, l)| shown(l)).unwrap_or_else(|| "—".into());
@@ -109,6 +125,9 @@ fn dropdown_with<T: PartialEq + Clone>(
                         ui.add_space(4.0);
                     }
                     ui.add(egui::Label::new(egui::RichText::new(tl!(heading)).font(crate::theme::medium(11.0)).color(t.text_faint)).selectable(false));
+                }
+                if index > 0 && starts_group(v) {
+                    list_separator(ui);
                 }
                 let item = ui.selectable_label(v == current, text.as_str());
                 if reveal && v == current {
@@ -156,6 +175,15 @@ fn dropdown_with<T: PartialEq + Clone>(
         hovered = None;
     }
     (chosen, hovered)
+}
+
+/// A line between two groups of an open dropdown list's options, as wide as the list. Like egui's
+/// separator it takes no width while egui sizes the list, so it never widens it.
+fn list_separator(ui: &mut Ui) {
+    let t = Tokens::get(ui.ctx());
+    let width = if ui.is_sizing_pass() { 0.0 } else { ui.available_width() };
+    let (rect, _) = ui.allocate_exact_size(vec2(width, 1.0), Sense::hover());
+    ui.painter().hline(rect.x_range(), rect.center().y, Stroke::new(1.0, t.separator));
 }
 
 /// Makes an open dropdown list as wide as its widest option is when hovered, from the start. egui

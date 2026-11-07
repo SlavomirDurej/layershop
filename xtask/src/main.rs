@@ -12,12 +12,13 @@ mod layers;
 mod perf;
 mod pinned;
 mod scorecard;
-mod sha256;
 mod stats;
 mod version;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
+
+use xtask::{psd_write_oracle, sha256};
 
 const USAGE: &str = "\
 usage: cargo xtask <command>
@@ -54,6 +55,8 @@ commands:
                   pack square PNGs (<= 256 px) into a Windows .ico (see packaging/icons.sh)
   ai-manifest     compare the Local AI setup's manifest (crates/aisetup/manifest.json) with what
                   GitHub and Hugging Face serve now: sizes and sha256, nothing is downloaded
+  psd-write-oracle <recipes.json> <corpus-dir> <photocraft-cli> <new-output-dir>
+                  run PSD export recipes and write a JSON report and manifest
 ";
 
 fn main() -> ExitCode {
@@ -74,6 +77,7 @@ fn main() -> ExitCode {
         Some("version") => version::run(&root(), &rest),
         Some("ico") => ico::run(&rest),
         Some("ai-manifest") => ai_manifest::run(&root()),
+        Some("psd-write-oracle") => psd_write_oracle::run(&root(), &rest),
         Some("-h" | "--help" | "help") | None => {
             print!("{USAGE}");
             Ok(())

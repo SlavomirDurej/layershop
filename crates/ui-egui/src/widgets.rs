@@ -26,6 +26,7 @@ mod scrub;
 mod slider;
 pub mod swap_arrow;
 pub(super) mod tab_strip;
+pub mod task_bar;
 mod text_field;
 pub mod text_field_menu;
 pub mod tone;
@@ -43,7 +44,7 @@ pub use color::{
 #[cfg(test)]
 use color::{checker_tile_id, checker_uv};
 pub use dropdown::{
-    dropdown, dropdown_hovered, dropdown_literal, dropdown_sectioned, dropdown_wheel_hovered, dropdown_with_tooltips, menu_scroll, swatch_popup,
+    dropdown, dropdown_hovered, dropdown_literal, dropdown_sectioned, dropdown_wheel_grouped, dropdown_wheel_hovered, dropdown_with_tooltips, menu_scroll, swatch_popup,
 };
 pub(crate) use fields::compact_wrapping_value_field;
 #[cfg(test)]
