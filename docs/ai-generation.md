@@ -168,8 +168,10 @@ image cost (*Est. cost …*, *Last image $0.004*), where the provider says. Afte
 and Flare, known from the model ID: Settings list *Animation* under Used for), makes a short
 animated GIF instead of a still: **Frames** (2 to 16, OpenAI's limit; 9 by default) and
 **Interval** (how long each frame shows, 200 ms by default), with the loop's **Time** beside the
-box. With an animation layer selected, **Play** at the end of that row plays it on the canvas
-(the timeline takes its rate and length, so Export GIF… writes what you saw); click again to stop.
+box. With an animation layer selected, **Play** at the end of the Animate row plays it on the
+canvas (the timeline takes its rate and length, so a GIF saved writes what you saw; click again to
+stop), and **Save GIF** (the download icon after it) saves it as one looping GIF without opening
+the Timeline panel. Both make a timeline when there is none (it was deleted).
 Each video layer plays at its own rate, whatever the timeline's. Say in the prompt
 what moves and that it loops. The answer becomes a **video layer** on the Timeline: the timeline
 is made for it (as many frames as it has, at 1000 / frame time fps) or grown to hold it, and the

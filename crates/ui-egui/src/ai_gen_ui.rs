@@ -1338,18 +1338,32 @@ fn active_animation(app: &PhotocraftApp) -> Option<(usize, f32)> {
 /// Play: the timeline takes the animation's rate and length (what plays is what Export GIF
 /// writes) and plays from its first frame, looping; the other video layers play at their own
 /// rates. Stop stops at the frame shown.
+/// The timeline takes the animation's rate and length, as Play and Save GIF want it; with no
+/// timeline (it was deleted) one is made for it.
+fn fit_timeline(app: &mut PhotocraftApp, frames: usize, fps: f32) -> Result<Value, String> {
+    if app.session.active().is_some_and(|d| d.doc.timeline.is_some()) {
+        app.run("timeline.setProps", json!({"fps": fps, "duration": frames, "workStart": 0, "workEnd": frames}))
+    } else {
+        app.run("timeline.create", json!({"fps": fps, "duration": frames}))
+    }
+}
+
+/// Save GIF: the selected animation, at its rate and length, as one looping GIF wherever the
+/// person picks (what Play shows, the Timeline panel's Export GIF… without opening it).
+#[cfg(not(target_arch = "wasm32"))]
+fn save_animation(app: &mut PhotocraftApp, frames: usize, fps: f32) {
+    app.ui.timeline.playing = false;
+    if let Err(e) = fit_timeline(app, frames, fps).and_then(|_| crate::timeline_ui::save_gif(app)) {
+        crate::notices::error(app, format!("{}: {e}", tr("Save GIF")));
+    }
+}
+
 fn play_animation(app: &mut PhotocraftApp, ctx: &egui::Context, frames: usize, fps: f32, play: bool) {
     if !play {
         app.ui.timeline.playing = false;
         return;
     }
-    // No timeline (it was deleted): one is made for the animation.
-    let made = if app.session.active().is_some_and(|d| d.doc.timeline.is_some()) {
-        app.run("timeline.setProps", json!({"fps": fps, "duration": frames, "workStart": 0, "workEnd": frames}))
-    } else {
-        app.run("timeline.create", json!({"fps": fps, "duration": frames}))
-    };
-    let ran = made.and_then(|_| app.run("timeline.setFrame", json!({"frame": 0})));
+    let ran = fit_timeline(app, frames, fps).and_then(|_| app.run("timeline.setFrame", json!({"frame": 0})));
     match ran {
         Ok(_) => {
             app.ui.timeline.playing = true;
@@ -1374,12 +1388,30 @@ fn animate_rows_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
                 "Make a short animated GIF instead of a still: it becomes a video layer on the Timeline, to play, paint on and export (File > Export > Render Video, GIF). Say in the prompt what moves and that it loops",
             ));
             app.ui.ai_gen.animate = on;
-            // How long the loop plays, at the row's end (the frames row has no room for it).
-            if on {
-                let seconds = f64::from(app.ui.ai_gen.frames()) * f64::from(app.ui.ai_gen.frame_ms()) / 1000.0;
+            // At the row's end (the frames row has no room for them): how long the loop plays, and,
+            // when the selected layer is an animation, Play / Stop and Save GIF for it.
+            let selected = active_animation(app);
+            if on || selected.is_some() {
                 let t = Tokens::get(ui.ctx());
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{} {seconds:.1} s", tr("Time"))).color(t.text_dim)).on_hover_text(tr("How long the loop plays"));
+                    ui.spacing_mut().item_spacing.x = 2.0;
+                    if let Some((frames, fps)) = selected {
+                        // Right to left: Save GIF sits after Play.
+                        #[cfg(not(target_arch = "wasm32"))]
+                        if crate::icons::button(ui, "download", 24.0, false, tr("Save the selected animation as a GIF…")).clicked() {
+                            save_animation(app, frames, fps);
+                        }
+                        let playing = app.ui.timeline.playing;
+                        let (icon, tip) = if playing { ("square", tr("Stop")) } else { ("play", tr("Play the selected animation on the canvas")) };
+                        if crate::icons::button(ui, icon, 24.0, playing, tip).clicked() {
+                            play_animation(app, ui.ctx(), frames, fps, !playing);
+                        }
+                        ui.add_space(4.0);
+                    }
+                    if on {
+                        let seconds = f64::from(app.ui.ai_gen.frames()) * f64::from(app.ui.ai_gen.frame_ms()) / 1000.0;
+                        ui.label(RichText::new(format!("{} {seconds:.1} s", tr("Time"))).color(t.text_dim)).on_hover_text(tr("How long the loop plays"));
+                    }
                 });
             }
         });
@@ -1410,17 +1442,6 @@ fn animate_rows_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
             }
             widgets::dropdown(ui, "ai-gen-frame-ms", tr("Interval"), &mut ms, &options, 76.0);
             app.ui.ai_gen.frame_ms = ms;
-            let _ = &t;
-            // The selected layer is an animation: play it on the canvas.
-            if let Some((frames, fps)) = active_animation(app) {
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let playing = app.ui.timeline.playing;
-                    let (icon, tip) = if playing { ("square", tr("Stop")) } else { ("play", tr("Play the selected animation on the canvas")) };
-                    if crate::icons::button(ui, icon, 24.0, playing, tip).clicked() {
-                        play_animation(app, ui.ctx(), frames, fps, !playing);
-                    }
-                });
-            }
         });
         // The timeline was deleted: the animations stay, but nothing plays them until there is one.
         if app.ui.ai_gen.untimed {

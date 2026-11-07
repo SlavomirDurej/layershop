@@ -3099,3 +3099,34 @@ fn play_shows_the_selected_animation_on_the_canvas() {
     assert_eq!((t.fps, t.duration), (5.0, 30));
     assert!(app.ui.timeline.playing && !untimed(&app));
 }
+
+/// Save GIF beside Play: the selected animation, at its own rate and length, as one GIF where the
+/// person picks, without the Timeline panel; with no timeline (it was deleted) one is made for it.
+#[test]
+fn save_gif_writes_the_selected_animation() {
+    use crate::file_dialog::{FileDialogAnswer, FileDialogRequest};
+    let dir = std::env::temp_dir().join(format!("photocraft-ai-save-gif-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let target = dir.join("lantern.gif").to_string_lossy().replace('\\', "/");
+    let (show, asked) = crate::file_dialog::fake(vec![Some(FileDialogAnswer::SaveTo(target.clone()))]);
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services { file_dialog: Some(show), ..Default::default() });
+    app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+    app.run("timeline.create", json!({"duration": 30, "fps": 30.0})).unwrap();
+    app.run("layer.videoLayers.newBlankVideoLayer", json!({})).unwrap();
+    app.run("layer.videoLayers.interpretFootage", json!({"fps": 5.0})).unwrap();
+    app.run("timeline.delete", json!({})).unwrap();
+    let (frames, fps) = active_animation(&app).unwrap();
+    app.ui.timeline.playing = true;
+    save_animation(&mut app, frames, fps);
+    let t = app.session.active().unwrap().doc.timeline.clone().expect("Save made a timeline");
+    assert_eq!((t.fps, t.duration, t.work_end), (5.0, 30, 30));
+    assert!(!app.ui.timeline.playing, "saving stops playback");
+    let ctx = egui::Context::default();
+    for _ in 0..3 {
+        app.poll_file_dialog(&ctx, None);
+    }
+    assert!(matches!(asked.borrow().as_slice(), [FileDialogRequest::Save { suggested }] if suggested.ends_with(".gif")), "{:?}", asked.borrow());
+    let gif = std::fs::read(&target).unwrap();
+    assert_eq!(&gif[..6], b"GIF89a");
+    let _ = std::fs::remove_dir_all(&dir);
+}
