@@ -363,6 +363,18 @@ fn render_video_to_animated_gif() {
 }
 
 #[test]
+fn render_video_takes_the_files_name() {
+    let mut s = session();
+    s.execute("timeline.create", json!({"duration": 2, "fps": 5})).unwrap();
+    let out = tmpdir("gifnamed");
+    let r = s.execute("file.export.renderVideo", json!({"dir": out, "format": "gif", "name": "fine dog"})).unwrap();
+    assert!(r["file"].as_str().unwrap().ends_with("fine dog.gif"), "{r}");
+    // Its folder and extension are left out: the file stays in `dir`.
+    let r = s.execute("file.export.renderVideo", json!({"dir": out, "format": "gif", "name": "../../up.gif"})).unwrap();
+    assert!(r["file"].as_str().unwrap().ends_with(&format!("{out}/up.gif")), "{r}");
+}
+
+#[test]
 fn animated_gif_keeps_transparency() {
     // #3061: a transparent document rendered as an animated GIF came out opaque black.
     let mut s = Session::new();
@@ -815,6 +827,20 @@ fn restoring_blank_video_frames_still_produces_blank_frames() {
     assert_eq!(layer_px(&s, id)[3], 0.0);
 }
 
+#[test]
+fn each_video_layer_plays_at_its_own_rate() {
+    // A 30 fps timeline; one layer's frames at 10 fps show three timeline frames each.
+    assert_eq!((0..7).map(|f| frame_at(f, 30.0, 10.0)).collect::<Vec<_>>(), [0, 0, 0, 1, 1, 1, 2]);
+    assert_eq!((0..4).map(|f| frame_at(f, 5.0, 12.5)).collect::<Vec<_>>(), [0, 2, 5, 7]);
+    // Same rate, or a rate that isn't one: frame for frame.
+    for (t, l) in [(30.0, 30.0), (0.0, 10.0), (30.0, f32::NAN), (f32::INFINITY, 5.0), (30.0, -1.0)] {
+        assert_eq!(frame_at(9, t, l), 9, "{t} {l}");
+    }
+    assert_eq!(frame_at(usize::MAX, 1.0, 1000.0), usize::MAX);
+    assert_eq!((timeline_frames(16, 30.0, 6.0), timeline_frames(16, 6.0, 6.0), timeline_frames(3, 10.0, 3.0)), (80, 16, 10));
+    assert_eq!(timeline_frames(usize::MAX, 1000.0, 0.001), crate::timeline_cmds::MAX_DURATION);
+}
+
 fn work_area(s: &Session) -> (usize, usize, usize) {
     let t = s.active().unwrap().doc.timeline.as_ref().unwrap();
     (t.work_start, t.work_end, t.duration)
@@ -823,10 +849,11 @@ fn work_area(s: &Session) -> (usize, usize, usize) {
 #[test]
 fn video_edits_keep_a_narrowed_work_area() {
     // #4170: a video edit pushed the work-area end to the full duration.
-    for (cmd, params) in [
-        ("layer.videoLayers.showAlteredVideo", json!({})),
-        ("layer.videoLayers.restoreFrame", json!({})),
-        ("layer.videoLayers.interpretFootage", json!({"fps": 24})),
+    // Footage interpreted at 24 fps lasts 30 / 24 s: 38 frames of the 30 fps timeline.
+    for (cmd, params, duration) in [
+        ("layer.videoLayers.showAlteredVideo", json!({}), 30),
+        ("layer.videoLayers.restoreFrame", json!({}), 30),
+        ("layer.videoLayers.interpretFootage", json!({"fps": 24}), 38),
     ] {
         let mut s = session();
         s.execute("timeline.create", json!({"duration": 30, "fps": 30})).unwrap();
@@ -834,7 +861,7 @@ fn video_edits_keep_a_narrowed_work_area() {
         s.execute("timeline.setProps", json!({"workStart": 2, "workEnd": 10})).unwrap();
         assert_eq!(work_area(&s), (2, 10, 30));
         s.execute(cmd, params).unwrap();
-        assert_eq!(work_area(&s), (2, 10, 30), "{cmd} moved the work area");
+        assert_eq!(work_area(&s), (2, 10, duration), "{cmd} moved the work area");
     }
 }
 

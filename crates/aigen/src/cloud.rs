@@ -65,14 +65,77 @@ pub fn openai_size(model: &Model, width: u32, height: u32) -> (u32, u32) {
     (rw.min(3840), rh.min(3840))
 }
 
+/// The longest edge of the sheet an animated GIF's frames are drawn on (GPT Image 2.6).
+const GIF_SHEET_EDGE: u64 = 3840;
+/// The most pixels that sheet may hold, empty cells included.
+const GIF_SHEET_PIXELS: u64 = 8_294_400;
+
+/// The grid an animation of `frames` frames is drawn in: the next power of two cells, as near
+/// square as it goes (2 frames: 1 × 2, 3–4: 2 × 2, 5–8: 2 × 4, 9–16: 4 × 4). Measured by others
+/// against the API on its launch day (6 frames of 976 × 672 fit only as 2 × 4); OpenAI doesn't
+/// publish it.
+fn gif_grid(frames: u32) -> (u64, u64) {
+    let cells = u64::from(frames.clamp(1, 64)).next_power_of_two();
+    let shorter = 1u64 << (cells.trailing_zeros() / 2);
+    (shorter, cells / shorter)
+}
+
+/// The frames fit the sheet, in one orientation of the grid or the other.
+fn gif_fits(w: u32, h: u32, frames: u32) -> bool {
+    let (a, b) = gif_grid(frames);
+    let (w, h) = (u64::from(w), u64::from(h));
+    let edges = |cols: u64, rows: u64| w * cols <= GIF_SHEET_EDGE && h * rows <= GIF_SHEET_EDGE;
+    w * h * a * b <= GIF_SHEET_PIXELS && (edges(a, b) || edges(b, a))
+}
+
+/// The size of each frame of an animated GIF for a `width` × `height` selection: the largest in
+/// its aspect ratio (up to 3:1), edges in multiples of 16, that leaves the frames' sheet within
+/// the API's limits, and no larger than a still from `model` would be.
+pub fn gif_frame_size(model: &Model, width: u32, height: u32, frames: u32) -> (u32, u32) {
+    let (still_w, still_h) = openai_size(model, width, height);
+    let aspect = f64::from(still_w.max(1)) / f64::from(still_h.max(1));
+    let cells = gif_grid(frames).0 * gif_grid(frames).1;
+    let pixels = (GIF_SHEET_PIXELS / cells.max(1)) as f64;
+    let snap = |v: f64| ((v as u32) / 16 * 16).max(16);
+    let mut h = snap((pixels / aspect).sqrt()).min(still_h.max(16));
+    let mut w = snap(f64::from(h) * aspect).min(still_w.max(16));
+    // Down in steps of 16 until the sheet fits: at most a few hundred steps, and 16 × 16
+    // always fits.
+    while !gif_fits(w, h, frames) && (w > 16 || h > 16) {
+        h = h.saturating_sub(16).max(16);
+        w = snap(f64::from(h) * aspect);
+    }
+    (w, h)
+}
+
+/// The size `job` is rendered at by an OpenAI model: a frame of its animation, or the still.
+pub fn openai_job_size(model: &Model, job: &Job) -> (u32, u32) {
+    match job.animation {
+        Some(animation) => gif_frame_size(model, job.width, job.height, animation.frames),
+        None => openai_size(model, job.width, job.height),
+    }
+}
+
 /// The request that renders `job` with an OpenAI image model.
 pub fn openai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64) -> Result<Request> {
     let id = api_model(model)?;
     let key = key_of(model, key)?;
-    let (w, h) = openai_size(model, job.width, job.height);
+    let (w, h) = openai_job_size(model, job);
     let mut body = json!({"model": id, "prompt": job.prompt, "n": 1, "size": format!("{w}x{h}")});
     if id.starts_with("dall-e") {
         body["response_format"] = json!("b64_json");
+    } else if let Some(animation) = job.animation {
+        // An animated GIF: no compression setting, no streaming.
+        body["output_format"] = json!("gif");
+        body["frame_count"] = json!(animation.frames);
+        body["frame_duration_ms"] = json!(animation.frame_ms);
+        let quality = model.quality.trim();
+        if matches!(quality, "low" | "medium" | "high" | "xhigh" | "max") {
+            body["quality"] = json!(quality);
+        }
+        if job.alpha && model.alpha {
+            body["background"] = json!("transparent");
+        }
     } else {
         body["output_format"] = json!("png");
         let quality = model.quality.trim();
@@ -94,9 +157,20 @@ pub fn openai_edit_request(model: &Model, job: &Job, source: &Source, key: &str,
     if !id.starts_with("gpt-image") {
         return Err(Error::Config(format!("{}: `{id}` can't inpaint; OpenAI's GPT Image models can", model.name)));
     }
-    let size = format!("{}x{}", source.width, source.height);
+    // Animating a picture: the frames take the picture's shape at a size the sheet holds.
+    let (w, h) = match job.animation {
+        Some(animation) => gif_frame_size(model, source.width, source.height, animation.frames),
+        None => (source.width, source.height),
+    };
+    let size = format!("{w}x{h}");
+    let format = if job.animation.is_some() { "gif" } else { "png" };
+    let (frames, frame_ms) = job.animation.map(|a| (a.frames.to_string(), a.frame_ms.to_string())).unwrap_or_default();
     let mut parts =
-        vec![Part::text("model", id), Part::text("prompt", &job.prompt), Part::text("n", "1"), Part::text("size", &size), Part::text("output_format", "png")];
+        vec![Part::text("model", id), Part::text("prompt", &job.prompt), Part::text("n", "1"), Part::text("size", &size), Part::text("output_format", format)];
+    if job.animation.is_some() {
+        parts.push(Part::text("frame_count", &frames));
+        parts.push(Part::text("frame_duration_ms", &frame_ms));
+    }
     // An edit with references sends several pictures: the one to edit first.
     if source.references.is_empty() {
         parts.push(Part::png("image", "image.png", &source.image));
@@ -498,7 +572,7 @@ mod tests {
     use super::*;
 
     fn job(w: u32, h: u32, alpha: bool) -> Job {
-        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha, source: None, loras: Vec::new() }
+        Job { prompt: "a \"red\" frog".into(), width: w, height: h, seed: 1, alpha, source: None, loras: Vec::new(), animation: None }
     }
 
     fn body(r: &Request) -> Value {
@@ -876,5 +950,68 @@ mod tests {
         for junk in [&b""[..], b"null", b"[]", br#"{"status":7}"#, br#"{"detail":"Not authenticated"}"#] {
             assert!(parse_bfl_job(403, junk).is_err());
         }
+    }
+
+    #[test]
+    fn gif_frames_fit_the_sheet() {
+        assert_eq!(gif_grid(2), (1, 2));
+        assert_eq!(gif_grid(4), (2, 2));
+        assert_eq!(gif_grid(6), (2, 4));
+        assert_eq!(gif_grid(9), (4, 4));
+        assert_eq!(gif_grid(16), (4, 4));
+        // What the API did on its launch day: 6 × 1024² too wide, 6 × 976 × 672 fits tall,
+        // 12 × 960² too many pixels, 9 × 720² fine.
+        assert!(!gif_fits(1024, 1024, 6));
+        assert!(gif_fits(976, 672, 6));
+        assert!(!gif_fits(960, 960, 12));
+        assert!(gif_fits(720, 720, 9));
+        let m = Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true);
+        for frames in 2..=16 {
+            for (w, h) in [(1920, 1080), (1080, 1920), (1000, 1000), (6000, 1000), (1, 1), (0, 0), (u32::MAX, 3)] {
+                let (fw, fh) = gif_frame_size(&m, w, h, frames);
+                assert!(fw % 16 == 0 && fh % 16 == 0 && fw >= 16 && fh >= 16, "{frames} {w}x{h} -> {fw}x{fh}");
+                assert!(gif_fits(fw, fh, frames), "{frames} {w}x{h} -> {fw}x{fh}");
+            }
+        }
+        // Wide stays wide, and as large as the sheet allows.
+        let (w, h) = gif_frame_size(&m, 1920, 1080, 9);
+        assert!(w > h && (900..=960).contains(&w), "{w}x{h}");
+        // Two frames have room for more than a still of the model's size: no larger than that.
+        assert_eq!(gif_frame_size(&m, 1000, 1000, 2), openai_size(&m, 1000, 1000));
+    }
+
+    #[test]
+    fn openai_animation_requests() {
+        let m = Model { quality: "medium".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.6 Sunburst", "gpt-image-2.6-sunburst", true) };
+        assert!(m.can_animate());
+        assert!(!Model::cloud(Provider::Openai, "GPT Image 2.5", "gpt-image-2.5-flare", true).can_animate());
+        assert!(!Model { provider: Provider::Gemini, ..m.clone() }.can_animate());
+        let animated = Job { animation: Some(crate::Animation::new(9, 200).unwrap()), ..job(1920, 1080, true) };
+        let b = body(&openai_request(&m, &animated, "k", 60).unwrap());
+        assert_eq!((b["output_format"].as_str(), b["frame_count"].as_u64(), b["frame_duration_ms"].as_u64()), (Some("gif"), Some(9), Some(200)));
+        assert_eq!((b["quality"].as_str(), b["background"].as_str(), b["n"].as_u64()), (Some("medium"), Some("transparent"), Some(1)));
+        let (w, h) = gif_frame_size(&m, 1920, 1080, 9);
+        assert_eq!(b["size"], format!("{w}x{h}"));
+        assert!(b.get("output_compression").is_none() && b.get("stream").is_none());
+        // Animating a picture: the edit endpoint, with the same fields.
+        let source = Source {
+            image: b"PNG".to_vec(),
+            mask: Vec::new(),
+            width: 1536,
+            height: 1024,
+            strength: 1.0,
+            edit: true,
+            references: Vec::new(),
+            shown: Vec::new(),
+        };
+        let r = openai_edit_request(&m, &animated, &source, "k", 60).unwrap();
+        let text = String::from_utf8_lossy(&r.body);
+        let (w, h) = gif_frame_size(&m, 1536, 1024, 9);
+        for field in ["name=\"output_format\"\r\n\r\ngif", "name=\"frame_count\"\r\n\r\n9", "name=\"frame_duration_ms\"\r\n\r\n200", &format!("name=\"size\"\r\n\r\n{w}x{h}")] {
+            assert!(text.contains(field), "{field} in {text}");
+        }
+        // A still sends none of them.
+        let still = String::from_utf8_lossy(&openai_edit_request(&m, &job(1536, 1024, false), &source, "k", 60).unwrap().body).into_owned();
+        assert!(!still.contains("frame_count") && still.contains("png"));
     }
 }

@@ -30,6 +30,42 @@ pub struct Job {
     /// its own speed LoRA ([`Model::lora`]). Local models that [`Model::takes_loras`]; the
     /// others ignore them.
     pub loras: Vec<LoraUse>,
+    /// Ask for an animated GIF instead of a still ([`Model::can_animate`]). `None`: a still.
+    pub animation: Option<Animation>,
+}
+
+/// The fewest and most frames an animated GIF may be asked for (OpenAI's `frame_count`).
+pub const MIN_FRAMES: u32 = 2;
+pub const MAX_FRAMES: u32 = 16;
+/// The shortest and longest time a frame of an animated GIF may show for, in milliseconds
+/// (OpenAI's `frame_duration_ms`, which it rounds to 10).
+pub const MIN_FRAME_MS: u32 = 20;
+pub const MAX_FRAME_MS: u32 = 2000;
+
+/// An animated GIF a generation asks for ([`Job::animation`]): the motion and loop are in the
+/// prompt, these are its timing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Animation {
+    /// How many frames, [`MIN_FRAMES`]..=[`MAX_FRAMES`].
+    pub frames: u32,
+    /// How long each frame shows, in milliseconds: [`MIN_FRAME_MS`]..=[`MAX_FRAME_MS`] in
+    /// steps of 10.
+    pub frame_ms: u32,
+}
+
+impl Animation {
+    /// `frames` frames shown `frame_ms` each, checked against what the API accepts (the time
+    /// rounded to 10 ms, as the API would).
+    pub fn new(frames: u32, frame_ms: u32) -> Result<Animation> {
+        if !(MIN_FRAMES..=MAX_FRAMES).contains(&frames) {
+            return Err(Error::Config(format!("an animation has {MIN_FRAMES} to {MAX_FRAMES} frames, not {frames}")));
+        }
+        if !(MIN_FRAME_MS..=MAX_FRAME_MS).contains(&frame_ms) {
+            return Err(Error::Config(format!("a frame shows for {MIN_FRAME_MS} to {MAX_FRAME_MS} ms, not {frame_ms}")));
+        }
+        let frame_ms = (frame_ms.saturating_add(5) / 10 * 10).clamp(MIN_FRAME_MS, MAX_FRAME_MS);
+        Ok(Animation { frames, frame_ms })
+    }
 }
 
 /// A LoRA a generation is rendered with ([`Job::loras`]).
@@ -105,7 +141,8 @@ pub fn source_size(model: &Model, width: u32, height: u32) -> (u32, u32) {
     }
 }
 
-/// An encoded image (PNG, JPEG or WebP, as the back end returned it).
+/// An encoded image (PNG, JPEG or WebP, as the back end returned it; a GIF when the job
+/// asked for an [`Animation`]).
 #[derive(Clone, Debug, PartialEq)]
 pub struct Generated {
     pub bytes: Vec<u8>,
@@ -158,6 +195,13 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
     if (control.cancelled)() {
         return Err(Error::Cancelled);
     }
+    if let Some(animation) = job.animation {
+        if !model.can_animate() {
+            return Err(Error::Config(format!("{} can't make animations; GPT Image 2.6 can", model.name)));
+        }
+        // Checked again here: a job may be built by hand.
+        Animation::new(animation.frames, animation.frame_ms)?;
+    }
     let timeout = u64::from(settings.timeout_seconds.clamp(10, 3600));
     match model.provider {
         Provider::Comfy => generate_comfy(transport, settings, model, job, control, timeout),
@@ -167,20 +211,39 @@ pub fn generate(transport: &dyn Transport, settings: &Settings, model: &Model, k
             // An edit comes back in the shape of the picture it was given.
             let given = job.source.as_ref().map(|source| (source.width, source.height));
             let (request, size) = match (&job.source, model.provider) {
-                (Some(source), Provider::Openai) => (cloud::openai_edit_request(model, job, source, key, timeout)?, (source.width, source.height)),
-                (None, Provider::Openai) => (cloud::openai_request(model, job, key, timeout)?, cloud::openai_size(model, job.width, job.height)),
+                (Some(source), Provider::Openai) => {
+                    let size = match job.animation {
+                        Some(a) => cloud::gif_frame_size(model, source.width, source.height, a.frames),
+                        None => (source.width, source.height),
+                    };
+                    (cloud::openai_edit_request(model, job, source, key, timeout)?, size)
+                }
+                (None, Provider::Openai) => (cloud::openai_request(model, job, key, timeout)?, cloud::openai_job_size(model, job)),
                 (_, Provider::Xai) => (cloud::xai_request(model, job, key, timeout)?, given.unwrap_or((job.width, job.height))),
                 (_, Provider::Meta) => (cloud::meta_request(model, job, key, timeout)?, given.unwrap_or_else(|| cloud::meta_size(job.width, job.height))),
                 (_, _) => (cloud::gemini_request(model, job, key, timeout)?, given.unwrap_or((job.width, job.height))),
             };
-            (control.progress)(0.1, &format!("Waiting for {who}…"));
+            // A cloud model says nothing until the image is ready: no fraction (0), so the bar
+            // runs indeterminate rather than sitting at a made-up figure.
+            (control.progress)(0.0, &format!("Waiting for {who}…"));
             let response = transport.send(&request).map_err(|e| Error::Network(format!("Could not reach {who}: {e}")))?;
             if (control.cancelled)() {
                 return Err(Error::Cancelled);
             }
             let (bytes, cost) = match model.provider {
                 Provider::Openai => {
-                    let (bytes, usage) = cloud::parse_openai_with_usage(response.status, &response.body)?;
+                    let parsed = cloud::parse_openai_with_usage(response.status, &response.body);
+                    // OpenAI's guide says a picture can be animated through its edit endpoint;
+                    // others found it refused there. Say which part was refused.
+                    let (bytes, usage) = match parsed {
+                        Err(Error::Server(said)) if job.animation.is_some() && job.source.is_some() => {
+                            return Err(Error::Server(format!("{said} (animating a picture may not be offered yet: try from the prompt alone)")));
+                        }
+                        other => other?,
+                    };
+                    if job.animation.is_some() && !bytes.starts_with(b"GIF8") {
+                        return Err(Error::BadResponse(format!("{who} was asked for an animated GIF and returned something else")));
+                    }
                     (bytes, usage.and_then(|u| crate::pricing::billed(&model.api_model, &u)))
                 }
                 // xAI's answer says what it cost.
@@ -210,14 +273,14 @@ fn generate_bfl(transport: &dyn Transport, model: &Model, key: &str, job: &Job, 
     let unreachable = |e: Error| Error::Network(format!("Could not reach {who}: {e}"));
     let request = cloud::bfl_request(model, job, key, timeout)?;
     let (width, height) = job.source.as_ref().map_or((job.width, job.height), |source| (source.width, source.height));
-    (control.progress)(0.05, &format!("Sending to {who}…"));
+    (control.progress)(0.0, &format!("Sending to {who}…"));
     let submitted = transport.send(&request).map_err(unreachable)?;
     let (polling_url, cost) = cloud::parse_bfl_submitted(submitted.status, &submitted.body)?;
     let poll = cloud::bfl_poll_request(&polling_url, key)?;
     let label = if model.name.is_empty() { who } else { model.name.as_str() };
     let polls = (timeout * 1000 / BFL_POLL.as_millis().max(1) as u64).max(1);
     let mut failures = 0u32;
-    for n in 0..polls {
+    for _ in 0..polls {
         if (control.cancelled)() {
             return Err(Error::Cancelled);
         }
@@ -235,8 +298,8 @@ fn generate_bfl(transport: &dyn Transport, model: &Model, key: &str, job: &Job, 
         failures = 0;
         match state {
             cloud::BflJob::Working(status) => {
-                // No step count: creep towards done so the bar moves.
-                (control.progress)(0.1 + 0.85 * (1.0 - 1.0 / (1.0 + n as f32 / 12.0)), &format!("Generating with {label}… ({status})"));
+                // No step count: no fraction, so the bar runs indeterminate with the status.
+                (control.progress)(0.0, &format!("Generating with {label}… ({status})"));
             }
             cloud::BflJob::Ready(sample) => {
                 (control.progress)(0.97, "Downloading the image…");
@@ -540,7 +603,7 @@ mod tests {
     }
 
     fn job() -> Job {
-        Job { prompt: "a frog".into(), width: 500, height: 500, seed: 7, alpha: false, source: None, loras: Vec::new() }
+        Job { prompt: "a frog".into(), width: 500, height: 500, seed: 7, alpha: false, source: None, loras: Vec::new(), animation: None }
     }
 
     const DONE: &str =
@@ -693,7 +756,7 @@ mod tests {
             sleep: &|d| std::thread::sleep(d),
         };
         let settings = Settings { comfy_url: url, timeout_seconds: 600, ..Settings::default() };
-        let job = Job { prompt: "a lighthouse on a cliff at dusk".into(), width: 768, height: 768, seed: random_seed(), alpha: false, source: None, loras: Vec::new() };
+        let job = Job { prompt: "a lighthouse on a cliff at dusk".into(), width: 768, height: 768, seed: random_seed(), alpha: false, source: None, loras: Vec::new(), animation: None };
         let family = if std::env::var("PHOTOCRAFT_LIVE_MODEL").is_ok_and(|m| m == "moss") { Family::MossImage } else { Family::ZImage };
         let g = generate(&crate::UreqTransport::new(), &settings, &family.preset(), "", &job, &c).unwrap();
         println!("{:>6.2} s  done: {} bytes, {}x{}", began.elapsed().as_secs_f64(), g.bytes.len(), g.width, g.height);
@@ -1198,5 +1261,49 @@ mod tests {
             }
         });
         assert!(generate(&gone, &settings(), &m, "k", &job(), &control(&|| false)).unwrap_err().to_string().contains("could not serve"));
+    }
+
+    #[test]
+    fn animations_are_checked_and_rounded() {
+        assert_eq!(Animation::new(9, 200).unwrap(), Animation { frames: 9, frame_ms: 200 });
+        assert_eq!(Animation::new(2, 154).unwrap().frame_ms, 150);
+        assert_eq!(Animation::new(16, 2000).unwrap().frame_ms, 2000);
+        assert_eq!(Animation::new(4, 20).unwrap().frame_ms, 20);
+        for (frames, ms) in [(1, 200), (17, 200), (0, 200), (u32::MAX, 200), (9, 0), (9, 19), (9, 2001), (9, u32::MAX)] {
+            assert!(Animation::new(frames, ms).is_err(), "{frames} {ms}");
+        }
+    }
+
+    /// Enough of a GIF for the check that one came back: its magic bytes.
+    fn tiny_gif() -> Vec<u8> {
+        b"GIF89a-rest-of-it".to_vec()
+    }
+
+    #[test]
+    fn openai_animations_ask_for_a_gif_and_get_one() {
+        let gif = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, tiny_gif());
+        let answer = format!(r#"{{"data":[{{"b64_json":"{gif}"}}]}}"#);
+        let fake = Fake::new(move |r, _| {
+            let b: serde_json::Value = serde_json::from_slice(&r.body).unwrap();
+            assert_eq!((b["output_format"].as_str(), b["frame_count"].as_u64(), b["frame_duration_ms"].as_u64()), (Some("gif"), Some(6), Some(150)));
+            assert!(b.get("output_compression").is_none());
+            ok(&answer)
+        });
+        let m = Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true);
+        let animated = Job { animation: Some(Animation::new(6, 150).unwrap()), width: 1920, height: 1080, ..job() };
+        let g = generate(&fake, &settings(), &m, "k", &animated, &control(&|| false)).unwrap();
+        assert_eq!(g.bytes, tiny_gif());
+        assert_eq!((g.width, g.height), cloud::gif_frame_size(&m, 1920, 1080, 6));
+        // A still where a GIF was asked for is not taken for one.
+        let png = Fake::new(|_, _| ok(r#"{"data":[{"b64_json":"iVBORw0KGgo="}]}"#));
+        assert!(generate(&png, &settings(), &m, "k", &animated, &control(&|| false)).is_err());
+        // A model that can't animate is refused before anything is sent.
+        let never = Fake::new(|r, _| panic!("sent {}", r.url));
+        let still_only = Model::cloud(Provider::Openai, "GPT Image 2.5", "gpt-image-2.5-sunburst", true);
+        assert!(generate(&never, &settings(), &still_only, "k", &animated, &control(&|| false)).unwrap_err().to_string().contains("can't make animations"));
+        assert!(generate(&never, &settings(), &Family::ZImage.preset(), "", &animated, &control(&|| false)).is_err());
+        // A hand-built job with timings out of range is refused too.
+        let bad = Job { animation: Some(Animation { frames: 40, frame_ms: 200 }), ..animated };
+        assert!(generate(&never, &settings(), &m, "k", &bad, &control(&|| false)).is_err());
     }
 }

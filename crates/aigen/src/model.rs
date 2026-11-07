@@ -767,6 +767,11 @@ impl Model {
         }
     }
 
+    /// Can return an animated GIF ([`crate::Job::animation`]): OpenAI's GPT Image 2.6 models.
+    pub fn can_animate(&self) -> bool {
+        self.provider == Provider::Openai && self.api_model.trim().starts_with("gpt-image-2.6")
+    }
+
     /// The layout format the model reads its regions in ([`Family::layout`]); of the cloud
     /// models, Black Forest Labs' FLUX 3 endpoints. `None`: the model is offered no regions.
     pub fn layout(&self) -> Option<crate::layout::LayoutFormat> {
@@ -799,6 +804,8 @@ impl Model {
     /// prefer the look of its pictures.
     pub fn cloud_presets() -> Vec<Model> {
         vec![
+            Model::cloud(Provider::Openai, "GPT Image 2.6 Sunburst", "gpt-image-2.6-sunburst", true),
+            Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true),
             Model::cloud(Provider::Openai, "GPT Image 2.5 Sunburst", "gpt-image-2.5-sunburst", true),
             Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true),
             Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false),
@@ -867,7 +874,10 @@ impl Model {
     /// after the ones it does, among its own kind.
     pub fn rank(&self) -> usize {
         /// Model ids by their beginning: `gemini-3.1-flash-image` is also its `-preview`.
-        const CLOUD: [&str; 12] = [
+        const CLOUD: [&str; 14] = [
+            // Released 2026-11-04, after that board: ahead of 2.5, which it follows.
+            "gpt-image-2.6-sunburst",
+            "gpt-image-2.6-flare",
             "gpt-image-2.5-sunburst",
             "gpt-image-2.5-flare",
             "gpt-image-2",

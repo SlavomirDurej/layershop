@@ -129,10 +129,11 @@ fn run() -> Result<(), String> {
             alpha: false,
             source: Some(Source { image, mask, width, height, strength, edit, references: Vec::new(), shown: Vec::new() }),
             loras: loras.clone(),
+            animation: None,
         }
     } else {
         // A further `alpha` asks for a transparent background (the panel's Alpha Channel box).
-        Job { prompt, width: size(4), height: size(5), seed, alpha: args.get(6).map(String::as_str) == Some("alpha"), source: None, loras: loras.clone() }
+        Job { prompt, width: size(4), height: size(5), seed, alpha: args.get(6).map(String::as_str) == Some("alpha"), source: None, loras: loras.clone(), animation: None }
     };
     let settings = Settings { comfy_url: url, ..Settings::default() };
     let control = Control { cancelled: &|| false, progress: &|f, m| eprintln!("{:>3.0}%  {m}", f * 100.0), sleep: &|d: Duration| std::thread::sleep(d) };

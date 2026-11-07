@@ -48,7 +48,7 @@ fn run() -> Result<(), String> {
                 let transport = UreqTransport::new();
                 loop {
                     let Some(style) = queue.lock().unwrap_or_else(std::sync::PoisonError::into_inner).next() else { break };
-                    let job = Job { prompt: styled(SUBJECT, Some(style)), width: 1024, height: 1024, seed: random_seed(), alpha: false, source: None, loras: Vec::new() };
+                    let job = Job { prompt: styled(SUBJECT, Some(style)), width: 1024, height: 1024, seed: random_seed(), alpha: false, source: None, loras: Vec::new(), animation: None };
                     let control = Control { cancelled: &|| false, progress: &|_, _| {}, sleep: &|d| std::thread::sleep(d) };
                     let started = std::time::Instant::now();
                     let path = out.join(format!("{}.png", style.id));

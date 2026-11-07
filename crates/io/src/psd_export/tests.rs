@@ -842,3 +842,19 @@ fn a_cancelled_save_stops_between_the_bands_of_a_layer() {
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A PSD keeps a video layer's frame on screen and no timeline: the export says so, with what to
+/// do instead.
+#[test]
+fn an_animation_saved_as_psd_is_warned_about() {
+    let mut doc = Document::new("anim", photocraft_geom::Size::new(4, 4), ColorMode::Rgb, SampleType::U8);
+    let fmt = doc.pixel_format();
+    assert_eq!(super::document::video_warning(&doc), None);
+    doc.timeline = Some(photocraft_doc::Timeline::new(30, 30.0));
+    assert!(super::document::video_warning(&doc).unwrap().contains("timeline"));
+    let mut layer = Layer::raster("frames", fmt);
+    layer.video = Some(photocraft_doc::VideoData::new(vec![Surface::new(fmt), Surface::new(fmt)], 5.0));
+    doc.layers.push(layer);
+    let (_, warnings) = export_sized(&doc, u64::MAX);
+    assert!(warnings.iter().any(|w| w.contains("1 video layer is saved as the frame on screen") && w.contains(".pcraft")), "{warnings:?}");
+}

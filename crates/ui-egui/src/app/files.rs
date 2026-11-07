@@ -228,16 +228,20 @@ impl PhotocraftApp {
         let ext = st.path.as_deref().and_then(|p| std::path::Path::new(p).extension()).map(|e| e.to_string_lossy().to_ascii_lowercase());
         // An OpenRaster file only when it holds the whole document (#3806): else PSD is offered.
         let holds_ora = st.path.as_deref().is_some_and(|p| photocraft_engine::file_cmds::holds_at(&st.doc, p));
-        let writable = ext.is_some_and(|e| {
+        let writable = ext.clone().is_some_and(|e| {
             matches!(e.as_str(), photocraft_format::EXTENSION | "psd" | "psb" | "tif" | "tiff")
                 || (e == "ora" && holds_ora)
                 || (flat && photocraft_codecs::from_extension(&e).is_some_and(|f| f.caps().write))
         });
+        // An animation (video layers, a timeline) keeps its frames in our native format only.
+        let animated = st.doc.timeline.is_some() || st.doc.walk().iter().any(|(_, _, l)| l.video.is_some());
+        let writable = writable && (!animated || ext.as_deref() == Some(photocraft_format::EXTENSION));
         let suggested = match &st.path {
             Some(p) if writable => p.clone(),
             p => {
                 let source = p.as_deref().unwrap_or(&st.doc.name);
                 let ext = match photocraft_engine::file_cmds::extension(source).as_deref() {
+                    _ if animated => "pcraft",
                     Some("pdn") => "pcraft",
                     Some("kra" | "krz") => "ora",
                     _ => "psd",

@@ -1741,3 +1741,161 @@ fn an_enhanced_prompt_skips_the_models_own_prompt_writer() {
         assert!(s.execute("ai.generate", json!({"prompt": "sea", "enhanced": bad})).is_err());
     }
 }
+
+/// An OpenAI that answers every request with `gif` (base64 in `data[0].b64_json`), and keeps
+/// the JSON it was sent.
+struct FakeOpenai {
+    answer: Vec<u8>,
+    sent: Mutex<Vec<Value>>,
+}
+
+impl Transport for FakeOpenai {
+    fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+        if let Ok(v) = serde_json::from_slice::<Value>(&r.body) {
+            self.sent.lock().unwrap().push(v);
+        }
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &self.answer);
+        Ok(Response { status: 200, body: json!({"data": [{"b64_json": b64}]}).to_string().into_bytes() })
+    }
+}
+
+/// A 4-frame 8×8 GIF: red, green, blue, white, each shown `delay_cs` hundredths of a second.
+fn four_frame_gif(delay_cs: u16) -> Vec<u8> {
+    let colours = [[255, 0, 0], [0, 255, 0], [0, 0, 255], [255, 255, 255]];
+    let frames: Vec<_> = colours
+        .iter()
+        .map(|c| photocraft_codecs::web::GifFrame { indices: vec![0; 64], palette: vec![*c, [0, 0, 0]], transparent: None, delay_cs })
+        .collect();
+    photocraft_codecs::web::encode_gif_animated(8, 8, &frames, true).unwrap()
+}
+
+fn openai_session(answer: Vec<u8>) -> (Session, Arc<FakeOpenai>) {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 64, "height": 48})).unwrap();
+    let flare = Model { id: "flare".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true) };
+    let still = Model { id: "still".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true) };
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [flare, still]})).unwrap();
+    s.execute("ai.setKey", json!({"provider": "openai", "key": "sk-test"})).unwrap();
+    let fake = Arc::new(FakeOpenai { answer, sent: Mutex::new(Vec::new()) });
+    s.ai.transport = Some(fake.clone());
+    (s, fake)
+}
+
+#[test]
+fn an_animation_becomes_a_video_layer_on_a_new_timeline() {
+    let (mut s, fake) = openai_session(four_frame_gif(15));
+    let before = layer_count(&s);
+    let r = s.execute("ai.generate", json!({"prompt": "a lantern swaying", "model": "flare", "animate": true, "frames": 4, "frameMs": 150})).unwrap();
+    assert_eq!(r["frames"], 4);
+    let sent = fake.sent.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((sent["output_format"].as_str(), sent["frame_count"].as_u64(), sent["frame_duration_ms"].as_u64()), (Some("gif"), Some(4), Some(150)));
+    let t = s.execute("timeline.info", json!({})).unwrap()["timeline"].clone();
+    assert_eq!(t["duration"], 4);
+    assert!((t["fps"].as_f64().unwrap() - 1000.0 / 150.0).abs() < 0.01, "{t}");
+    let d = s.active().unwrap();
+    let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+    let video = layer.video.as_ref().expect("a video layer");
+    assert_eq!(video.frames.len(), 4);
+    assert!(layer.generation.is_some() && layer.name.contains("a lantern swaying"));
+    // Each frame covers the canvas; the playhead shows the first (red), the next is green.
+    assert_eq!(layer.surface().unwrap().content_bounds(), Rect::new(0, 0, 64, 48));
+    let first = px(&mut s, 30, 20);
+    assert!(first[0] > 0.95 && first[1] < 0.05, "{first:?}");
+    s.execute("timeline.nextFrame", json!({})).unwrap();
+    let second = px(&mut s, 30, 20);
+    assert!(second[1] > 0.95 && second[0] < 0.05, "{second:?}");
+    // One undo step takes the layer and the timeline away.
+    s.execute("edit.undo", json!({})).unwrap();
+    assert_eq!(layer_count(&s), before);
+    assert!(s.active().unwrap().doc.timeline.is_none());
+}
+
+#[test]
+fn an_empty_timeline_takes_the_animations_rate_and_length() {
+    // Create Video Timeline's 30 frames at 30 fps, with no video layer yet: a 4-frame
+    // animation at 300 ms plays at its own rate and ends where it ends.
+    let (mut s, _) = openai_session(four_frame_gif(30));
+    s.execute("timeline.create", json!({"duration": 30, "fps": 30.0})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "a flag", "model": "flare", "animate": true, "frames": 4, "frameMs": 300})).unwrap();
+    let t = s.execute("timeline.info", json!({})).unwrap()["timeline"].clone();
+    assert_eq!(t["duration"], 4);
+    assert!((t["fps"].as_f64().unwrap() - 1000.0 / 300.0).abs() < 0.01, "{t}");
+    assert_eq!(r["fps"], r["timelineFps"]);
+}
+
+#[test]
+fn a_timeline_with_video_keeps_its_rate_and_grows() {
+    let (mut s, _) = openai_session(four_frame_gif(20));
+    s.execute("timeline.create", json!({"duration": 2, "fps": 30.0})).unwrap();
+    s.execute("layer.videoLayers.newBlankVideoLayer", json!({})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "a flag", "model": "flare", "animate": true, "frames": 4})).unwrap();
+    let t = s.execute("timeline.info", json!({})).unwrap()["timeline"].clone();
+    // 4 frames at 5 fps last 0.8 s: 24 frames of the 30 fps timeline, each shown for 6 of them.
+    assert_eq!((t["duration"].as_u64(), t["fps"].as_f64()), (Some(24), Some(30.0)));
+    assert_eq!((r["fps"].as_f64(), r["timelineFps"].as_f64()), (Some(5.0), Some(30.0)));
+}
+
+#[test]
+fn animation_params_are_checked() {
+    let (mut s, fake) = openai_session(four_frame_gif(20));
+    for p in [
+        json!({"prompt": "x", "model": "still", "animate": true}),
+        json!({"prompt": "x", "model": "flare", "animate": "yes"}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frames": 1}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frames": 17}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frames": -3}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frames": 2.5}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frameMs": 0}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frameMs": 5000}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "frameMs": "fast"}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "count": 2}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "mode": "inpaint"}),
+        json!({"prompt": "x", "model": "flare", "animate": true, "mode": "img2img"}),
+        json!({"prompt": "x", "model": "flare", "frames": 4}),
+    ] {
+        assert!(s.execute("ai.generate", p.clone()).is_err(), "{p}");
+    }
+    assert!(fake.sent.lock().unwrap().is_empty(), "nothing was sent for a refused request");
+    let listed = s.execute("ai.models", json!({})).unwrap();
+    assert_eq!((listed["models"][0]["animate"].as_bool(), listed["models"][1]["animate"].as_bool()), (Some(true), Some(false)));
+}
+
+#[test]
+fn an_animation_that_is_not_a_gif_is_refused_and_leaves_the_document() {
+    for answer in [b"GIF89a broken".to_vec(), Vec::new(), b"\x89PNG\r\n\x1a\n".to_vec()] {
+        let (mut s, _) = openai_session(answer.clone());
+        let before = layer_count(&s);
+        assert!(s.execute("ai.generate", json!({"prompt": "x", "model": "flare", "animate": true})).is_err(), "{answer:?}");
+        assert_eq!(layer_count(&s), before);
+        assert!(s.active().unwrap().doc.timeline.is_none());
+    }
+}
+
+/// Against OpenAI itself (costs about $0.04): an animation from GPT Image 2.6 Flare onto the
+/// timeline, then rendered back out as a GIF. The key comes from `OPENAI_API_KEY`, the GIF goes
+/// to `PHOTOCRAFT_LIVE_OUT` (a folder):
+/// `cargo test -p photocraft-engine --lib live_openai_animation -- --ignored`.
+#[test]
+#[ignore]
+#[cfg(not(target_arch = "wasm32"))]
+fn live_openai_animation() {
+    let key = std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY");
+    let out = std::env::var("PHOTOCRAFT_LIVE_OUT").expect("PHOTOCRAFT_LIVE_OUT");
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 640, "height": 640})).unwrap();
+    let flare = Model { id: "flare".into(), quality: "low".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true) };
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [flare]})).unwrap();
+    s.execute("ai.setKey", json!({"provider": "openai", "key": key})).unwrap();
+    s.ai.transport = Some(Arc::new(photocraft_aigen::UreqTransport::new()));
+    let r = s
+        .execute(
+            "ai.generate",
+            json!({"prompt": "a red paper lantern swaying gently in the wind at night, seamless loop", "animate": true, "frames": 9, "frameMs": 200}),
+        )
+        .unwrap();
+    eprintln!("{r}");
+    let t = s.execute("timeline.info", json!({})).unwrap();
+    eprintln!("{t}");
+    assert_eq!(t["timeline"]["duration"], r["frames"]);
+    eprintln!("{}", s.execute("file.export.renderVideo", json!({"dir": out, "format": "gif"})).unwrap());
+}

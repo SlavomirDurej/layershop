@@ -41,7 +41,7 @@ pub use enhance::{EnhanceSettings, TextProvider};
 pub use layout::{LayoutFormat, Region, RegionKind, layout_prompt};
 pub use model::{Family, LORA_STRENGTHS, Lora, MAX_LORAS, MAX_REFERENCES, Model, Provider, Settings, preferred_edit};
 pub use style::{STYLES, Style, StyleGroup};
-pub use run::{Control, Generated, Job, LoraUse, Source, comfy_models, generate, random_seed, source_size};
+pub use run::{Animation, Control, Generated, Job, LoraUse, MAX_FRAME_MS, MAX_FRAMES, MIN_FRAME_MS, MIN_FRAMES, Source, comfy_models, generate, random_seed, source_size};
 
 /// Why a generation failed.
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]

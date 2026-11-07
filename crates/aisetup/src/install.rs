@@ -696,6 +696,7 @@ on the processor these models take a very long time per image, if they fit in me
                     alpha: false,
                     source: None,
                     loras: Vec::new(),
+                    animation: None,
                 };
                 let began = Instant::now();
                 match photocraft_aigen::generate(env.transport.as_ref(), &settings, model, "", &job, &control) {

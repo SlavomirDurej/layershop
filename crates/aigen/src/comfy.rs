@@ -264,19 +264,19 @@ pub fn edit_workflow(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value>
 
 /// Can `model` edit a picture? The error says what to fix.
 pub fn check_edit(model: &Model) -> Result<()> {
-    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new() };
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new(), animation: None };
     build_edit(model, &job, &Edit { image: "image", mask: None, shown: None, references: &[] }).map(|_| ())
 }
 
 /// Can `model` run at all (and, with `inpainting`, repaint an image)? The error says what to fix.
 pub fn check(model: &Model, inpainting: bool) -> Result<()> {
-    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new() };
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new(), animation: None };
     build(model, &job, inpainting.then_some(&Inpaint { image: "image", mask: Some("mask"), denoise: 1.0 })).map(|_| ())
 }
 
 /// Can `model` redraw a picture (image to image)? The error says what to fix.
 pub fn check_img2img(model: &Model) -> Result<()> {
-    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new() };
+    let job = Job { prompt: "x".into(), width: 1024, height: 1024, seed: 0, alpha: false, source: None, loras: Vec::new(), animation: None };
     build(model, &job, Some(&Inpaint { image: "image", mask: None, denoise: 0.5 })).map(|_| ())
 }
 
@@ -1031,7 +1031,7 @@ mod tests {
     use crate::model::MOSS_NEGATIVE;
 
     fn job() -> Job {
-        Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false, source: None, loras: Vec::new() }
+        Job { prompt: "a red frog".into(), width: 1024, height: 768, seed: 42, alpha: false, source: None, loras: Vec::new(), animation: None }
     }
 
     fn classes(w: &Value) -> Vec<String> {

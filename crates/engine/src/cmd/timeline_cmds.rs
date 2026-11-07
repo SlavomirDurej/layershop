@@ -71,8 +71,20 @@ pub(crate) fn fps_param(cmd: &str, p: &Value) -> Result<Option<f32>> {
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
-    let duration = duration_param("timeline.create", p)?.unwrap_or(30);
-    let fps = fps_param("timeline.create", p)?.unwrap_or(30.0);
+    let st = s.active().ok_or(EngineError::NoDocument)?;
+    // The document's video layers (one whose timeline was deleted, say): a timeline made for them
+    // runs at the active one's rate (else the first's) and lasts as long as the longest.
+    let videos: Vec<(usize, f32)> = st.doc.walk().iter().filter_map(|(_, _, l)| l.video.as_ref().map(|v| (v.frames.len(), v.fps))).collect();
+    let active_fps = st.active_layer.and_then(|id| st.doc.layer(id)).and_then(|l| l.video.as_ref()).map(|v| v.fps);
+    let usable = |f: &f32| f.is_finite() && *f > 0.0 && *f <= MAX_FPS;
+    let fps = match fps_param("timeline.create", p)? {
+        Some(fps) => fps,
+        None => active_fps.filter(usable).or_else(|| videos.iter().map(|(_, f)| *f).find(usable)).unwrap_or(30.0),
+    };
+    let duration = match duration_param("timeline.create", p)? {
+        Some(d) => d,
+        None => videos.iter().map(|(n, f)| crate::video_cmds::timeline_frames(*n, fps, *f).clamp(1, MAX_DURATION)).max().unwrap_or(30),
+    };
     with_timeline(s, |t| *t = Some(Timeline::new(duration, fps)))
 }
 
@@ -142,7 +154,7 @@ macro_rules! spec {
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec!("timeline.create", "Create Video Timeline", r#"{duration?:30, fps?:30} → {timeline}"#, has_doc, |s, p| create(s, p)),
+        spec!("timeline.create", "Create Video Timeline", r#"{duration?, fps?} → {timeline}: fps defaults to the active video layer's rate (else the first video layer's, else 30), duration to the frames the longest video layer lasts (else 30)"#, has_doc, |s, p| create(s, p)),
         spec!("timeline.delete", "Delete Timeline", "{} → {timeline:null}", has_timeline, |s, _| delete(s)),
         spec!("timeline.setFrame", "Go to Frame", r#"{frame} → {timeline}"#, has_timeline, |s, p| set_frame(s, p)),
         spec!("timeline.nextFrame", "Next Frame", "{} → {timeline}", has_timeline, |s, _| step(s, 1)),
@@ -155,6 +167,28 @@ pub fn specs() -> Vec<CommandSpec> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A timeline made again after it was deleted fits the video layers that are still there.
+    #[test]
+    fn a_new_timeline_fits_the_video_layers() {
+        let mut s = Session::new();
+        s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        s.execute("timeline.create", json!({"duration": 16, "fps": 5.0})).unwrap();
+        s.execute("layer.videoLayers.newBlankVideoLayer", json!({})).unwrap();
+        s.execute("layer.select", json!({"name": "Background"})).ok();
+        s.execute("timeline.delete", json!({})).unwrap();
+        // 16 frames at 5 fps: 3.2 s.
+        let t = s.execute("timeline.create", json!({})).unwrap()["timeline"].clone();
+        assert_eq!((t["fps"].as_f64(), t["duration"].as_u64()), (Some(5.0), Some(16)));
+        // A rate asked for: the duration still covers the layer (3.2 s at 10 fps).
+        let t = s.execute("timeline.create", json!({"fps": 10.0})).unwrap()["timeline"].clone();
+        assert_eq!(t["duration"], 32);
+        // Without video layers: 30 frames at 30 fps, as before.
+        let mut plain = Session::new();
+        plain.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+        let t = plain.execute("timeline.create", json!({})).unwrap()["timeline"].clone();
+        assert_eq!((t["fps"].as_f64(), t["duration"].as_u64()), (Some(30.0), Some(30)));
+    }
 
     #[test]
     fn create_navigate_delete() {

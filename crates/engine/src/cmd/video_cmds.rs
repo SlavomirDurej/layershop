@@ -15,17 +15,58 @@ use crate::{EngineError, Result, Session};
 /// quantised frame and palette while rendering, so the document canvas limit is not enough.
 const MAX_GIF_FRAME_PIXELS: u64 = 64 << 20;
 
-/// Set every video layer's displayed content to its frame at the playhead.
-pub fn sync(doc: &mut Document) {
-    let cur = doc.timeline.as_ref().map_or(0, |t| t.current);
-    sync_layers(&mut doc.layers, cur);
+/// The playhead: the timeline's current frame and its rate (none: frame 0).
+#[derive(Clone, Copy)]
+struct Playhead {
+    current: usize,
+    fps: f32,
 }
 
-fn sync_layers(layers: &mut [Layer], cur: usize) {
+impl Playhead {
+    fn of(doc: &Document) -> Playhead {
+        doc.timeline.as_ref().map_or(Playhead { current: 0, fps: 0.0 }, |t| Playhead { current: t.current, fps: t.fps })
+    }
+
+    /// The frame of a video layer at `fps` that shows at the playhead: the one its time falls
+    /// in, so each layer plays at its own rate whatever the timeline's (as in Photoshop). A layer
+    /// at the timeline's rate, or a rate that isn't one, steps with the playhead frame by frame.
+    fn frame(self, fps: f32) -> usize {
+        frame_at(self.current, self.fps, fps)
+    }
+}
+
+/// [`Playhead::frame`]: timeline frame `current` at `timeline_fps`, as a frame at `layer_fps`.
+pub(crate) fn frame_at(current: usize, timeline_fps: f32, layer_fps: f32) -> usize {
+    let usable = |f: f32| f.is_finite() && f > 0.0;
+    if !usable(timeline_fps) || !usable(layer_fps) || (timeline_fps - layer_fps).abs() < 1e-3 {
+        return current;
+    }
+    // A hair over, so a frame that falls exactly on a boundary isn't lost to rounding.
+    let at = (current as f64) * f64::from(layer_fps) / f64::from(timeline_fps) + 1e-6;
+    if at.is_finite() && at >= 0.0 { at.floor().min(usize::MAX as f64) as usize } else { current }
+}
+
+/// How many frames of a timeline at `timeline_fps` `frames` frames at `layer_fps` last.
+pub(crate) fn timeline_frames(frames: usize, timeline_fps: f32, layer_fps: f32) -> usize {
+    let usable = |f: f32| f.is_finite() && f > 0.0;
+    if !usable(timeline_fps) || !usable(layer_fps) || (timeline_fps - layer_fps).abs() < 1e-3 {
+        return frames;
+    }
+    let n = (frames as f64) * f64::from(timeline_fps) / f64::from(layer_fps) - 1e-6;
+    if n.is_finite() && n > 0.0 { (n.ceil() as usize).clamp(1, crate::timeline_cmds::MAX_DURATION) } else { frames }
+}
+
+/// Set every video layer's displayed content to its frame at the playhead.
+pub fn sync(doc: &mut Document) {
+    let at = Playhead::of(doc);
+    sync_layers(&mut doc.layers, at);
+}
+
+fn sync_layers(layers: &mut [Layer], at: Playhead) {
     for l in layers.iter_mut() {
         let frame = l.video.as_ref().and_then(|v| {
             let visible = if v.show_altered { &v.frames } else { v.original_frames.as_ref().unwrap_or(&v.frames) };
-            visible.get(cur.min(visible.len().saturating_sub(1))).cloned()
+            visible.get(at.frame(v.fps).min(visible.len().saturating_sub(1))).cloned()
         });
         if let Some(f) = frame
             && let LayerContent::Raster(s) = &mut l.content
@@ -33,7 +74,7 @@ fn sync_layers(layers: &mut [Layer], cur: usize) {
             *s = f;
         }
         if let Some(ch) = l.children_mut() {
-            sync_layers(ch, cur);
+            sync_layers(ch, at);
         }
     }
 }
@@ -41,14 +82,14 @@ fn sync_layers(layers: &mut [Layer], cur: usize) {
 /// Keep edits made to every video layer's displayed content (paint, fills, filters) by writing it
 /// back into its frame at the playhead. Call before moving the playhead or re-syncing.
 pub fn store(doc: &mut Document) {
-    let cur = doc.timeline.as_ref().map_or(0, |t| t.current);
-    store_layers(&mut doc.layers, cur);
+    let at = Playhead::of(doc);
+    store_layers(&mut doc.layers, at);
 }
 
-fn store_layers(layers: &mut [Layer], cur: usize) {
+fn store_layers(layers: &mut [Layer], playhead: Playhead) {
     for l in layers.iter_mut() {
         if let (Some(v), LayerContent::Raster(s)) = (&mut l.video, &l.content) {
-            let at = cur.min(v.frames.len().saturating_sub(1));
+            let at = playhead.frame(v.fps).min(v.frames.len().saturating_sub(1));
             // When showing the original, the layer's displayed surface is a preview,
             // not an edit to write over the altered frame (#3060).
             if (v.show_altered || v.original_frames.is_none())
@@ -58,7 +99,7 @@ fn store_layers(layers: &mut [Layer], cur: usize) {
             }
         }
         if let Some(ch) = l.children_mut() {
-            store_layers(ch, cur);
+            store_layers(ch, playhead);
         }
     }
 }
@@ -91,12 +132,13 @@ fn grow_duration(t: &mut Timeline, frames: usize) {
 fn edit_video(s: &mut Session, label: &str, f: impl FnOnce(&mut VideoData, usize) -> Result<()>) -> Result<Value> {
     let count = s.edit(label, |doc, active| {
         store(doc);
-        let cur = doc.timeline.as_ref().map_or(0, |t| t.current);
+        let playhead = Playhead::of(doc);
         let id = active.ok_or(EngineError::NoDocument)?;
         let l = doc.layer_mut(id).ok_or(EngineError::NoLayer(id))?;
         let v = l.video.as_mut().ok_or_else(|| EngineError::BadParams { cmd: label.into(), msg: "the active layer is not a video layer".into() })?;
-        f(v, cur)?;
-        let n = v.frames.len();
+        // The layer's own frame at the playhead (it may run at another rate than the timeline).
+        f(v, playhead.frame(v.fps))?;
+        let n = timeline_frames(v.frames.len(), playhead.fps, v.fps);
         if let Some(t) = &mut doc.timeline {
             grow_duration(t, n);
         }
@@ -464,29 +506,75 @@ fn new_from_file(s: &mut Session, p: &Value) -> Result<Value> {
     let fps = crate::timeline_cmds::fps_param("layer.videoLayers.newVideoLayerFromFile", p)?.or(footage_fps).unwrap_or(30.0);
     let n = frames.len();
     let id = s.edit("New Video Layer from File", |doc, active| {
-        store(doc);
-        if doc.timeline.is_none() {
-            doc.timeline = Some(Timeline::new(n, fps));
-        } else if let Some(t) = &mut doc.timeline {
-            grow_duration(t, n);
-        }
         let name = doc.next_layer_name(std::path::Path::new(&path).file_stem().and_then(|s| s.to_str()).unwrap_or("Video"));
-        let mut l = Layer::raster(name, fmt);
-        let mut v = VideoData::new(frames, fps);
-        v.original_frames = Some(v.frames.clone());
-        v.source = photocraft_doc::VideoSource::File { path: path.clone() };
-        // The first frame is the layer's content before it is placed: an active artboard takes
-        // the layer only when its content is on the board, as `frames_to_layers` does.
-        if let (Some(first), LayerContent::Raster(surf)) = (v.frames.first(), &mut l.content) {
-            *surf = first.clone();
-        }
-        l.video = Some(v);
-        let id = crate::layer_place::insert_new(doc, *active, l, crate::layer_place::Place::AutoEditable);
-        *active = Some(id);
-        sync(doc);
-        Ok(id)
+        let source = photocraft_doc::VideoSource::File { path: path.clone() };
+        Ok(insert_video_layer(doc, active, Layer::raster(name, fmt), frames, fps, source))
     })?;
     Ok(json!({"layer": id.0, "frames": n}))
+}
+
+/// Make `l` a video layer of `frames` at `fps` and place it above `active` (which becomes it):
+/// the timeline is created for it, or grown to hold it, and every video layer shows the frame at
+/// the playhead. For a caller inside [`Session::edit`].
+pub(crate) fn insert_video_layer(
+    doc: &mut Document,
+    active: &mut Option<photocraft_doc::LayerId>,
+    mut l: Layer,
+    frames: Vec<Surface>,
+    fps: f32,
+    source: photocraft_doc::VideoSource,
+) -> photocraft_doc::LayerId {
+    store(doc);
+    let n = frames.len();
+    if doc.timeline.is_none() {
+        doc.timeline = Some(Timeline::new(n, fps));
+    } else if let Some(t) = &mut doc.timeline {
+        // As long as the layer lasts, at the timeline's rate.
+        let needed = timeline_frames(n, t.fps, fps);
+        grow_duration(t, needed);
+    }
+    let mut v = VideoData::new(frames, fps);
+    v.original_frames = Some(v.frames.clone());
+    v.source = source;
+    // The first frame is the layer's content before it is placed: an active artboard takes
+    // the layer only when its content is on the board, as `frames_to_layers` does.
+    if let (Some(first), LayerContent::Raster(surf)) = (v.frames.first(), &mut l.content) {
+        *surf = first.clone();
+    }
+    l.video = Some(v);
+    let id = crate::layer_place::insert_new(doc, *active, l, crate::layer_place::Place::AutoEditable);
+    *active = Some(id);
+    sync(doc);
+    id
+}
+
+/// Is any of `layers` (in groups too) a video layer?
+pub(crate) fn has_video_layers(layers: &[Layer]) -> bool {
+    layers.iter().any(|l| l.video.is_some() || l.children().is_some_and(has_video_layers))
+}
+
+/// Every frame of an animated GIF (a still one: its only frame) as a document, and the frame rate
+/// its delays imply ([`fps_from_delays`]). Refuses more frames than a timeline holds.
+pub(crate) fn gif_frames(name: &str, bytes: &[u8]) -> Result<(Vec<Document>, Option<f32>)> {
+    if photocraft_codecs::detect(bytes) != Some(photocraft_codecs::Format::Gif) {
+        return Err(EngineError::Other(format!("{name} is not a GIF")));
+    }
+    let (mut docs, mut delays) = (Vec::new(), Vec::new());
+    let mut over = false;
+    photocraft_io::import_gif_frames(name, bytes, &mut |doc, delay_ms| {
+        if docs.len() >= crate::timeline_cmds::MAX_DURATION {
+            over = true;
+            return Err(photocraft_io::IoError::Cancelled);
+        }
+        docs.push(doc);
+        delays.push(delay_ms);
+        Ok(())
+    })
+    .map_err(|e| if over { EngineError::Other(format!("{name} has more than {} frames", crate::timeline_cmds::MAX_DURATION)) } else { EngineError::Other(format!("{name}: {e}")) })?;
+    if docs.is_empty() {
+        return Err(EngineError::Other(format!("{name} has no frames")));
+    }
+    Ok((docs, fps_from_delays(&delays)))
 }
 
 fn replace_footage(s: &mut Session, p: &Value) -> Result<Value> {
@@ -614,7 +702,8 @@ pub fn render_video_with(
     // Only the GIF delay reads the rate (frames come from the duration); rates under 1 fps are
     // valid timelines, so only an unusable loaded rate falls back to 30.
     let fps = base.timeline.as_ref().map(|t| t.fps).filter(|f| f.is_finite() && *f > 0.0).unwrap_or(30.0);
-    let stem = safe_stem(&base.name);
+    // The file's name: the one asked for (its folder and extension left out), else the document's.
+    let stem = safe_stem(p.get("name").and_then(Value::as_str).filter(|n| !n.trim().is_empty()).unwrap_or(&base.name));
     let fmt = base.pixel_format();
     let bounds = base.bounds();
     let (w, h) = (bounds.width() as usize, bounds.height() as usize);
@@ -721,7 +810,10 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("layer.videoLayers.interpretFootage", "Interpret Footage…", vl, active_video, |s, p| interpret_footage(s, p)),
         spec!("layer.videoLayers.reloadFrame", "Reload Frame", vl, active_video, |s, p| reload_frame(s, p)),
         spec!("file.import.videoFramesToLayers", "Video Frames to Layers…", &["File", "Import"], has_doc, |s, p| frames_to_layers(s, p)),
-        spec!("file.export.renderVideo", "Render Video…", &["File", "Export"], has_doc, |s, p| render_video(s, p)),
+        CommandSpec {
+            params: r#"{"dir":str,"format":"png|gif|…"="png","name":str?=the document's name} → {file|files,frames}: every frame of the timeline (one frame without one). gif: one looping animated GIF, `name`.gif, each frame shown 1/fps; other formats: one numbered file per frame"#,
+            ..spec!("file.export.renderVideo", "Render Video…", &["File", "Export"], has_doc, |s, p| render_video(s, p))
+        },
     ]
 }
 

@@ -1331,12 +1331,25 @@ fn is_refusal_picture(bytes: &[u8]) -> bool {
 fn fit(bytes: &[u8], fmt: PixelFormat, area: Rect, exact: bool) -> Result<Surface> {
     let src = crate::file_cmds::import("generated image", bytes)
         .map_err(|e| EngineError::Other(format!("the model's answer is not an image PhotoCraft can read ({e})")))?;
+    fit_document(&src, fmt, area, exact)
+}
+
+/// A generated animated GIF fitted to `area` frame by frame, as [`fit`] fits a still, with the
+/// frame rate its delays imply.
+fn fit_frames(bytes: &[u8], fmt: PixelFormat, area: Rect, exact: bool) -> Result<(Vec<Surface>, Option<f32>)> {
+    let (docs, fps) = crate::video_cmds::gif_frames("the generated animation", bytes)?;
+    let frames = docs.iter().map(|doc| fit_document(doc, fmt, area, exact)).collect::<Result<Vec<_>>>()?;
+    Ok((frames, fps))
+}
+
+/// [`fit`], for an image already decoded.
+fn fit_document(src: &Document, fmt: PixelFormat, area: Rect, exact: bool) -> Result<Surface> {
     let (w, h) = (f64::from(src.size.width), f64::from(src.size.height));
     if w < 1.0 || h < 1.0 {
         return Err(EngineError::Other("the model returned an empty image".into()));
     }
     let target = PixelFormat::new(fmt.mode, fmt.sample, true);
-    let mut px = crate::file_cmds::flattened(&src, target);
+    let mut px = crate::file_cmds::flattened(src, target);
     let (aw, ah) = (f64::from(area.width()), f64::from(area.height()));
     let cover = (aw / w).max(ah / h);
     let (sx, sy) = if exact { (aw / w, ah / h) } else { (cover, cover) };
@@ -1482,6 +1495,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let (lora_uses, loras, triggers) = loras_param(cmd, p, &model)?;
     let style = style_param(cmd, p)?;
     let count = count_param(cmd, p)?;
+    let animation = animation_param(cmd, p, &model, kind, count)?;
     let mut resolved = crate::ai_refs::resolve(&prompt, &references.iter().map(|(_, name)| name.as_str()).collect::<Vec<_>>());
     let sent: Vec<&Given> = resolved.sent.iter().filter_map(|i| references.get(*i)).map(|(given, _)| given).collect();
     if sent.len() > model.max_references() {
@@ -1580,7 +1594,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         ),
         None => resolved.prompt,
     };
-    let mut job = Job { prompt: model_prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None, loras: lora_uses };
+    let mut job = Job { prompt: model_prompt.clone(), width: area.width(), height: area.height(), seed, alpha, source: None, loras: lora_uses, animation };
     let name = layer_name(&model, &prompt);
     let model_id = model.id.clone();
     let label = match kind {
@@ -1663,7 +1677,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             // One image, then the next of a batch: each with a seed of its own (a new one each
             // time, unless a seed was asked for or the model has a fixed one). An image that
             // fails after others were made stops the batch, and those made are kept.
-            let mut made: Vec<(Surface, Generated)> = Vec::with_capacity(count);
+            // Each image's frames: one for a still, every frame of an animation with its rate.
+            let mut made: Vec<Made> = Vec::with_capacity(count);
             let mut stopped = None;
             for i in 0..count {
                 if i > 0 && reseed {
@@ -1682,8 +1697,13 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                         ctx.check()?;
                         step(0.98, "Placing the image\u{2026}");
                         // What was given a picture answers in its shape: it goes back where that came from.
-                        let surface = fit(&image.bytes, fmt, area, kind != GenerationMode::Txt2img)?;
-                        made.push((surface, image));
+                        let exact = kind != GenerationMode::Txt2img;
+                        if let Some(animation) = animation {
+                            let (frames, fps) = fit_frames(&image.bytes, fmt, area, exact)?;
+                            made.push((frames, Some(fps.unwrap_or(1000.0 / animation.frame_ms as f32)), image));
+                        } else {
+                            made.push((vec![fit(&image.bytes, fmt, area, exact)?], None, image));
+                        }
                     }
                     Err(e) if !made.is_empty() && !ctx.cancelled() => {
                         stopped = Some(e.to_string());
@@ -1694,13 +1714,15 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             }
             Ok((made, stopped))
         },
-        move |s, (made, stopped): (Vec<(Surface, Generated)>, Option<String>)| {
+        move |s, (made, stopped): (Vec<Made>, Option<String>)| {
             let mut render = (0, 0);
+            let mut frames_made = 0;
+            let (mut timeline_fps, mut animation_fps) = (None, None);
             let (layers, seeds, costs) = s.edit(label, |doc, active| {
                 let (mut layers, mut seeds, mut costs) = (Vec::new(), Vec::new(), Vec::new());
-                for (surface, image) in made {
-                    let mut l = Layer::raster(name.clone(), surface.format());
-                    *crate::pixels_mut(&mut l)? = surface;
+                for (mut frames, fps, image) in made {
+                    let Some(first) = frames.first() else { continue };
+                    let mut l = Layer::raster(name.clone(), first.format());
                     // The seed the image was rendered with (a random one is only known now).
                     let mut kept = generation.clone();
                     kept.seed = image.seed;
@@ -1710,8 +1732,28 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                     if masked && let Some(sel) = &selection {
                         l.mask = Some(LayerMask { surface: sel.clone(), ..LayerMask::reveal_all() });
                     }
-                    let id = doc.insert_above(*active, l);
-                    *active = Some(id);
+                    let id = match fps {
+                        // An animation: a video layer, on the timeline (made for it if there is none).
+                        Some(fps) => {
+                            frames_made = frames.len();
+                            // A timeline without video layers (Create Video Timeline's 30 frames
+                            // at 30 fps) is made again for the animation: its rate and length.
+                            // One with others keeps its rate; the layer plays at its own.
+                            if !crate::video_cmds::has_video_layers(&doc.layers) {
+                                doc.timeline = None;
+                            }
+                            let id = crate::video_cmds::insert_video_layer(doc, active, l, frames, fps, photocraft_doc::VideoSource::Blank);
+                            timeline_fps = doc.timeline.as_ref().map(|t| t.fps);
+                            animation_fps = Some(fps);
+                            id
+                        }
+                        None => {
+                            *crate::pixels_mut(&mut l)? = frames.swap_remove(0);
+                            let id = doc.insert_above(*active, l);
+                            *active = Some(id);
+                            id
+                        }
+                    };
                     layers.push(id.0);
                     seeds.push(image.seed);
                     costs.push(image.cost);
@@ -1736,10 +1778,20 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 "cost": cost,
                 // Why a batch ended before all its images were made (those made were kept).
                 "stopped": stopped,
+                // An animation: the frames of its video layer (0 for a still), the rate it was
+                // made for, and the rate the timeline plays at (another while it has other video
+                // layers).
+                "frames": frames_made,
+                "fps": animation_fps,
+                "timelineFps": timeline_fps,
             }))
         },
     )
 }
+
+/// One image of a generation, fitted: its frames (one for a still; for an animation, each frame
+/// and the frame rate) and what the model answered.
+type Made = (Vec<Surface>, Option<f32>, Generated);
 
 /// The most images one `ai.generate` makes (its `count`, the panel's batch menu).
 pub const MAX_BATCH: usize = 10;
@@ -1754,6 +1806,42 @@ fn count_param(cmd: &str, p: &Value) -> Result<usize> {
             .map(|n| n as usize)
             .ok_or_else(|| bad(cmd, format!("`count` must be a whole number from 1 to {MAX_BATCH}"))),
     }
+}
+
+/// `ai.generate`'s `animate`, `frames` and `frameMs`: an animated GIF of `frames` frames (9 when
+/// not given) shown `frameMs` each (200), from a model that makes them, one at a time, from a
+/// prompt or of a picture (an edit). `None` without `animate`.
+fn animation_param(cmd: &str, p: &Value, model: &Model, kind: GenerationMode, count: usize) -> Result<Option<photocraft_aigen::Animation>> {
+    match p.get("animate") {
+        None | Some(Value::Null) | Some(Value::Bool(false)) => {
+            if p.get("frames").is_some() || p.get("frameMs").is_some() {
+                return Err(bad(cmd, "`frames` and `frameMs` go with `\"animate\": true`"));
+            }
+            return Ok(None);
+        }
+        Some(Value::Bool(true)) => {}
+        Some(_) => return Err(bad(cmd, "`animate` must be true or false")),
+    }
+    if !model.can_animate() {
+        return Err(EngineError::Other(format!("{} can't make animations: choose GPT Image 2.6 Sunburst or Flare", model.name)));
+    }
+    if !matches!(kind, GenerationMode::Txt2img | GenerationMode::ImgEdit) {
+        return Err(bad(cmd, "an animation is made from a prompt (`txt2img`) or of a picture (`imgEdit`)"));
+    }
+    if count != 1 {
+        return Err(bad(cmd, "an animation is made one at a time (`count` 1)"));
+    }
+    let whole = |key: &str, default: u32, min: u32, max: u32| match p.get(key) {
+        None | Some(Value::Null) => Ok(default),
+        Some(v) => v
+            .as_u64()
+            .filter(|n| (u64::from(min)..=u64::from(max)).contains(n))
+            .map(|n| n as u32)
+            .ok_or_else(|| bad(cmd, format!("`{key}` must be a whole number from {min} to {max}"))),
+    };
+    let frames = whole("frames", 9, photocraft_aigen::MIN_FRAMES, photocraft_aigen::MAX_FRAMES)?;
+    let frame_ms = whole("frameMs", 200, photocraft_aigen::MIN_FRAME_MS, photocraft_aigen::MAX_FRAME_MS)?;
+    photocraft_aigen::Animation::new(frames, frame_ms).map(Some).map_err(|e| bad(cmd, e.to_string()))
 }
 
 /// `ai.generate`'s `style`: a preset of `photocraft_aigen::STYLES`, by id (empty or null: none).
@@ -1840,7 +1928,7 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
             json!({
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
                 "listed": listed.contains(&m.id.as_str()),
-                "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "references": m.max_references(),
+                "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "animate": m.can_animate(), "references": m.max_references(),
                 "regions": m.layout().map(|f| f.key()),
                 "loras": if m.takes_loras() {
                     json!(m.loras.iter().map(|l| json!({"file": l.file, "name": l.label(), "strength": l.strength, "trigger": l.trigger})).collect::<Vec<_>>())
@@ -2003,7 +2091,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"style":id?=none (a style preset of ai.styles: its sentence is added after the prompt, and the layer keeps its id),"enhanced":bool=false (the prompt is one ai.enhancePrompt wrote: a model with a prompt writer of its own, such as HiDream O1, leaves it as it is),"count":1..10=1 (how many images to make, one layer each, in one undo step; each gets a new random seed unless "seed" is given or the model has a fixed one, when they all render alike; an image that fails after others were made ends the batch and keeps those),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-10..10?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt)} → {layer (the last made, on top),layers:[id,…] (bottom to top),bounds,model,mode,seed (the last image's),seeds:[…],renderSize,modelPrompt (the prompt the model was given, mentions, layout and style written out),cost (USD billed for all the images, when the provider reports or publishes it; else null),stopped (why a batch ended early; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}]),style (when it had one)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: up to 3 more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; fewer for some models, see ai.models),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"style":id?=none (a style preset of ai.styles: its sentence is added after the prompt, and the layer keeps its id),"enhanced":bool=false (the prompt is one ai.enhancePrompt wrote: a model with a prompt writer of its own, such as HiDream O1, leaves it as it is),"count":1..10=1 (how many images to make, one layer each, in one undo step; each gets a new random seed unless "seed" is given or the model has a fixed one, when they all render alike; an image that fails after others were made ends the batch and keeps those),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-10..10?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt),"animate":bool=false (an animated GIF instead of a still, from a model that makes them, see ai.models' animate: GPT Image 2.6; txt2img, or imgEdit to animate a picture; count 1. It becomes a video layer on the timeline: one without other video layers is made for it (its frames, 1000/frameMs fps), one with others keeps its rate and is grown to hold it (each video layer plays at its own rate); describe the motion and the loop in the prompt),"frames":2..16=9 (animate: how many frames),"frameMs":20..2000=200 (animate: how long each shows, rounded to 10; the timeline plays it at 1000/frameMs fps)} → {layer (the last made, on top),layers:[id,…] (bottom to top),bounds,model,mode,seed (the last image's),seeds:[…],renderSize,modelPrompt (the prompt the model was given, mentions, layout and style written out),cost (USD billed for all the images, when the provider reports or publishes it; else null),stopped (why a batch ended early; else null),frames (animate: the frames of the video layer; else 0),fps (animate: the rate it was made for, 1000/frameMs; else null),timelineFps (animate: the timeline's rate: the animation's, unless the timeline has other video layers, whose rate it keeps; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}]),style (when it had one)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,

@@ -285,7 +285,8 @@ impl Transport for DemoText {
 /// Prompt enhancement: `enhance` is the AI Gen panel while its prompt is enhanced (the veil, what
 /// it waits for, Cancel), `enhanced` once it has been (the line that offers the prompt typed),
 /// and `enhance-prefs` Preferences › Generative AI › Prompt Enhancement (`enhance-settings` on its
-/// Settings tab, `enhance-local` on Local Models). An OpenAI image model
+/// Settings tab, `enhance-local` on Local Models), and `animate` the panel with Animate (GIF)
+/// ticked. An OpenAI image model
 /// and key make the panel ready to generate.
 fn enhancement(app: &mut PhotocraftApp, page: &str) -> bool {
     let slow = page == "enhance";
@@ -300,6 +301,13 @@ fn enhancement(app: &mut PhotocraftApp, page: &str) -> bool {
     // The panel as someone using it has it: its dock group dragged taller.
     app.ui.dock.heights.insert(crate::dock::Group::Properties, 430.0);
     app.ui.ai_gen.prompt = "a cat on a sofa".into();
+    // `animate`: GPT Image 2.6 (the first OpenAI preset) with Animate (GIF) ticked.
+    if page == "animate" {
+        app.ui.ai_gen.prompt = "a red paper lantern swaying in the wind at night, seamless loop".into();
+        app.ui.ai_gen.animate = true;
+        app.ui.ai_gen.advanced = true;
+        return true;
+    }
     if let Some(tab) = page.strip_prefix("enhance-").filter(|t| matches!(*t, "prefs" | "settings" | "local")) {
         let id = crate::ai_gen_ui::open_prompt_enhancement(app);
         if let Some(d) = app.ui.dialog_mut(id) {
@@ -609,7 +617,7 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
     }
     // The AI Gen panel on a PC with nothing set up: no API key, local AI not installed, and no
     // ComfyUI answering. What it offers is the setup, and a key.
-    if matches!(page, "enhance" | "enhanced" | "enhance-prefs" | "enhance-settings" | "enhance-local") {
+    if matches!(page, "enhance" | "enhanced" | "enhance-prefs" | "enhance-settings" | "enhance-local" | "animate") {
         return enhancement(app, page);
     }
     if page == "aigen-empty" {

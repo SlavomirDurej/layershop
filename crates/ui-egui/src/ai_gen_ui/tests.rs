@@ -2959,3 +2959,105 @@ fn local_models_are_chosen_in_their_tab_need_no_key_and_install_with_the_setup()
     f.insert("__aiEnhanceTab".into(), json!("cloud"));
     draw_page(&mut f, "enhance");
 }
+/// An OpenAI that answers with a 3-frame 4 × 4 GIF and keeps what it was asked.
+struct GifOpenai(Mutex<Vec<Value>>);
+
+impl Transport for GifOpenai {
+    fn send(&self, r: &Request) -> photocraft_aigen::Result<Response> {
+        self.0.lock().unwrap().push(serde_json::from_slice(&r.body).unwrap_or(Value::Null));
+        let frame = |c: [u8; 3]| photocraft_codecs::web::GifFrame { indices: vec![0; 16], palette: vec![c], transparent: None, delay_cs: 20 };
+        let gif = photocraft_codecs::web::encode_gif_animated(4, 4, &[frame([255, 0, 0]), frame([0, 255, 0]), frame([0, 0, 255])], true).unwrap();
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, gif);
+        Ok(Response { status: 200, body: json!({"data": [{"b64_json": b64}]}).to_string().into_bytes() })
+    }
+}
+
+#[test]
+fn animate_makes_a_gif_on_the_timeline_with_a_model_that_can() {
+    let mut app = app();
+    let sent = Arc::new(GifOpenai(Mutex::new(Vec::new())));
+    app.session.ai.transport = Some(sent.clone());
+    app.run("ai.setKey", json!({"provider": "openai", "key": "sk-test"})).unwrap();
+    let flare = Model { id: "flare".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true) };
+    let still = Model { id: "still".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true) };
+    add_model(&mut app, flare.clone());
+    add_model(&mut app, still.clone());
+    app.run("file.new", json!({"width": 64, "height": 64})).unwrap();
+    app.ui.ai_gen.prompt = "a lantern swaying".into();
+    // Offered for a new picture and an edit with a model that animates; never for the others.
+    assert!(animates(&flare, GenerationMode::Txt2img) && animates(&flare, GenerationMode::ImgEdit));
+    assert!(!animates(&flare, GenerationMode::Inpaint) && !animates(&still, GenerationMode::Txt2img));
+    // Settings say so under Used for, from the model ID: there is nothing to tick.
+    assert_eq!(uses(&flare), ["Text to image", "Editing", "Animation"]);
+    assert_eq!(uses(&still), ["Text to image", "Editing"]);
+    // Advanced has its rows (the box; ticked, the frames row too), part of the panel's height.
+    app.ui.ai_gen.advanced = true;
+    app.ui.ai_gen.model = "still".into();
+    let without = wanted_height(&app);
+    app.ui.ai_gen.model = "flare".into();
+    let boxed = wanted_height(&app);
+    assert!(boxed > without);
+    app.ui.ai_gen.animate = true;
+    assert!(wanted_height(&app) > boxed);
+    app.ui.ai_gen.advanced = false;
+    assert_eq!(wanted_height(&app), {
+        app.ui.ai_gen.model = "still".into();
+        let h = wanted_height(&app);
+        app.ui.ai_gen.model = "flare".into();
+        h
+    });
+    // Ticked, with times the dropdowns don't list (set through the control channel), clamped.
+    app.ui.ai_gen.animate = true;
+    app.ui.ai_gen.frames = 3;
+    app.ui.ai_gen.frame_ms = 99_999;
+    app.ui.ai_gen.batch = 4;
+    draw_panel(&mut app);
+    generate(&mut app).unwrap();
+    let asked = sent.0.lock().unwrap().last().cloned().unwrap();
+    assert_eq!((asked["output_format"].as_str(), asked["frame_count"].as_u64(), asked["frame_duration_ms"].as_u64()), (Some("gif"), Some(3), Some(2000)));
+    let t = app.session.active().unwrap().doc.timeline.clone().expect("a timeline");
+    assert_eq!((t.duration, t.current), (3, 0));
+    assert!(app.ui.timeline.open && !app.ui.timeline.playing);
+    // Unticked, the same model makes a still again (and the batch applies).
+    app.ui.ai_gen.animate = false;
+    app.ui.ai_gen.batch = 1;
+    generate(&mut app).unwrap_or_else(|e| panic!("{e}"));
+    assert_ne!(sent.0.lock().unwrap().last().unwrap()["output_format"], "gif");
+}
+
+/// Play beside Frames and Interval: shown for a selected video layer; the timeline takes its
+/// rate and length and plays it from the first frame, also with the Timeline panel closed.
+#[test]
+fn play_shows_the_selected_animation_on_the_canvas() {
+    let mut app = app();
+    app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+    assert_eq!(active_animation(&app), None, "a pixel layer is no animation");
+    app.run("timeline.create", json!({"duration": 30, "fps": 30.0})).unwrap();
+    app.run("layer.videoLayers.newBlankVideoLayer", json!({})).unwrap();
+    app.run("layer.videoLayers.interpretFootage", json!({"fps": 5.0})).unwrap();
+    let (frames, fps) = active_animation(&app).unwrap();
+    assert_eq!((frames, fps), (30, 5.0));
+    let ctx = egui::Context::default();
+    play_animation(&mut app, &ctx, frames, fps, true);
+    let t = app.session.active().unwrap().doc.timeline.clone().unwrap();
+    assert_eq!((t.fps, t.duration, t.current, t.work_end), (5.0, 30, 0, 30));
+    assert!(app.ui.timeline.playing && !app.ui.timeline.open);
+    // The playhead moves on with the panel closed.
+    app.ui.timeline.last_time = -1.0;
+    crate::timeline_ui::windows(&mut app, &ctx);
+    assert_eq!(app.session.active().unwrap().doc.timeline.as_ref().unwrap().current, 1);
+    play_animation(&mut app, &ctx, frames, fps, false);
+    assert!(!app.ui.timeline.playing);
+    // The timeline deleted (the Timeline panel's bin): Advanced says so, and Play makes a new one.
+    app.run("timeline.delete", json!({})).unwrap();
+    assert!(untimed(&app));
+    app.ui.ai_gen.animate = true;
+    app.ui.ai_gen.untimed = true;
+    let flare = Model { id: "flare".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.6 Flare", "gpt-image-2.6-flare", true) };
+    let ai = &app.ui.ai_gen;
+    assert_eq!(animate_rows(ai, Some(&flare), GenerationMode::Txt2img), 3, "the box, Frames and the note");
+    play_animation(&mut app, &ctx, frames, fps, true);
+    let t = app.session.active().unwrap().doc.timeline.clone().expect("Play made a timeline");
+    assert_eq!((t.fps, t.duration), (5.0, 30));
+    assert!(app.ui.timeline.playing && !untimed(&app));
+}

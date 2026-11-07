@@ -233,6 +233,15 @@ pub struct AiGenUi {
     style_tab: usize,
     /// How many images Generate makes, 1 to [`photocraft_engine::ai_cmds::MAX_BATCH`].
     pub batch: u32,
+    /// Animate (GIF): make an animated GIF, on the timeline, with a model that can
+    /// ([`Model::can_animate`]); its frames and how long each shows.
+    pub animate: bool,
+    pub frames: u32,
+    pub frame_ms: u32,
+    /// The selected layer is an animation and the document has no timeline (it was deleted):
+    /// Advanced says so under Frames. Set as the panel is drawn.
+    #[serde(skip)]
+    untimed: bool,
 }
 
 impl Default for AiGenUi {
@@ -274,6 +283,10 @@ impl Default for AiGenUi {
             enhanced_style: String::new(),
             style_tab: 0,
             batch: 1,
+            animate: false,
+            frames: 9,
+            frame_ms: 200,
+            untimed: false,
         }
     }
 }
@@ -310,10 +323,31 @@ impl AiGenUi {
         self.seed.map(|s| s & SEED_MASK)
     }
 
+    /// An animation is asked for: Animate (GIF) is ticked, the model can make one, and the task
+    /// is a new picture or an edit.
+    fn animating(&self, model: &Model, kind: GenerationMode) -> bool {
+        self.animate && animates(model, kind)
+    }
+
+    /// The animation's frames and frame time, within what `ai.generate` takes.
+    fn frames(&self) -> u32 {
+        self.frames.clamp(photocraft_aigen::MIN_FRAMES, photocraft_aigen::MAX_FRAMES)
+    }
+
+    fn frame_ms(&self) -> u32 {
+        self.frame_ms.clamp(photocraft_aigen::MIN_FRAME_MS, photocraft_aigen::MAX_FRAME_MS)
+    }
+
     /// How many images to make, within what `ai.generate` takes.
     fn batch(&self) -> u32 {
         self.batch.clamp(1, photocraft_engine::ai_cmds::MAX_BATCH as u32)
     }
+}
+
+/// `model` offers Animate (GIF) for a generation of `kind`: a new picture, or an edit (which
+/// animates the picture).
+fn animates(model: &Model, kind: GenerationMode) -> bool {
+    model.can_animate() && matches!(kind, GenerationMode::Txt2img | GenerationMode::ImgEdit)
 }
 
 /// The seeds `ai.generate` renders with: 48 bits.
@@ -913,7 +947,12 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
     if let Some(style) = styles::param(app) {
         params["style"] = json!(style);
     }
-    if ui.batch() > 1 {
+    // An animation is made one at a time: the batch menu is off for it.
+    if ui.animating(&model, kind) {
+        params["animate"] = json!(true);
+        params["frames"] = json!(ui.frames());
+        params["frameMs"] = json!(ui.frame_ms());
+    } else if ui.batch() > 1 {
         params["count"] = json!(ui.batch());
     }
     // The prompt is the one Enhance wrote (typing in it makes it the user's again): the model's
@@ -933,6 +972,14 @@ pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
 pub fn finished(app: &mut PhotocraftApp, result: &Value) {
     app.ui.ai_gen.last_cost = result.get("cost").and_then(Value::as_f64).filter(|c| c.is_finite() && *c >= 0.0);
     app.ui.ai_gen.last_seed = result.get("seed").and_then(Value::as_u64).map(|s| s & SEED_MASK);
+    // An animation is on the timeline: show it there, from its first frame.
+    if result.get("frames").and_then(Value::as_u64).is_some_and(|n| n > 0) {
+        app.ui.timeline.open = true;
+        app.ui.timeline.playing = false;
+        if let Err(e) = app.run("timeline.setFrame", json!({"frame": 0})) {
+            crate::notices::error(app, format!("{}: {e}", tr("Timeline")));
+        }
+    }
     // A batch that ended early kept the images it made: say why the rest are missing.
     if let Some(why) = result.get("stopped").and_then(Value::as_str) {
         let made = result.get("layers").and_then(Value::as_array).map_or(0, Vec::len);
@@ -1096,6 +1143,12 @@ fn advanced_rows(model: Option<&Model>, kind: GenerationMode) -> usize {
     }
 }
 
+/// The rows Advanced gives Animate (GIF), for a model that makes animations: its box, and while
+/// it is ticked the frames, interval and time.
+fn animate_rows(ui: &AiGenUi, model: Option<&Model>, kind: GenerationMode) -> usize {
+    if model.is_some_and(|m| animates(m, kind)) { 1 + usize::from(ui.animate) * (1 + usize::from(ui.untimed)) } else { 0 }
+}
+
 /// The rows above the prompt that depend on the task: Edit's tasks, the picture to change or
 /// redraw, and the pictures an instruction may refer to (with a row to add one).
 fn rows_above(ui: &AiGenUi, kind: GenerationMode, references: usize) -> usize {
@@ -1110,7 +1163,7 @@ fn rows_above(ui: &AiGenUi, kind: GenerationMode, references: usize) -> usize {
 /// The rows between the prompt and Generate: the mask tools of a change, the Advanced heading
 /// and, open, its rows.
 fn rows_below(ui: &AiGenUi, model: Option<&Model>, kind: GenerationMode) -> usize {
-    usize::from(ui.changing()) + 1 + if ui.advanced { advanced_rows(model, kind) + loras::rows(ui, model) } else { 0 }
+    usize::from(ui.changing()) + 1 + if ui.advanced { advanced_rows(model, kind) + animate_rows(ui, model, kind) + loras::rows(ui, model) } else { 0 }
 }
 
 /// The height the panel's content wants in the dock (`panel_docking`'s `dock_heights`): the
@@ -1267,6 +1320,120 @@ fn alpha_box(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model) {
         } else {
             resp.on_disabled_hover_text(tr("This model can't generate a transparent background"));
         }
+    });
+}
+
+/// The selected layer is an animation, and nothing plays it: the document has no timeline.
+fn untimed(app: &PhotocraftApp) -> bool {
+    active_animation(app).is_some() && app.session.active().is_some_and(|d| d.doc.timeline.is_none())
+}
+
+/// The active layer's frames and rate, when it is a video layer (an animation).
+fn active_animation(app: &PhotocraftApp) -> Option<(usize, f32)> {
+    let d = app.session.active()?;
+    let v = d.doc.layer(d.active_layer?)?.video.as_ref()?;
+    Some((v.frames.len(), v.fps)).filter(|(n, fps)| *n > 1 && fps.is_finite() && *fps > 0.0)
+}
+
+/// Play: the timeline takes the animation's rate and length (what plays is what Export GIF
+/// writes) and plays from its first frame, looping; the other video layers play at their own
+/// rates. Stop stops at the frame shown.
+fn play_animation(app: &mut PhotocraftApp, ctx: &egui::Context, frames: usize, fps: f32, play: bool) {
+    if !play {
+        app.ui.timeline.playing = false;
+        return;
+    }
+    // No timeline (it was deleted): one is made for the animation.
+    let made = if app.session.active().is_some_and(|d| d.doc.timeline.is_some()) {
+        app.run("timeline.setProps", json!({"fps": fps, "duration": frames, "workStart": 0, "workEnd": frames}))
+    } else {
+        app.run("timeline.create", json!({"fps": fps, "duration": frames}))
+    };
+    let ran = made.and_then(|_| app.run("timeline.setFrame", json!({"frame": 0})));
+    match ran {
+        Ok(_) => {
+            app.ui.timeline.playing = true;
+            app.ui.timeline.last_time = ctx.input(|i| i.time);
+        }
+        Err(e) => crate::notices::error(app, format!("{}: {e}", tr("Play"))),
+    }
+}
+
+/// The frame counts and frame times Animate (GIF) offers.
+const ANIMATION_FRAMES: [(u32, &str); 7] = [(2, "2"), (4, "4"), (6, "6"), (8, "8"), (9, "9"), (12, "12"), (16, "16")];
+const ANIMATION_FRAME_MS: [(u32, &str); 7] =
+    [(50, "50 ms"), (80, "80 ms"), (100, "100 ms"), (150, "150 ms"), (200, "200 ms"), (300, "300 ms"), (500, "500 ms")];
+
+/// Animate (GIF) in Advanced: the box, and while it is ticked a row with how many frames, how
+/// long each shows (the interval) and how long the loop plays.
+fn animate_rows_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
+    ui.add_enabled_ui(enabled, |ui| {
+        ui.horizontal(|ui| {
+            let mut on = app.ui.ai_gen.animate;
+            widgets::checkbox(ui, &mut on, tr("Animate (GIF)")).on_hover_text(tr(
+                "Make a short animated GIF instead of a still: it becomes a video layer on the Timeline, to play, paint on and export (File > Export > Render Video, GIF). Say in the prompt what moves and that it loops",
+            ));
+            app.ui.ai_gen.animate = on;
+            // How long the loop plays, at the row's end (the frames row has no room for it).
+            if on {
+                let seconds = f64::from(app.ui.ai_gen.frames()) * f64::from(app.ui.ai_gen.frame_ms()) / 1000.0;
+                let t = Tokens::get(ui.ctx());
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.label(RichText::new(format!("{} {seconds:.1} s", tr("Time"))).color(t.text_dim)).on_hover_text(tr("How long the loop plays"));
+                });
+            }
+        });
+        ui.add_space(6.0);
+        if !app.ui.ai_gen.animate {
+            return;
+        }
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            let t = Tokens::get(ui.ctx());
+            edit_label(ui, tr("Frames"));
+            let mut frames = app.ui.ai_gen.frames();
+            // A count or time set elsewhere (the control channel) is offered as it is.
+            let custom_frames = frames.to_string();
+            let mut frame_options: Vec<(u32, &str)> = ANIMATION_FRAMES.to_vec();
+            if !frame_options.iter().any(|(v, _)| *v == frames) {
+                frame_options.push((frames, custom_frames.as_str()));
+            }
+            widgets::dropdown(ui, "ai-gen-frames", tr("Frames"), &mut frames, &frame_options, 48.0);
+            app.ui.ai_gen.frames = frames;
+            ui.add_space(8.0);
+            ui.label(RichText::new(tr("Interval")).color(t.text_dim)).on_hover_text(tr("How long each frame shows"));
+            let mut ms = app.ui.ai_gen.frame_ms();
+            let custom = format!("{ms} ms");
+            let mut options: Vec<(u32, &str)> = ANIMATION_FRAME_MS.to_vec();
+            if !options.iter().any(|(v, _)| *v == ms) {
+                options.push((ms, custom.as_str()));
+            }
+            widgets::dropdown(ui, "ai-gen-frame-ms", tr("Interval"), &mut ms, &options, 76.0);
+            app.ui.ai_gen.frame_ms = ms;
+            let _ = &t;
+            // The selected layer is an animation: play it on the canvas.
+            if let Some((frames, fps)) = active_animation(app) {
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let playing = app.ui.timeline.playing;
+                    let (icon, tip) = if playing { ("square", tr("Stop")) } else { ("play", tr("Play the selected animation on the canvas")) };
+                    if crate::icons::button(ui, icon, 24.0, playing, tip).clicked() {
+                        play_animation(app, ui.ctx(), frames, fps, !playing);
+                    }
+                });
+            }
+        });
+        // The timeline was deleted: the animations stay, but nothing plays them until there is one.
+        if app.ui.ai_gen.untimed {
+            ui.add_space(4.0);
+            let t = Tokens::get(ui.ctx());
+            ui.horizontal(|ui| {
+                let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
+                crate::icons::paint(ui, icon, "triangle-alert", 13.0, t.warning);
+                ui.add(egui::Label::new(RichText::new(tr("No timeline, so nothing plays. Play makes one.")).color(t.text_dim).size(11.5)).truncate())
+                    .on_hover_text(tr("Video layers need the document's timeline to play; deleting it (the Timeline panel's bin) stops them. Play, or the Timeline panel's Create Video Timeline, makes a new one that fits them"));
+            });
+        }
+        ui.add_space(6.0);
     });
 }
 
@@ -1578,8 +1745,13 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
                 (_, true, false) => tr("Area"),
                 (_, false, false) => tr("Canvas"),
             };
+            let ai = &app.ui.ai_gen;
+            // An animation's frames share one sheet: each is smaller than a still would be.
+            if ai.animating(&current, kind) {
+                let (fw, fh) = photocraft_aigen::cloud::gif_frame_size(&current, w, h, ai.frames());
+                format!("{area} {w} × {h} px → {} × {fw} × {fh} px", ai.frames())
             // These are asked for a shape and a size tier, not for pixels.
-            if matches!(current.provider, Provider::Gemini | Provider::Xai | Provider::Bfl) && !given {
+            } else if matches!(current.provider, Provider::Gemini | Provider::Xai | Provider::Bfl) && !given {
                 format!("{area} {w} × {h} px → {rw}:{rh}, {}", current.image_size)
             } else {
                 format!("{area} {w} × {h} px → {rw} × {rh} px")
@@ -1720,6 +1892,11 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
             change_row(app, ui, &current, inpaint, width, !busy);
         }
         seed_row(app, ui, &current, !busy);
+        // Animate (GIF), for a model that makes animations.
+        if animates(&current, kind) {
+            app.ui.ai_gen.untimed = untimed(app);
+            animate_rows_ui(app, ui, !busy);
+        }
         loras::section(app, ui, &current, !busy);
         // A transparent background, for a new picture or an edit.
         if matches!(kind, GenerationMode::Txt2img | GenerationMode::ImgEdit) {
@@ -1793,7 +1970,8 @@ fn button_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, job: Option<&JobInfo>,
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             clicked = ui.add_enabled_ui(row.generate, |ui| widgets::primary_button(ui, tr("Generate"), 96.0)).inner.clicked();
-            batch_menu(app, ui);
+            let animating = app.ui.ai_gen.animating(current, row.kind);
+            ui.add_enabled_ui(!animating, |ui| batch_menu(app, ui));
             // Style says which preset is chosen unless the row is too narrow for its words.
             styles::button(app, ui, true, row.width >= STYLE_WORDS);
         });
@@ -1850,7 +2028,9 @@ fn option_of(app: &mut PhotocraftApp, ui: &mut egui::Ui, kind: GenerationMode, c
 fn price_note(app: &PhotocraftApp, model: &Model) -> (String, String) {
     use photocraft_aigen::pricing;
     let quality = if model.quality.trim().is_empty() { "auto" } else { model.quality.trim() };
-    let estimate = target_size(app).and_then(|(w, h, _)| pricing::estimate(model, w, h));
+    // OpenAI publishes no price for an animation: the estimate of a still would mislead.
+    let animating = app.ui.ai_gen.animating(model, technique(&app.ui.ai_gen, Some(model)));
+    let estimate = target_size(app).and_then(|(w, h, _)| pricing::estimate(model, w, h)).filter(|_| !animating);
     let mut text = match &estimate {
         Some(e) => format!("{} {} ({quality})", tr("Est. cost"), e.label()),
         None => match pricing::rates(&model.api_model) {
@@ -2614,7 +2794,7 @@ fn group_header(ui: &mut egui::Ui, group: Group, count: usize, folded: bool, not
 
 /// What a model is used for, in the words of the list's filters.
 fn uses(m: &Model) -> Vec<&'static str> {
-    [(m.can_generate(), "Text to image"), (m.can_edit(), "Editing"), (m.can_inpaint(), "Inpainting")]
+    [(m.can_generate(), "Text to image"), (m.can_edit(), "Editing"), (m.can_inpaint(), "Inpainting"), (m.can_animate(), "Animation")]
         .into_iter()
         .filter(|(on, _)| *on)
         .map(|(_, what)| what)
@@ -3845,7 +4025,7 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
         text_row(ui, m, "name", "Name", "Model name");
         label(ui, "Used for");
         let used = model_of(&Value::Object(m.clone())).map(|model| uses(&model).into_iter().map(tr).collect::<Vec<_>>().join(", ")).unwrap_or_default();
-        ui.label(RichText::new(used).color(t.text)).on_hover_text(tr("What the AI Gen panel offers this model for: Create (text to image), or Edit (editing, inpainting)"));
+        ui.label(RichText::new(used).color(t.text)).on_hover_text(tr("What the AI Gen panel offers this model for: Create (text to image), or Edit (editing, inpainting). Animation (an animated GIF) follows from the model ID: GPT Image 2.6 models make them"));
         ui.end_row();
         if provider.is_local() {
             label(ui, "Architecture");

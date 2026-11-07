@@ -164,8 +164,30 @@ On its right, for a cloud model, a **cost** icon: its tooltip has the estimate a
 image cost (*Est. cost …*, *Last image $0.004*), where the provider says. After an enhancement a
 **sparkles** icon says who wrote the prompt; clicking it puts back the one typed.
 
+**Animate (GIF)**, in Advanced under Seed for the models that can (OpenAI's GPT Image 2.6 Sunburst
+and Flare, known from the model ID: Settings list *Animation* under Used for), makes a short
+animated GIF instead of a still: **Frames** (2 to 16, OpenAI's limit; 9 by default) and
+**Interval** (how long each frame shows, 200 ms by default), with the loop's **Time** beside the
+box. With an animation layer selected, **Play** at the end of that row plays it on the canvas
+(the timeline takes its rate and length, so Export GIF… writes what you saw); click again to stop.
+Each video layer plays at its own rate, whatever the timeline's. Say in the prompt
+what moves and that it loops. The answer becomes a **video layer** on the Timeline: the timeline
+is made for it (as many frames as it has, at 1000 / frame time fps) or grown to hold it, and the
+Timeline panel opens on its first frame. Play it there, paint on its frames, and save it with the
+Timeline's **Export GIF…** (one looping GIF; File › Export › Render Video asks for a folder and
+writes numbered PNG frames). PSD files don't keep the frames or the timeline (the layer is saved
+as the frame on screen, and the save says so): save as `.pcraft`, which Save As suggests for a
+document with an animation. In Edit › Change it animates the picture (OpenAI's
+guide says its edit endpoint takes GIF output; if OpenAI refuses, the error says to try from the
+prompt alone). One at a time: the batch menu is off while it is ticked. All frames are drawn on
+one sheet of at most 3840 px a side and 8.3 MP, so each frame is smaller than a still (9 to 16
+frames: at most 960 px a side); the status bar shows `9 × 928 × 528 px`. OpenAI publishes no
+price for an animation, so there is no estimate; the billed cost still shows after it (a 9-frame
+720 × 720 loop at low quality cost $0.054 and took 16 s on 2026-11-06). `ai.generate {"animate":
+true, "frames": 9, "frameMs": 200}` does the same for agents.
+
 **Alpha Channel** (Advanced) asks the model for a transparent background. It is available for models marked
-*Supports a transparent background* in their settings (the GPT Image 2.5 presets have it on; the
+*Supports a transparent background* in their settings (the GPT Image 2.6 and 2.5 presets have it on; the
 Gemini models cannot). If a provider rejects the option, untick it there. Of the local models
 **Ming Image** has it on: see *Ming Image* under *Local models*.
 
@@ -930,7 +952,7 @@ output is the mask. `%denoise%` is the panel's Strength (1 for text to image).
 
 | Provider | Models | Size |
 |---|---|---|
-| OpenAI | `gpt-image-2.5-sunburst` (most capable), `gpt-image-2.5-flare` (fast), `gpt-image-2`: any size. The deprecated `gpt-image-1.5` / `gpt-image-1` still work, with three fixed sizes | from the selection's shape and Render size (MP) |
+| OpenAI | `gpt-image-2.6-sunburst`, `gpt-image-2.6-flare` (2026-11-04; also animated GIFs, see *Animate (GIF)*), `gpt-image-2.5-sunburst` (most capable), `gpt-image-2.5-flare` (fast), `gpt-image-2`: any size. The deprecated `gpt-image-1.5` / `gpt-image-1` still work, with three fixed sizes | from the selection's shape and Render size (MP) |
 | Google Gemini | `gemini-nano-banana-2.1` (Nano Banana 2.1), `gemini-3-pro-image-preview` (Nano Banana Pro), `gemini-3.1-flash-image-preview` (Nano Banana 2) | the closest supported aspect ratio at 1K / 2K / 4K |
 | xAI | `grok-imagine-image-2.0` (Grok Imagine Image 2.0); quality auto / low / medium | the closest supported aspect ratio at 1K / 2K |
 | Meta | `muse-image-1.0` (Muse Image) | the selection's shape (up to 16:1); the model decides the pixels |
@@ -955,7 +977,8 @@ Each provider has one key, on the **API Keys** page (`XAI_API_KEY`, `META_API_KE
 These were added from the providers' documentation on 2026-10-13 and then run against the live
 APIs from the app (text to image, one model each). They are among the recommended models.
 
-**Add Model** offers all of these. GPT Image 2 stays on offer beside 2.5 for those who prefer the
+**Add Model** offers all of these. GPT Image 2.6 is offered but not among the recommended models a
+new installation lists (it came after the comparison). GPT Image 2 stays on offer beside 2.5 for those who prefer the
 look of its pictures. Nano Banana 2.1 (released 2026-10-06) is offered but not among the
 recommended models: it has not been through the comparison, and Google documents it for the
 Interactions API only. PhotoCraft calls every Gemini model through `generateContent`, which

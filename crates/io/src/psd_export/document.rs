@@ -302,6 +302,23 @@ fn add_format_warnings(doc: &Document, opts: &PsdExportOptions, fmt: PixelFormat
     if fmt.mode != doc.mode && !has_duotone {
         warnings.push(format!("{:?} document written as {:?}", doc.mode, fmt.mode));
     }
+    if let Some(warning) = video_warning(doc) {
+        warnings.push(warning);
+    }
+}
+
+/// What a PSD loses of the document's animation: video layers are written as the frame they show
+/// and the timeline is left out (frames and their timing stay in `.pcraft` files only).
+pub(crate) fn video_warning(doc: &Document) -> Option<String> {
+    let video = doc.walk().iter().filter(|(_, _, l)| l.video.is_some()).count();
+    match (video, doc.timeline.is_some()) {
+        (0, false) => None,
+        (0, true) => Some("the timeline is not saved in PSD files; save as .pcraft to keep it".into()),
+        (n, _) => Some(format!(
+            "{n} video layer{} saved as the frame on screen only, without the timeline: save as .pcraft to keep the animation, or export it with File > Export > Render Video (GIF)",
+            if n == 1 { " is" } else { "s are" }
+        )),
+    }
 }
 
 struct MergedExport<'a> {
