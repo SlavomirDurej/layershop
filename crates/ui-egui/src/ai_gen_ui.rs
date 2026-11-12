@@ -2652,8 +2652,15 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
 /// The pages of the Generative AI section: (key, title). `server` is the Engine page: the
 /// ComfyUI that runs local models (the key is older than the name); `folders` the models folders
 /// it reads.
-const PAGES: [(&str, &str); 5] =
-    [("models", "Manage Models"), ("keys", "API Keys"), ("enhance", "Prompt Enhancement"), ("server", "Engine"), ("folders", "Model Folders")];
+/// `fill` is Generative Fill: the model Edit › Fill's AI Gen contents runs.
+const PAGES: [(&str, &str); 6] = [
+    ("models", "Manage Models"),
+    ("keys", "API Keys"),
+    ("enhance", "Prompt Enhancement"),
+    (fill::PAGE, "Generative Fill"),
+    ("server", "Engine"),
+    ("folders", "Model Folders"),
+];
 
 /// What the Manage Models list is narrowed to: every model, or the ones that do one of the AI Gen
 /// panel's jobs. A model that does several (FLUX.2 generates, edits and inpaints) is listed
@@ -2869,9 +2876,10 @@ fn is_local_model(m: &Value) -> bool {
 
 /// The Generative AI section's body: draws and edits `integrations.ai` in the dialog's draft
 /// (`obj` is the Integrations object; `f` the dialog's fields), in the `height` the dialog has
-/// for it. Five pages: Manage Models (every model in a list beside the selected one's
-/// settings), API keys, Prompt Enhancement (the text model behind the panel's Enhance), the
-/// engine (the ComfyUI that runs local models) and its models folders.
+/// for it. Six pages: Manage Models (every model in a list beside the selected one's
+/// settings), API keys, Prompt Enhancement (the text model behind the panel's Enhance),
+/// Generative Fill (the model Edit › Fill's AI Gen runs), the engine (the ComfyUI that runs local
+/// models) and its models folders.
 pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>, height: f32) {
     let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
     let widths = page_widths(ui.available_width());
@@ -2899,6 +2907,7 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
             egui::ScrollArea::vertical().id_salt(("ai-page", other)).max_height(room).auto_shrink([false, true]).show(ui, |ui| match other {
                 "keys" => keys_page(ui, &ai, f),
                 "enhance" => enhance::page(ui, &mut ai, f),
+                fill::PAGE => fill::page(ui, &mut ai, f),
                 "folders" => folders::page(ui, f, busy),
                 _ => server_page(ui, &mut ai, f),
             });
@@ -3421,13 +3430,10 @@ fn sort_recommended(models: &mut Vec<Value>) {
     models.extend(known.into_iter().map(|(_, v)| v).chain(unread));
 }
 
-/// Manage Models: what is set up (cloud and local models, each with a switch for the AI Gen
-/// panel), then every model in one list in the panel's order (cloud, then local), narrowed by
-/// what the models are used for, and the selected one's settings beside it, down to `bottom`.
-fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>, bottom: f32) {
-    let t = Tokens::get(ui.ctx());
-    // Local models pick files from the server's lists: read them once, when the server is on
-    // this machine (it answers or refuses at once; a remote one waits for Connect).
+/// Local models pick files from the server's lists, and which can run depends on them: read them
+/// once a dialog, when the server is on this machine (it answers or refuses at once; a remote one
+/// waits for Connect). Never starts a server.
+fn peek_local_server(ai: &Map<String, Value>, f: &mut Map<String, Value>) {
     if f.get(FILES).is_none() && f.get(STATUS).is_none() && f.get(AUTO).is_none() {
         f.insert(AUTO.into(), json!(true));
         let url = text_of(ai, "comfyUrl");
@@ -3435,6 +3441,14 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
             f.insert(ACTION.into(), json!("peek"));
         }
     }
+}
+
+/// Manage Models: what is set up (cloud and local models, each with a switch for the AI Gen
+/// panel), then every model in one list in the panel's order (cloud, then local), narrowed by
+/// what the models are used for, and the selected one's settings beside it, down to `bottom`.
+fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<String, Value>, bottom: f32) {
+    let t = Tokens::get(ui.ctx());
+    peek_local_server(ai, f);
     let mut filter = Filter::from_key(f.get(FILTER).and_then(Value::as_str).unwrap_or(""));
     let page = ui.available_width();
     let page_right = ui.cursor().left() + page;
@@ -4495,6 +4509,7 @@ pub fn load_keys(app: &mut PhotocraftApp) {
 }
 
 pub mod enhance;
+pub mod fill;
 pub(crate) mod folders;
 pub(crate) mod loras;
 mod refs;

@@ -808,6 +808,8 @@ pub fn show(app: &mut PhotocraftApp, ctx: &egui::Context) {
         // A colour swatch (Edit › Fill, Edit › Stroke) opens the Color Picker over the dialog.
         if outcome.is_none() {
             crate::color_picker_ui::open_requested(app, d.id);
+            // Edit › Fill's AI Gen: Change… opens Preferences on Generative Fill over it.
+            crate::fill_ui::open_requested(app, d.id);
         }
         if apply_requested && outcome.is_none() {
             let _ = crate::prefs_ui::apply(app, d.id);
@@ -1111,6 +1113,10 @@ pub(crate) fn confirm_preflight(app: &mut PhotocraftApp, id: u64) -> Result<(), 
     }
     // Merge Channels with too few, repeated, closed or changed documents stays open (#11451).
     merge_channels_ui::preflight(app, id)?;
+    // Edit › Fill's AI Gen with no model, or nothing it can fill, stays open and says why.
+    if let Some(d) = app.ui.dialogs.iter().find(|d| d.id == id) {
+        crate::fill_ui::preflight(app, &d.fields)?;
+    }
     if let Some(d) = app.ui.dialogs.iter().find(|d| d.id == id).filter(|d| crate::preset_group_prompt::owns(&d.fields)) {
         crate::preset_group_prompt::replace_choice(&d.fields)?;
     }

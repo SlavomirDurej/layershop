@@ -419,7 +419,7 @@ const REFRESH_WIDTH: f32 = 24.0;
 const SPEED_WIDTH: f32 = 130.0;
 
 /// Photoshop-style radio button: a ring, filled when chosen.
-fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
+pub(super) fn radio(ui: &mut egui::Ui, on: bool, label: &str) -> egui::Response {
     let t = Tokens::get(ui.ctx());
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
@@ -523,7 +523,7 @@ fn default_tab(s: &EnhanceSettings, f: &Map<String, Value>) -> &'static str {
 }
 
 /// A label that wraps at `width`.
-fn wrapped(ui: &mut egui::Ui, text: &str, color: egui::Color32, size: f32, width: f32) {
+pub(super) fn wrapped(ui: &mut egui::Ui, text: &str, color: egui::Color32, size: f32, width: f32) {
     ui.scope(|ui| {
         ui.set_max_width(width);
         ui.add(egui::Label::new(RichText::new(text).color(color).size(size)).wrap());

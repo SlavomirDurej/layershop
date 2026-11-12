@@ -990,6 +990,8 @@ pub struct Settings {
     pub models: Vec<Model>,
     /// Prompt enhancement: the text model that rewrites the AI Gen panel's prompt.
     pub enhance: crate::enhance::EnhanceSettings,
+    /// Generative Fill: the model Edit › Fill's AI Gen contents runs, and how.
+    pub fill: crate::fill::FillSettings,
 }
 
 impl Default for Settings {
@@ -1011,6 +1013,7 @@ impl Settings {
             list_collapsed: Vec::new(),
             models: Vec::new(),
             enhance: Default::default(),
+            fill: Default::default(),
         }
     }
 

@@ -855,7 +855,17 @@ fn the_list_says_what_each_model_is_used_for_and_can_be_narrowed_to_it() {
     add_model(&mut app, Model { id: "qwen".into(), ..Family::QwenInpaint.preset() });
     add_model(&mut app, Model { id: "flux".into(), ..Family::Flux2.preset() });
     // One page lists every model; the pages for local, inpainting and cloud models are gone.
-    assert_eq!(PAGES.map(|(key, title)| (key, title)), [("models", "Manage Models"), ("keys", "API Keys"), ("enhance", "Prompt Enhancement"), ("server", "Engine"), ("folders", "Model Folders")]);
+    assert_eq!(
+        PAGES.map(|(key, title)| (key, title)),
+        [
+            ("models", "Manage Models"),
+            ("keys", "API Keys"),
+            ("enhance", "Prompt Enhancement"),
+            ("fill", "Generative Fill"),
+            ("server", "Engine"),
+            ("folders", "Model Folders")
+        ]
+    );
     let models = app.session.prefs().integrations.ai.models.clone();
     let listed = |filter: Filter| models.iter().filter(|m| filter.shows(Some(m))).map(|m| m.id.as_str()).collect::<Vec<_>>();
     assert_eq!(listed(Filter::All), ["z", "gpt", "fill", "qwen", "flux"]);
