@@ -4,18 +4,24 @@
 //!
 //! `shmd` is the list of keyed, length-prefixed items Photoshop keeps per-layer metadata in
 //! (`cmls` for layer comps, `mlst`, `cust`); a reader steps over the keys it does not know, so the
-//! file opens anywhere a PSD does. The item's data is the generation as JSON (the same fields
-//! `.pcraft` saves), padded with a space to an even length. Layers it names (the picture that was
+//! file opens anywhere a PSD does. The item's data is a versioned descriptor (the form Photoshop's
+//! own `shmd` items take) whose one text value, `json`, is the generation as JSON (the same fields
+//! `.pcraft` saves). A descriptor, rather than the bare JSON earlier builds wrote (still read), so
+//! a layered TIFF, whose layers are little-endian, keeps it: `craft_psd::tiff` converts a
+//! descriptor between byte orders and drops an item it can't convert. Layers it names (the picture that was
 //! redrawn, the references) are written as PSD layer ids (`lyid`), which are what a file keeps;
 //! another open document is not written, as it means nothing once the session ends.
 
 use std::collections::HashMap;
 
 use photocraft_doc::{Document, Generation, GenerationReference, GenerationSource, Layer, LayerId};
-use photocraft_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
+use craft_psd::descriptor::{Descriptor, UnicodeString, Value, VersionedDescriptor};
+use craft_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
 
 /// The `shmd` item key.
 pub const KEY: [u8; 4] = *b"pcGn";
+/// The descriptor value holding the JSON.
+const JSON: &str = "json";
 /// The most item data that is read: a prompt is a few kilobytes at the very most.
 const MAX_LEN: usize = 1 << 20;
 
@@ -34,7 +40,8 @@ fn remap(mut g: Generation, layer: impl Fn(u64) -> Option<u64>) -> Generation {
 /// The item data for `l`'s generation, naming layers by the PSD ids in `ids`.
 fn encode(l: &Layer, ids: &HashMap<LayerId, u32>) -> Option<Vec<u8>> {
     let g = remap(*l.generation.clone()?, |id| ids.get(&LayerId(id)).map(|p| u64::from(*p)));
-    let mut data = serde_json::to_vec(&g).ok()?;
+    let json = serde_json::to_string(&g).ok()?;
+    let mut data = VersionedDescriptor::new(Descriptor::new("null").with(JSON, Value::Text(UnicodeString::new(&json)))).to_bytes();
     if data.len() % 2 == 1 {
         data.push(b' ');
     }
@@ -47,9 +54,18 @@ fn decode(data: &[u8]) -> Option<Generation> {
     if data.len() > MAX_LEN {
         return None;
     }
-    // Another writer may have padded with zero bytes, as `shmd` items usually are.
-    let end = data.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
-    let mut g: Generation = serde_json::from_slice(data.get(..end)?).ok()?;
+    let mut g: Generation = match VersionedDescriptor::parse_prefix(data) {
+        Ok((vd, _)) => match vd.descriptor.get(JSON)? {
+            Value::Text(t) => serde_json::from_str(&t.to_string_lossy()).ok()?,
+            _ => return None,
+        },
+        // Earlier builds wrote the bare JSON. Another writer may have padded it with zero bytes,
+        // as `shmd` items usually are.
+        Err(_) => {
+            let end = data.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+            serde_json::from_slice(data.get(..end)?).ok()?
+        }
+    };
     let unit = |v: f64, max: f64, or: f64| if v.is_finite() { v.clamp(0.0, max) } else { or };
     g.strength = unit(g.strength, 1.0, 1.0);
     g.context = unit(g.context, 4.0, 0.0);
@@ -180,6 +196,21 @@ mod tests {
         assert_eq!(raw.len(), 1);
         put(&mut raw, &layer(None), &ids);
         assert!(raw.is_empty());
+    }
+
+    #[test]
+    fn the_item_is_a_versioned_descriptor_and_the_bare_json_of_earlier_builds_still_reads() {
+        let ids: HashMap<LayerId, u32> = [(LayerId(40), 7), (LayerId(41), 8)].into();
+        let data = encode(&layer(Some(generation())), &ids).unwrap();
+        let (vd, _) = VersionedDescriptor::parse_prefix(&data).unwrap();
+        assert!(matches!(vd.descriptor.get(JSON), Some(Value::Text(_))));
+        // What 0.19 to 0.21 wrote: the JSON itself, padded with a space.
+        let json = serde_json::to_vec(&Generation { prompt: "old".into(), ..Default::default() }).unwrap();
+        assert_eq!(decode(&json).unwrap().prompt, "old");
+        // A descriptor without the value, or with another kind of value, is no generation.
+        assert_eq!(decode(&VersionedDescriptor::new(Descriptor::new("null")).to_bytes()), None);
+        assert_eq!(decode(&VersionedDescriptor::new(Descriptor::new("null").with(JSON, Value::Boolean(true))).to_bytes()), None);
+        assert_eq!(decode(&VersionedDescriptor::new(Descriptor::new("null").with(JSON, Value::Text(UnicodeString::new("{")))).to_bytes()), None);
     }
 
     #[test]

@@ -34,9 +34,9 @@ fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) -> Option<()> {
 }
 
 /// Append the references resource for `doc` to `resources`, when it has references to write.
-pub(crate) fn push(doc: &Document, layer_ids: &HashMap<LayerId, u32>, resources: &mut Vec<photocraft_psd::resources::ImageResource>) {
+pub(crate) fn push(doc: &Document, layer_ids: &HashMap<LayerId, u32>, resources: &mut Vec<craft_psd::resources::ImageResource>) {
     if let Some(data) = encode(doc, layer_ids) {
-        let mut r = photocraft_psd::resources::ImageResource::new(AI_REFERENCES, data);
+        let mut r = craft_psd::resources::ImageResource::new(AI_REFERENCES, data);
         r.name = crate::psd_export::legacy_name(NAME);
         resources.push(r);
     }

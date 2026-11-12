@@ -49,6 +49,15 @@ pub fn display(s: &str) -> &str {
     done
 }
 
+/// [`display`] for text made at run time (a plural with its count filled in): renamed in place,
+/// and not kept, since each count would be a new string.
+pub fn display_owned(s: String) -> String {
+    if NAME == SOURCE_NAME || !s.contains(SOURCE_NAME) {
+        return s;
+    }
+    s.replace(SOURCE_NAME, NAME)
+}
+
 /// 128 px: sharp at 20 pt on a 3× display, and the mipmaps keep it clean at 1×.
 const ICON_PNG: &[u8] = include_bytes!("../../../../assets/app-icon/hicolor/128x128/apps/ai.storyteller.photocraft.png");
 

@@ -1,0 +1,83 @@
+# LayerShop's own interface strings, which the craft-i18n catalogs (storytold/craft-i18n) do
+# not have: locale, English, translation. `tr` looks here first. Moved from the in-repo
+# catalogs when upstream moved its catalogs to craft-i18n (2026-11-12).
+cs	AI Gen	AI Gen
+cs	Download	Stáhnout
+cs	Generative AI	Generativní AI
+cs	Generative AI…	Generativní AI…
+de	AI Gen	AI Gen
+de	Download	Herunterladen
+de	Generative AI	Generative KI
+de	Generative AI…	Generative KI…
+el	AI Gen	AI Gen
+el	Download	Λήψη
+el	Generative AI	Παραγωγική ΤΝ
+el	Generative AI…	Παραγωγική ΤΝ…
+es	AI Gen	AI Gen
+es	Download	Descargar
+es	Generative AI	IA generativa
+es	Generative AI…	IA generativa…
+fr	AI Gen	AI Gen
+fr	Download	Télécharger
+fr	Generative AI	IA générative
+fr	Generative AI…	IA générative…
+hu	AI Gen	AI Gen
+hu	Download	Letöltés
+hu	Generative AI	Generatív MI
+hu	Generative AI…	Generatív MI…
+id	AI Gen	AI Gen
+id	Download	Unduh
+id	Generative AI	AI Generatif
+id	Generative AI…	AI Generatif…
+it	AI Gen	AI Gen
+it	Download	Scarica
+it	Generative AI	IA generativa
+it	Generative AI…	IA generativa…
+ja	AI Gen	AI Gen
+ja	Download	ダウンロード
+ja	Generative AI	生成 AI
+ja	Generative AI…	生成 AI…
+ko	AI Gen	AI Gen
+ko	Download	다운로드
+ko	Generative AI	생성형 AI
+ko	Generative AI…	생성형 AI…
+nl	AI Gen	AI Gen
+nl	Download	Downloaden
+nl	Generative AI	Generatieve AI
+nl	Generative AI…	Generatieve AI…
+pl	AI Gen	AI Gen
+pl	Download	Pobierz
+pl	Generative AI	Generatywna AI
+pl	Generative AI…	Generatywna AI…
+pt-br	AI Gen	AI Gen
+pt-br	Download	Baixar
+pt-br	Generative AI	IA generativa
+pt-br	Generative AI…	IA generativa…
+ru	AI Gen	AI Gen
+ru	Download	Скачать
+ru	Generative AI	Генеративный ИИ
+ru	Generative AI…	Генеративный ИИ…
+sr-latn	AI Gen	AI Gen
+sr-latn	Download	Preuzmi
+sr-latn	Generative AI	Generativna AI
+sr-latn	Generative AI…	Generativna AI…
+tr	AI Gen	AI Gen
+tr	Download	İndir
+tr	Generative AI	Üretken Yapay Zeka
+tr	Generative AI…	Üretken Yapay Zeka…
+uk	AI Gen	AI Gen
+uk	Download	Завантажити
+uk	Generative AI	Генеративний ШІ
+uk	Generative AI…	Генеративний ШІ…
+vi	AI Gen	AI Gen
+vi	Download	Tải xuống
+vi	Generative AI	AI tạo sinh
+vi	Generative AI…	AI tạo sinh…
+zh-hans	AI Gen	AI Gen
+zh-hans	Download	下载
+zh-hans	Generative AI	生成式 AI
+zh-hans	Generative AI…	生成式 AI…
+zh-hant	AI Gen	AI Gen
+zh-hant	Download	下載
+zh-hant	Generative AI	生成式 AI
+zh-hant	Generative AI…	生成式 AI…

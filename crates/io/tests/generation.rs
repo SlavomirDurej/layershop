@@ -4,8 +4,8 @@
 use photocraft_color::{ColorMode, SampleType};
 use photocraft_doc::{Document, Generation, GenerationMode, GenerationQuality, GenerationReference, GenerationSource, Layer, Size};
 use photocraft_io::{ExportOptions, export, generation_map, import};
-use photocraft_psd::PsdFile;
-use photocraft_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
+use craft_psd::PsdFile;
+use craft_psd::metadata::{MetadataItem, parse_shmd, write_shmd};
 
 fn document(depth: SampleType) -> Document {
     let mut doc = Document::new("Generated", Size::new(4, 4), ColorMode::Rgb, depth);

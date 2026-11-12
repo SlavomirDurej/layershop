@@ -24,9 +24,9 @@ pub fn is_ours(id: u16, data: &[u8]) -> bool {
 }
 
 /// Append the regions resource for `doc` to `resources`, when it has regions.
-pub(crate) fn push(doc: &Document, resources: &mut Vec<photocraft_psd::resources::ImageResource>) {
+pub(crate) fn push(doc: &Document, resources: &mut Vec<craft_psd::resources::ImageResource>) {
     if let Some(data) = encode(doc) {
-        let mut r = photocraft_psd::resources::ImageResource::new(AI_REGIONS, data);
+        let mut r = craft_psd::resources::ImageResource::new(AI_REGIONS, data);
         r.name = crate::psd_export::legacy_name(NAME);
         resources.push(r);
     }

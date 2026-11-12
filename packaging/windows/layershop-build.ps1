@@ -13,6 +13,8 @@
     %LOCALAPPDATA%\LayerShop-build\wix-5.0.2 and run on the installed .NET runtime, so no .NET
     SDK is needed. Its UI and Util extensions are added when missing.
   - craft-fonts: used when a ..\craft-fonts checkout exists (official builds embed its fonts).
+  - craft-i18n: the interface translations, from a ..\craft-i18n checkout at the commit in
+    craft-i18n.rev (required: without it the build stops and says how to get it).
   - SHA256SUMS.txt for the files made (`sha256sum -c` reads it), and build-info.json: the
     version, the commit and whether the tree had uncommitted changes, which the publish step
     checks. The debug symbols zip package.ps1 also writes (for profilers) stays in distelease
@@ -85,6 +87,24 @@ if (-not $env:CRAFT_FONTS_DIR) {
   }
 }
 
+# ---- translations ------------------------------------------------------------------------------
+# The interface catalogs live in storytold/craft-i18n, at the commit craft-i18n.rev pins. A build
+# without them is English only, so a release build needs the checkout (CRAFT_I18N_REQUIRED makes
+# the build fail rather than ship without it).
+$I18nRev = (Get-Content (Join-Path $Root 'craft-i18n.rev') -Raw).Trim()
+if (-not $env:CRAFT_I18N_DIR) {
+  $I18n = Join-Path (Split-Path $Root) 'craft-i18n'
+  if (-not (Test-Path (Join-Path $I18n 'locales'))) {
+    throw "no ..\craft-i18n checkout, so this build would be English only. Get it with:`n  git clone https://github.com/storytold/craft-i18n `"$I18n`"`n  git -C `"$I18n`" checkout $I18nRev"
+  }
+  $env:CRAFT_I18N_DIR = $I18n
+}
+$I18nHead = (git -C $env:CRAFT_I18N_DIR rev-parse HEAD).Trim()
+if ($I18nHead -ne $I18nRev) {
+  throw "craft-i18n is at $I18nHead but this tree pins $I18nRev (craft-i18n.rev):`n  git -C `"$env:CRAFT_I18N_DIR`" fetch`n  git -C `"$env:CRAFT_I18N_DIR`" checkout $I18nRev"
+}
+$env:CRAFT_I18N_REQUIRED = '1'
+
 # ---- build and package -------------------------------------------------------------------------
 $Version = $null
 $InPackage = $false
@@ -122,6 +142,7 @@ $Sums = $Files | ForEach-Object { '{0} *{1}' -f (Get-FileHash $_.FullName -Algor
   commit = $Commit
   dirty = $Dirty
   fonts = [bool]$env:CRAFT_FONTS_DIR
+  i18n = $I18nRev
   built = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
   files = @($Files | ForEach-Object { $_.Name })
 } | ConvertTo-Json | Set-Content -Path (Join-Path $Dist 'build-info.json') -Encoding utf8
