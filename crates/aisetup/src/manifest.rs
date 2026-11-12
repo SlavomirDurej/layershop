@@ -352,9 +352,9 @@ mod tests {
     #[test]
     fn the_bundled_manifest_is_valid_and_pins_one_comfyui() {
         let m = bundled();
-        assert_eq!(m.comfy.version, "0.43.0");
+        assert_eq!(m.comfy.version, "0.45.0");
         assert_eq!(m.comfy.assets.keys().map(String::as_str).collect::<Vec<_>>(), ["amd", "intel", "nvidia", "nvidia_cu126"]);
-        assert!(m.comfy.assets.values().all(|a| a.url.contains("/v0.43.0/")));
+        assert!(m.comfy.assets.values().all(|a| a.url.contains("/v0.45.0/")));
         assert!(m.asset("nvidia").is_ok() && m.asset("voodoo").is_err());
         // Measured from each archive's header (`--example archive_contents`).
         assert!(m.comfy.assets.values().all(|a| a.unpacked_bytes > a.size && (100..=200).contains(&a.longest_path)));
@@ -379,8 +379,9 @@ mod tests {
         assert_eq!(gb(m.preset("recommended")), 44.1);
         // FLUX.3 Klein (2026-10-16) is 7.4 GB less than the FLUX.2 Klein 9B it replaced; MOSS
         // Image (2026-10-20) shares no file with the others.
-        // FIBO 2 (2026-10-30) shares FLUX.3 Klein's text encoder and FLUX.2's VAE.
-        assert_eq!(gb(m.preset("everything")), 190.5);
+        // FIBO 2 (2026-10-30) shares FLUX.3 Klein's text encoder and FLUX.2's VAE. MiniMax H3
+        // Image (2026-11-12) shares nothing: its 32B text encoder alone is 27.1 GB.
+        assert_eq!(gb(m.preset("everything")), 239.8);
         assert_eq!(m.preset("everything").len(), m.models.len());
         assert!(m.preset("nope").is_empty());
         for (id, alone) in [
@@ -393,6 +394,7 @@ mod tests {
             ("ernie-image-turbo", 24.1),
             ("hidream-o1", 46.1),
             ("fibo-2-dev", 13.6),
+            ("minimax-h3-image", 49.3),
         ] {
             assert_eq!(gb(&ids(&[id])), alone, "{id}");
         }
@@ -530,16 +532,18 @@ mod tests {
         let m = bundled();
         assert!(m.models.iter().all(|x| !x.min_comfy.is_empty() && photocraft_aigen::launch::at_least(&m.comfy.version, &x.min_comfy)));
         let names = |version: &str| m.too_new_for(version).into_iter().map(|x| x.id.as_str()).collect::<Vec<_>>();
-        // FIBO 2 came with 0.43.0, MOSS Image with 0.42.0, FLUX.3 Klein with 0.41.0.
-        assert_eq!(names("0.43.0"), Vec::<&str>::new());
-        assert_eq!(names("0.42.5"), ["fibo-2-dev"]);
-        assert_eq!(names("0.41.0"), ["moss-image", "fibo-2-dev"]);
-        assert_eq!(names("0.40.0"), ["flux-3-klein", "moss-image", "fibo-2-dev"]);
-        assert_eq!(names("0.36"), ["qwen-image-2-1", "flux-3-klein", "moss-image", "fibo-2-dev", "ming-image-0-1-design"]);
+        // MiniMax H3 Image came with 0.45.0, FIBO 2 with 0.43.0, MOSS Image with 0.42.0, FLUX.3
+        // Klein with 0.41.0.
+        assert_eq!(names("0.45.0"), Vec::<&str>::new());
+        assert_eq!(names("0.44.0"), ["minimax-h3-image"]);
+        assert_eq!(names("0.42.5"), ["fibo-2-dev", "minimax-h3-image"]);
+        assert_eq!(names("0.41.0"), ["moss-image", "fibo-2-dev", "minimax-h3-image"]);
+        assert_eq!(names("0.40.0"), ["flux-3-klein", "moss-image", "fibo-2-dev", "minimax-h3-image"]);
+        assert_eq!(names("0.36"), ["qwen-image-2-1", "flux-3-klein", "moss-image", "fibo-2-dev", "minimax-h3-image", "ming-image-0-1-design"]);
         assert_eq!(names("0.1.0").len(), m.models.len());
         // A version that was not read claims nothing.
         assert!(m.too_new_for("").is_empty() && m.too_new_for("unknown").is_empty());
-        assert!(m.older_than_pinned("0.42.1") && !m.older_than_pinned("0.43.0") && !m.older_than_pinned("0.44.0") && !m.older_than_pinned(""));
+        assert!(m.older_than_pinned("0.43.0") && !m.older_than_pinned("0.45.0") && !m.older_than_pinned("0.46.0") && !m.older_than_pinned(""));
     }
 
     /// A card with little memory starts on Light, MOSS Image, listed first; a larger card, or one

@@ -179,8 +179,8 @@ mod native {
         }
         // What can be installed is no secret: the bundled manifest, with its totals.
         let m = s.execute("ai.setup.manifest", json!({"vramGb": 24})).unwrap();
-        assert_eq!(m["comfy"]["version"], "0.43.0");
-        assert_eq!(m["models"].as_array().unwrap().len(), 10);
+        assert_eq!(m["comfy"]["version"], "0.45.0");
+        assert_eq!(m["models"].as_array().unwrap().len(), 11);
         assert_eq!(
             (m["presets"]["starter"]["bytes"].as_u64(), m["presets"]["recommended"]["models"].as_array().map(Vec::len)),
             (Some(18_520_930_264), Some(3))

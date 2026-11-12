@@ -508,8 +508,8 @@ dialog: the editor stays usable beside it.
   arrives wrong is fetched once more, then refused with both checksums in the message.
 - **Shared files are downloaded once** (Ideogram 4 uses Qwen Image 2.1's text encoder), and the
   totals count them once: Light 13.0 GB, Starter 18.5 GB, Recommended 44.1 GB, Everything
-  190.5 GB. FIBO 2 Dev (13.6 GB alone, 8.4 GB beside FLUX.3 Klein) is offered unticked: only
-  Everything has it.
+  239.8 GB. FIBO 2 Dev (13.6 GB alone, 8.4 GB beside FLUX.3 Klein) and MiniMax H3 Image
+  (49.3 GB, sharing no file) are offered unticked: only Everything has them.
 - **A small card starts on Light.** With less than 16 GB of video memory
   (`photocraft_aisetup::manifest::LIGHT_BELOW_VRAM_GB`), the Models step starts on the Light
   preset, MOSS Image (13.0 GB, Apache 2.0, ungated), and lists it first; larger cards and
@@ -560,7 +560,7 @@ dialog: the editor stays usable beside it.
     links to Hugging Face's settings, where the app is revoked. **How does this work?** links to
     <https://layershop.aardvarkstudios.net/hugging-face/>.
 - **The engine** is ComfyUI's official Windows portable build, pinned by version and sha256
-  (0.43.0 today, since 2026-10-30 for FIBO 2; 0.42.1 before, for MOSS Image; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
+  (0.45.0 today, since 2026-11-12 for MiniMax H3 Image; 0.43.0 before, for FIBO 2; 0.42.1 before that, for MOSS Image; NVIDIA, NVIDIA with CUDA 12.6 for older cards and drivers, AMD and Intel
   builds, the last two untested). It is unpacked in pure Rust; the archive is refused whole if
   any entry would land outside the engine folder. It gets a port of its own (8190 or the next
   free one), so it never collides with a ComfyUI on 8188 or ComfyUI Desktop on 8000, and it is
@@ -577,14 +577,14 @@ dialog: the editor stays usable beside it.
   ComfyUI's release tags: the newest of its architecture, its nodes and its weight format):
   Ernie 0.19.0, HiDream O1 0.21.1, Ideogram 4 0.24.0, Z-Image Turbo and Krea 2 0.27.0 (int8
   weights), Qwen Image 2.1 0.37.0, Ming Image 0.38.0, FLUX.3 Klein 0.41.0, MOSS Image 0.42.0,
-  FIBO 2 0.43.0. None may be later than the pinned engine (the manifest is refused otherwise).
+  FIBO 2 0.43.0, MiniMax H3 Image 0.45.0. None may be later than the pinned engine (the manifest is refused otherwise).
   The version is what the ComfyUI says when Connect reaches it (`ai.comfyModels` › `version`),
   else, before that, what the first look found (the running one's `/system_stats`, or the
   installed ComfyUI Desktop's `comfyui_version.py`; the first screen's row reads "ComfyUI 0.41.0
   detected"). When it is older than the pinned engine, the Your ComfyUI screen says so under
   the address, names the offered models it can't run with the version each needs, and says
   other features may not work, to update ComfyUI or install a new one instead; the Models page
-  says "needs ComfyUI 0.43.0 (yours is 0.41.0)" beside each such model. They can still be
+  says "needs ComfyUI 0.45.0 (yours is 0.41.0)" beside each such model. They can still be
   ticked: ComfyUI can be updated later. A version that can't be read claims nothing.
 - **Its models folder is filled in.** The folders a ComfyUI reads models from come from the
   ComfyUI itself when it runs (`GET /experiment/models`), else from how it is started: its base
@@ -893,7 +893,7 @@ rewriting the prompt as a caption), which can rewrite a layout away.
 
 MOSS Image came to ComfyUI on 2026-10-16, after its 0.41.0 release, so it needs a later
 ComfyUI (ComfyUI Desktop has it); an older server rejects its text encoder type, and the error
-says to update. The Local AI setup pins ComfyUI 0.43.0, which has it, and offers it (the Light
+says to update. The Local AI setup pins ComfyUI 0.45.0, which has it, and offers it (the Light
 preset on a small card); Scan Server finds it on a ComfyUI that has its files (`moss_image_sft_…` or
 `moss_image_base_…`, `qwen3.5_9b_w4a8_gptq…`, `flux2-vae_small…`).
 
@@ -931,7 +931,7 @@ of a white canvas, margins selected, "extend the photo outwards" came back with 
 meadow all round and no seam, in 54 s (one seed).
 
 FIBO 2 came to ComfyUI with its 0.43.0 release: an older server rejects its prompt node, and
-the error says to update. The Local AI setup pins 0.43.0 and offers FIBO 2 Dev unticked (only
+the error says to update. The Local AI setup (pinned at 0.43.0 for it, 0.45.0 since) offers FIBO 2 Dev unticked (only
 the Everything preset has it), from Comfy-Org's repack (`Comfy-Org/Fibo-2.0`, which ComfyUI's
 template downloads): Bria's own repository holds only the diffusers weights, behind a form. Its
 row says "non-commercial use only" and links Bria's page. The weights are licensed CC BY-NC 4.0
@@ -959,8 +959,14 @@ It follows ComfyUI's MiniMax H3 Image templates (Text to Image, Image Edit):
   rewriting the prompt as a detailed caption); use the panel's Enhance instead.
 
 MiniMax H3 Image came to ComfyUI with its 0.45.0 release (2026-11-10): an older server rejects
-its conditioning node, and the error says to update. The Local AI setup does not offer it yet
-(it pins ComfyUI 0.43.0). Not yet tried against a real server here. The weights are under
+its conditioning node, and the error says to update. The Local AI setup pins 0.45.0 for it
+(2026-11-12) and offers it unticked (only Everything has it), with the files of ComfyUI's
+templates from `Comfy-Org/MiniMax-H3-Image` (ungated, as MiniMax's own repository is): 49.3 GB,
+none shared with another model. A setup that installed an older engine adds 0.45.0 beside it
+(about 2 GB) the next time it installs anything; the older engine's folder stays. Every graph
+LayerShop builds, for every architecture and task, was checked against ComfyUI 0.45.0's own
+validation (the NVIDIA build, unpacked by the setup and started on the processor) on
+2026-11-12. Not yet rendered with a real model here. The weights are under
 MiniMax's community licence, which asks for MiniMax's written permission above US$1M annual
 revenue or for hosted services.
 
@@ -1138,7 +1144,7 @@ that needs the memory.
 | Qwen3 4B | an alternative to compare instruction following and writing | `qwen_3_4b_fp8_mixed.safetensors` | 5.6 GB |
 | Gemma 4 E4B IT | larger, for more memory | `gemma4_e4b_it_fp8_scaled.safetensors` | 9.1 GB |
 
-Checked against the pinned engine, ComfyUI 0.43.0: its text encoder loader recognises Gemma 4
+Checked against ComfyUI 0.43.0, the pinned engine then (its graph also passes 0.45.0's validation): its text encoder loader recognises Gemma 4
 E2B and E4B and Qwen3 4B (`detect_te_model`; Qwen3 4B loads as Z-Image's encoder, whose
 tokenizer takes a system prompt and closes the thinking block when thinking is off), and Generate
 Text (`comfy_extras/nodes_textgen.py`) and Preview as Text (`nodes_preview_any.py`) are core

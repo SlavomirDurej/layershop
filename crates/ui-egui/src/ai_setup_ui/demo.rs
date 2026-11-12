@@ -428,7 +428,7 @@ pub fn probe_without_card(dir: &Path) -> Value {
 /// [`probe`] on a machine with ComfyUI Desktop installed but not running, its models in the
 /// folders of [`comfy_folders`].
 pub fn probe_with_comfy(dir: &Path) -> Value {
-    probe_with_comfy_at(dir, "0.43.0")
+    probe_with_comfy_at(dir, "0.45.0")
 }
 
 /// [`probe_with_comfy`], its ComfyUI at `version`.
@@ -668,7 +668,7 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         for folder in comfy_folders(dir) {
             let _ = std::fs::create_dir_all(folder);
         }
-        let mut found = probe_with_comfy_at(dir, if old { "0.41.0" } else { "0.43.0" });
+        let mut found = probe_with_comfy_at(dir, if old { "0.41.0" } else { "0.45.0" });
         // An 8 GB card on the Models page: MOSS Image, which needs 0.42.0, is then listed first.
         if screen == "models" {
             found["vramGb"] = json!(8);
