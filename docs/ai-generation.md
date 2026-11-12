@@ -100,7 +100,7 @@ that (see *Regions*).
 - **Change** changes the picture as the prompt says. With a selection only that part changes, and
   the rest stays exactly as it was; without one the whole picture is changed. It lists the models
   that edit or inpaint, and how the model is asked follows from the model:
-  - an **edit model** (Qwen Image 2.1, FIBO 2, Ming Image, Qwen Image Edit, FLUX.2, the cloud models) is shown the
+  - an **edit model** (Qwen Image 2.1, FIBO 2, MiniMax H3 Image, Ming Image, Qwen Image Edit, FLUX.2, the cloud models) is shown the
     picture and told what to change: "make the jacket red leather". See *Changing by
     instruction*.
   - an **inpainting model** (FLUX.1 Fill, Qwen Image with the InstantX ControlNet, or a model
@@ -399,16 +399,18 @@ and renders a new one from it; the result is a new layer, and the source is not 
   **Context** (Advanced) is how much around the selection is sent, a quarter of its longer edge
   unasked.
 - **Image 2, Image 3, …** are pictures the instruction may refer to, chosen from the same list
-  (open a file to refer to it). Name them in the instruction as the rows do. Up to three; Qwen
-  Image Edit takes two. They are sent at their own size, brought to between a quarter of a
-  megapixel and one.
+  (open a file to refer to it). Name them in the instruction as the rows do. A document keeps up
+  to fifteen, and their chips wrap onto more rows; most models take three, Qwen Image Edit two
+  and MiniMax H3 Image fifteen. When the document keeps more than the model takes, @mention the
+  ones to send (Generate says so). They are sent at their own size, brought to between a quarter
+  of a megapixel and one.
 - **Quality** (Advanced) is how much of a local model's schedule to run: **Draft** about a quarter of its
   steps (four at least), to try an idea in seconds; **Standard** the steps it is set up with;
   **Detail** a fifth more, for hands and fine detail. A cloud model's quality is in its settings.
 - **Alpha Channel** as on Create (cloud models that support it; an edit with Ming Image comes
   back opaque).
-- The models offered are the ones that edit: **Qwen Image 2.1**, **FIBO 2**, **Ming Image** and
-  **FLUX.2** (which also generate), **Qwen Image Edit** 2509 / 2511 (which do nothing else; Scan Server adds them, with
+- The models offered are the ones that edit: **Qwen Image 2.1**, **FIBO 2**, **MiniMax H3 Image**,
+  **Ming Image** and **FLUX.2** (which also generate), **Qwen Image Edit** 2509 / 2511 (which do nothing else; Scan Server adds them, with
   their four-step Lightning LoRA when the server has it), and cloud models (OpenAI's image edit
   endpoint, Gemini with the pictures attached).
 
@@ -700,6 +702,7 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 | FLUX.3 Klein | local | 50 steps, CFG 3.5, 1 MP |
 | MOSS Image | local | 25 steps, CFG 2.5, `er_sde`, the selection's own size |
 | FIBO 2 Dev | local | 50 steps, CFG 5, structured negative, 1 MP |
+| MiniMax H3 Image | local | 6 steps, CFG 1, 4 MP |
 | Ideogram 4 | local | 28 steps, CFG 5, shift 5, 1 MP |
 | HiDream O1 | local | 40 steps, CFG 5, `dpmpp_2m_sde_gpu`, noise scale 8, its trained sizes; prompt written by Gemma 4, result refined by Z-Image Turbo at 0.35 |
 | Ernie Image Turbo | local | 8 steps, CFG 1, 2 MP |
@@ -762,6 +765,7 @@ loads. The workflows follow ComfyUI's own text-to-image templates and use only b
 | Ming Image (0.1 Design) | diffusion model, text encoder (`qwen_image`, Ling mini 2.0), its own VAE | FLUX shift by size, a guider without CFG, 12 steps; see below |
 | MOSS Image (SFT, Base) | diffusion model, text encoder (`moss_image`, Qwen 3.5 9B), the small FLUX.2 VAE | skip layer guidance (layer 22), KSampler; a layout prompt; see below |
 | FIBO 2 (Dev, Edit Turbo) | diffusion model, text encoder (`fibo2`, Qwen 3 VL 4B), the FLUX.2 VAE | its own prompt node, KSampler; see below |
+| MiniMax H3 Image | diffusion model, text encoder (`minimax`, Qwen 3 VL 32B), its own VAE | its own conditioning node, KSampler; edges in multiples of 32; see below |
 | FLUX.1 Fill (inpainting only) | diffusion model, two text encoders, VAE | Inpaint Model Conditioning, FLUX guidance, KSampler |
 | Qwen Image + InstantX ControlNet (inpainting only) | diffusion model, text encoder (`qwen_image`), VAE, ControlNet | ControlNet Inpainting Apply, AuraFlow shift, KSampler |
 | Checkpoint (SD / SDXL) | one checkpoint | KSampler |
@@ -933,6 +937,32 @@ template downloads): Bria's own repository holds only the diffusers weights, beh
 row says "non-commercial use only" and links Bria's page. The weights are licensed CC BY-NC 4.0
 (non-commercial use unless you have an agreement with Bria). Scan Server finds it on a ComfyUI
 that has its files (`fibo2_…`, `qwen3vl_4b_…`, `flux2-vae…`).
+
+**MiniMax H3 Image** generates and edits with the same weights, in six steps without guidance.
+It follows ComfyUI's MiniMax H3 Image templates (Text to Image, Image Edit):
+
+- **Files** (`Comfy-Org/MiniMax-H3-Image`): the diffusion model
+  `minimax_h3_image_pruned_int8_convrot` (21.0 GB; also `_w4a8`, 12.5 GB, and `_bf16`, 40.2 GB),
+  the text encoder `qwen3vl_32b_minimax_h3_int8_convrot` (27.1 GB; `_nvfp4_awq`, 15.7 GB, is
+  for the newest cards) and the VAE `minimax_h3_image_vae_fp16` (1.2 GB). Scan Server finds
+  any of them, and treats the int8, 4-bit and bf16 diffusion models as one model.
+- **Four megapixels.** The templates render at 4 MP and say the model works from about 4 to
+  20 MP (best near 16) and does poorly below; edges are multiples of 32. A picture it edits is
+  scaled to the render size, as the Image Edit template scales it to 4 MP.
+- **Its own conditioning node** (*MiniMax H3 Image Conditioning*) reads the prompt with the
+  pictures and gives the latent to sample; the negative side is zeroed, as in the templates.
+- **Pictures are named `<Picture 1>`, `<Picture 2>`, …** to the model: the picture to edit is
+  `<Picture 1>`, the references follow. A prompt's "image 2" (and a mention written out as
+  `Luna (image 2)`) is sent as `<Picture 2>`. It takes fifteen references, sixteen pictures in
+  all (its authors' card: "up to 16 reference images"); the other models take three.
+- Not run: the templates' prompt writer (Qwen 3.5 9B with MiniMax's long system prompts,
+  rewriting the prompt as a detailed caption); use the panel's Enhance instead.
+
+MiniMax H3 Image came to ComfyUI with its 0.45.0 release (2026-11-10): an older server rejects
+its conditioning node, and the error says to update. The Local AI setup does not offer it yet
+(it pins ComfyUI 0.43.0). Not yet tried against a real server here. The weights are under
+MiniMax's community licence, which asks for MiniMax's written permission above US$1M annual
+revenue or for hosted services.
 
 It loads the int8 Qwen 3 VL 4B (`qwen3vl_4b_int8_convrot`, FLUX.3 Klein's), not the template's
 bf16 one: the deer and the hat edits came out the same at the same speed (52 s, 50 s), and the

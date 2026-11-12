@@ -71,6 +71,9 @@ fn family_of(file: &str) -> Option<Family> {
         Family::MingImage
     } else if n.contains("moss_image") || n.contains("moss-image") {
         Family::MossImage
+    // Not MiniMax H3 without "image": its video model.
+    } else if n.contains("minimax_h3_image") || n.contains("minimax-h3-image") {
+        Family::MinimaxH3Image
     } else if n.contains("qwen_image_2.1") || n.contains("qwen-image-2.1") || n.contains("qwen_image_21") {
         Family::QwenImage21
     } else if n.contains("qwen_image") || n.contains("qwen-image") {
@@ -147,8 +150,9 @@ pub fn repaired(existing: &Model, detected: &Model) -> Model {
 /// and the words that say how the weights are stored (`z_image_turbo_int8_convrot.safetensors`
 /// and `z_image_turbo_bf16.safetensors` are both `z image turbo`).
 pub fn variant(file: &str) -> String {
-    const STORAGE: [&str; 14] =
-        ["bf16", "fp16", "fp8", "fp32", "int8", "mxfp8", "convrot", "scaled", "mixed", "fp8mixed", "e4m3fn", "e5m2", "gguf", "safetensors"];
+    const STORAGE: [&str; 16] = [
+        "bf16", "fp16", "fp8", "fp32", "int8", "mxfp8", "convrot", "scaled", "mixed", "fp8mixed", "e4m3fn", "e5m2", "gguf", "w4a8", "nvfp4", "safetensors",
+    ];
     let stem = file.rsplit(['/', '\\']).next().unwrap_or(file).to_ascii_lowercase();
     let stem = stem.rsplit_once('.').filter(|(_, ext)| !ext.is_empty() && ext.chars().all(|c| c.is_ascii_alphabetic())).map_or(stem.as_str(), |(s, _)| s);
     stem.split(['_', '-', ' ']).filter(|word| !word.is_empty() && !STORAGE.contains(word)).collect::<Vec<_>>().join(" ")
@@ -261,6 +265,9 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::MingImage => &["ling_mini", "ming_image"],
             // Not the other Qwen 3.5 9B files beside it: FLUX.3's and Qwen Image 2.1's prompt writers.
             Family::MossImage => &["qwen3.5_9b_w4a8", "qwen3.5_9b_int8", "qwen3.5_9b_bf16"],
+            // Its own Qwen 3 VL 32B (int8, or NVFP4 for the newest cards), not Qwen 3.5 9B beside
+            // it, which its templates write prompts with.
+            Family::MinimaxH3Image => &["qwen3vl_32b_minimax_h3", "minimax_h3"],
             _ => &[],
         };
         m.clip = choose(clips, &m.clip, clip_needles);
@@ -278,6 +285,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             Family::QwenImage21 => &["qwen_image_2.1_vae", "qwen_image_2.1"],
             Family::MingImage => &["ming_image_vae", "ming_image"],
             Family::MossImage => &["flux2-vae_small", "flux2_vae_small", "flux2-vae"],
+            Family::MinimaxH3Image => &["minimax_h3_image_vae", "minimax_h3_image"],
             // The full VAE, not the small decoder beside it.
             Family::Fibo2 => &["flux2-vae.", "flux2_vae.", "flux2-vae", "flux2"],
             Family::Flux3 | Family::Flux2 | Family::Ernie | Family::Ideogram4 => &["flux2-vae", "flux2"],
@@ -578,6 +586,35 @@ mod tests {
         );
         assert_eq!((moss.steps, moss.cfg, moss.sampler.as_str(), moss.megapixels), (25, 2.5, "er_sde", 0.0));
         assert!(moss.can_generate() && !moss.can_edit() && !moss.can_inpaint());
+    }
+
+    #[test]
+    fn minimax_h3_image_is_detected_with_its_own_encoder_and_vae() {
+        let mut f = folders();
+        f.get_mut("diffusion_models").unwrap().extend([
+            "minimax_h3_image_pruned_w4a8.safetensors".into(),
+            // MiniMax H3's video model: not an image model.
+            "minimax_h3_fp8_scaled.safetensors".into(),
+        ]);
+        f.get_mut("text_encoders").unwrap().extend([
+            // Its templates' prompt writer, which must not be taken for its encoder.
+            "qwen3.5_9b_w4a8_gptq.safetensors".into(),
+            "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors".into(),
+        ]);
+        f.get_mut("vae").unwrap().extend(["minimax_h3_vae.safetensors".into(), "minimax_h3_image_vae_fp16.safetensors".into()]);
+        let found = detect(&f);
+        let minimax: Vec<&Model> = found.iter().filter(|m| m.unet.contains("minimax")).collect();
+        assert_eq!(minimax.len(), 1, "{minimax:?}");
+        let m = minimax[0];
+        assert_eq!(
+            (m.family, m.clip.as_str(), m.vae.as_str(), m.steps, m.cfg, m.megapixels),
+            (Family::MinimaxH3Image, "qwen3vl_32b_minimax_h3_nvfp4_awq.safetensors", "minimax_h3_image_vae_fp16.safetensors", 6, 1.0, 4.0)
+        );
+        assert!(m.can_generate() && m.can_edit() && !m.can_inpaint() && problem(m).is_none());
+        // The listed model (int8) is the same model as this 4-bit file: Scan Server points it here.
+        let listed = Family::MinimaxH3Image.preset();
+        assert!(same_variant(&listed, m), "{} / {}", variant(&listed.unet), variant(&m.unet));
+        assert_eq!(variant("minimax_h3_image_pruned_bf16.safetensors"), "minimax h3 image pruned");
     }
 
     #[test]

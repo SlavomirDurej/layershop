@@ -517,8 +517,8 @@ fn poll_comfy(
 }
 
 /// `e`, ComfyUI's refusal of `model`'s workflow, with what to do when the server is older than
-/// the model: MOSS Image came to ComfyUI with its 0.42.0 release and FIBO 2 with 0.43.0, and an
-/// older server rejects their text encoder type (and FIBO 2's prompt node).
+/// the model: MOSS Image came to ComfyUI with its 0.42.0 release, FIBO 2 with 0.43.0 and MiniMax
+/// H3 Image with 0.45.0, and an older server rejects their text encoder type or prompt node.
 fn too_old(model: &Model, e: Error) -> Error {
     use crate::model::Family;
     // The engine the Local AI setup installed is updated by running the setup again.
@@ -529,6 +529,9 @@ fn too_old(model: &Model, e: Error) -> Error {
         }
         Error::Server(msg) if model.family == Family::Fibo2 && msg.to_ascii_lowercase().contains("fibo2") => {
             Error::Server(format!("{msg}. This ComfyUI predates FIBO 2, which it supports since its 0.43.0 release: {UPDATE}"))
+        }
+        Error::Server(msg) if model.family == Family::MinimaxH3Image && msg.to_ascii_lowercase().contains("minimax") => {
+            Error::Server(format!("{msg}. This ComfyUI predates MiniMax H3 Image, which it supports since its 0.45.0 release: {UPDATE}"))
         }
         e => e,
     }
@@ -1043,6 +1046,13 @@ mod tests {
         });
         let e = generate(&older, &settings(), &Family::Fibo2.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
         assert!(e.contains("TextEncodeFibo2 does not exist") && e.contains("0.43.0") && e.contains("update ComfyUI") && e.contains("Set Up Local AI"), "{e}");
+        // MiniMax H3 Image's conditioning node, which a server before 0.45.0 doesn't have.
+        let minimax = Fake::new(|r, _| {
+            assert!(r.url.ends_with("/prompt"));
+            ok(r#"{"error":{"type":"invalid_prompt","message":"Cannot execute because node MiniMaxH3ImageConditioning does not exist."},"node_errors":{}}"#)
+        });
+        let e = generate(&minimax, &settings(), &Family::MinimaxH3Image.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
+        assert!(e.contains("does not exist") && e.contains("0.45.0") && e.contains("update ComfyUI"), "{e}");
         // Another model's refusal is left as it is.
         let e = generate(&old, &settings(), &Family::ZImage.preset(), "", &job, &control(&|| false)).unwrap_err().to_string();
         assert!(!e.contains("update ComfyUI"), "{e}");

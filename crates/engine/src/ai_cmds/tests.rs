@@ -1487,7 +1487,8 @@ fn an_edit_says_what_it_needs() {
         (json!([{"file": "a.png"}]), "`references` must be"),
         (json!([7]), "`references` must be"),
         (json!(null), "`references` must be"),
-        (four, "3 pictures at most"),
+        (four.clone(), "3 reference pictures at most"),
+        (json!(vec![json!({"layer": background}); 16]), "15 pictures at most"),
     ] {
         let e = fails(&mut s, edit(json!({"references": references})));
         assert!(e.contains(want), "{references}: {e}");

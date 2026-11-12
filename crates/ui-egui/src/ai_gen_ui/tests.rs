@@ -1665,7 +1665,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     ai.get_mut("models").and_then(Value::as_array_mut).unwrap().retain(|m| m["id"] != "nano-banana-pro" && m["id"] != "krea-2-turbo");
     assert_eq!(restore_defaults(&mut ai, &mut f), 2);
     let ids: Vec<&str> = ai["models"].as_array().unwrap().iter().filter_map(|m| m["id"].as_str()).collect();
-    assert_eq!((ids.len(), &ids[15..]), (17, &["nano-banana-pro", "krea-2-turbo"][..]));
+    assert_eq!((ids.len(), &ids[16..]), (18, &["nano-banana-pro", "krea-2-turbo"][..]));
     // The same model stored another way, or under the user's own name, counts as listed.
     for m in ai.get_mut("models").and_then(Value::as_array_mut).unwrap() {
         if m["id"] == "z-image-turbo" {
@@ -1674,11 +1674,11 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
         }
     }
     assert_eq!(restore_defaults(&mut ai, &mut f), 0);
-    // Emptied, or unreadable: all seventeen come back.
+    // Emptied, or unreadable: all eighteen come back.
     let mut none = Map::new();
-    assert_eq!((restore_defaults(&mut none, &mut f), none["models"].as_array().unwrap().len()), (17, 17));
+    assert_eq!((restore_defaults(&mut none, &mut f), none["models"].as_array().unwrap().len()), (18, 18));
     let mut junk: Map<String, Value> = serde_json::from_value(json!({"models": [1, "a", {"provider": "nope"}]})).unwrap();
-    assert_eq!(restore_defaults(&mut junk, &mut f), 17);
+    assert_eq!(restore_defaults(&mut junk, &mut f), 18);
 
     // The fake server has Z-Image Turbo as bf16, not the int8 file the recommended entry names:
     // a scan points that entry at the server's file instead of listing the model twice, and adds
@@ -1687,7 +1687,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     f.insert(ACTION.into(), json!("detect"));
     after_body(&mut app, &mut f);
     let models: Vec<Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
-    assert_eq!(models.len(), 19, "{:?}", models.iter().map(|m| &m.id).collect::<Vec<_>>());
+    assert_eq!(models.len(), 20, "{:?}", models.iter().map(|m| &m.id).collect::<Vec<_>>());
     let z = models.iter().find(|m| m.id == "z-image-turbo").unwrap();
     assert_eq!((z.name.as_str(), z.unet.as_str(), z.cfg, z.steps), ("Z-Image Turbo", "z_image_turbo_bf16.safetensors", 2.0, 8));
     let status = f[STATUS]["text"].as_str().unwrap().to_string();
@@ -1695,7 +1695,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     // A second scan has nothing left to do.
     f.insert(ACTION.into(), json!("detect"));
     after_body(&mut app, &mut f);
-    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 19);
+    assert_eq!(f["values"]["integrations"]["ai"]["models"].as_array().unwrap().len(), 20);
     assert!(!f[STATUS]["text"].as_str().unwrap().contains("matched"));
     // With the server's files read, the list marks the models whose file it doesn't have.
     let listing: std::collections::BTreeMap<String, Vec<String>> = serde_json::from_value(f[FILES].clone()).unwrap();
@@ -1708,6 +1708,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
             "flux-3-klein",
             "moss-image",
             "fibo-2-dev",
+            "minimax-h3-image",
             "ideogram-4",
             "hidream-o1",
             "ernie-image-turbo",
@@ -2010,6 +2011,63 @@ fn a_narrow_panel_keeps_everything_inside_it() {
         }
         assert!(used <= width + 0.5, "the panel's content is {used} wide in a panel {width} wide");
     }
+}
+
+#[test]
+fn reference_chips_share_a_row_until_they_would_be_too_narrow() {
+    // Three in a usual panel share the row, as before, with room for +.
+    assert_eq!(refs::chip_width(260.0, 3, true), (260.0 - 26.0) / 3.0 - 4.0);
+    // Fifteen take as many to a row as fit at the narrowest, the rest wrapping.
+    let w = refs::chip_width(260.0, 15, true);
+    assert!(w >= 56.0 && 4.0 * (w + 4.0) <= 264.0 + 0.01, "{w}");
+    // A strange width still gives a chip that can be drawn.
+    for width in [0.0, -5.0, f32::NAN, f32::INFINITY] {
+        let w = refs::chip_width(width, 15, false);
+        assert!(w.is_finite() && w >= 56.0, "{width}: {w}");
+    }
+    assert!(refs::chip_width(260.0, 0, true).is_finite());
+}
+
+/// MiniMax H3 Image takes fifteen references: their chips wrap onto more rows inside the panel
+/// instead of being squeezed into one row that runs out of it.
+#[test]
+fn fifteen_reference_chips_wrap_inside_the_panel() {
+    let mut app = app();
+    add_model(&mut app, Model { id: "minimax".into(), ..Family::MinimaxH3Image.preset() });
+    app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+    app.run("layer.new.layer", json!({"name": "picture"})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("edit.fill", json!({"color": "#336699"})).unwrap();
+    app.run("select.deselect", json!({})).unwrap();
+    let layer = app.session.active().unwrap().active_layer.unwrap().0;
+    (app.ui.ai_gen.mode, app.ui.ai_gen.task, app.ui.ai_gen.edit_model) = (Mode::Edit, EditTask::Change, "minimax".into());
+    app.ui.ai_gen.prompt = "put them all in one picture".into();
+    let refs: Vec<Value> = (0..15).map(|i| json!({"layer": layer, "name": format!("character_{i}")})).collect();
+    app.run("ai.setReferences", json!({"references": refs})).unwrap();
+    let mut heights = Vec::new();
+    for width in [234.0, 300.0, 420.0] {
+        let ctx = egui::Context::default();
+        PhotocraftApp::setup_context(&ctx, Default::default());
+        let input = || egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(width, 1400.0))), ..Default::default() };
+        let mut used = egui::Rect::NOTHING;
+        for _ in 0..3 {
+            ctx.run_ui(input(), |ui| {
+                let inner = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 1400.0));
+                used = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui, false)).response.rect;
+            })
+            .textures_delta
+            .clear();
+        }
+        assert!(used.width() <= width + 0.5, "the panel's content is {} wide in a panel {width} wide", used.width());
+        heights.push(used.height());
+    }
+    // Narrower, more rows.
+    assert!(heights[0] > heights[2], "{heights:?}");
+    // All fifteen are sent: MiniMax takes them; a model that takes three asks for @mentions.
+    let minimax = Model { id: "minimax".into(), ..Family::MinimaxH3Image.preset() };
+    assert_eq!(generate_blocked(&app, &minimax), None);
+    let qwen = Model { id: "q21".into(), ..Family::QwenImage21.preset() };
+    assert!(generate_blocked(&app, &qwen).unwrap().contains("takes fewer references"));
 }
 
 /// A long model name is cut short in its menu instead of growing it past its share of the row:

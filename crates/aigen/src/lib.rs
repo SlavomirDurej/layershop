@@ -39,7 +39,7 @@ pub use launch::ComfyProcess;
 pub use launch::{Launch, LocalServer, ServerState};
 pub use enhance::{EnhanceSettings, TextProvider};
 pub use layout::{LayoutFormat, Region, RegionKind, layout_prompt};
-pub use model::{Family, LORA_STRENGTHS, Lora, MAX_LORAS, MAX_REFERENCES, Model, Provider, Settings, preferred_edit};
+pub use model::{Family, LORA_STRENGTHS, DEFAULT_REFERENCES, Lora, MAX_LORAS, MAX_REFERENCES, Model, Provider, Settings, preferred_edit};
 pub use style::{STYLES, Style, StyleGroup};
 pub use run::{Animation, Control, Generated, Job, LoraUse, MAX_FRAME_MS, MAX_FRAMES, MIN_FRAME_MS, MIN_FRAMES, Source, comfy_models, generate, random_seed, source_size};
 

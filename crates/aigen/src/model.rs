@@ -97,6 +97,10 @@ pub enum Family {
     /// FIBO 2 (Bria): one model that generates and edits, in FLUX.2's latent space, with its own
     /// prompt node. It reads plain prompts and instructions, and Bria's structured captions (VGL).
     Fibo2,
+    /// MiniMax H3 Image: one few-step model that generates and edits, with its own conditioning
+    /// node, which is given the pictures it may refer to as `<Picture 1>`, `<Picture 2>`, … It
+    /// was tuned at about four megapixels and does poorly much below that.
+    MinimaxH3Image,
     /// FLUX.1 Fill (Fill Dev, OneReward): BFL's inpainting model. It is given the picture and
     /// the mask as conditioning, so it knows where it paints; it can't generate from text alone.
     Flux1Fill,
@@ -113,7 +117,7 @@ pub enum Family {
 }
 
 impl Family {
-    pub const ALL: [Family; 19] = [
+    pub const ALL: [Family; 20] = [
         Family::ZImage,
         Family::Krea2,
         Family::Flux3,
@@ -128,6 +132,7 @@ impl Family {
         Family::MingImage,
         Family::MossImage,
         Family::Fibo2,
+        Family::MinimaxH3Image,
         Family::Flux1Fill,
         Family::QwenInpaint,
         Family::QwenEdit,
@@ -151,6 +156,7 @@ impl Family {
             Family::MingImage => "mingImage",
             Family::MossImage => "mossImage",
             Family::Fibo2 => "fibo2",
+            Family::MinimaxH3Image => "minimaxH3Image",
             Family::Flux1Fill => "flux1Fill",
             Family::QwenInpaint => "qwenInpaint",
             Family::QwenEdit => "qwenEdit",
@@ -179,6 +185,7 @@ impl Family {
             Family::MingImage => "Ming Image",
             Family::MossImage => "MOSS Image",
             Family::Fibo2 => "FIBO 2",
+            Family::MinimaxH3Image => "MiniMax H3 Image",
             Family::Flux1Fill => "FLUX.1 Fill (inpainting)",
             Family::QwenInpaint => "Qwen Image + InstantX ControlNet (inpainting)",
             Family::QwenEdit => "Qwen Image Edit (editing)",
@@ -210,7 +217,8 @@ impl Family {
     /// The multiple each edge of the rendered image must be.
     pub fn size_multiple(self) -> u32 {
         // HiDream O1 works on pixels in patches of 32.
-        if matches!(self, Family::QwenImage21 | Family::HidreamO1) { 32 } else { 16 }
+        // MiniMax H3 Image's canvas is a multiple of 32 (its conditioning node's step).
+        if matches!(self, Family::QwenImage21 | Family::HidreamO1 | Family::MinimaxH3Image) { 32 } else { 16 }
     }
 
     /// The size a text-to-image for a `width` × `height` selection is rendered at:
@@ -291,15 +299,15 @@ impl Family {
 
     /// Edits a picture following an instruction (the panel's Edit tab): the edit models, and
     /// the models that generate and edit with the same weights (Qwen Image 2.1, Ming Image,
-    /// FLUX.2, FIBO 2). They are shown the picture whole, as a reference, and render a new one
-    /// from it.
+    /// FLUX.2, FIBO 2, MiniMax H3 Image). They are shown the picture whole, as a reference, and
+    /// render a new one from it.
     ///
     /// Not FLUX.3 Klein, though its templates edit: asked to add a deer to a meadow (2026-10-16,
     /// ComfyUI 0.39, the template's graph) it drew heads growing from chests, fused bodies and
     /// rocks turned half into animals at CFG 3.5, and at the template's CFG 1 no deer or a
     /// shapeless one.
     pub fn edits(self) -> bool {
-        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2)
+        matches!(self, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2 | Family::MinimaxH3Image)
     }
 
     /// Places what a prompt describes in boxes ("regions", the panel's Create › Regions tab): the
@@ -318,9 +326,15 @@ impl Family {
     }
 
     /// How many pictures an edit takes besides the one it edits. Qwen Image Edit's encoder has
-    /// three image inputs in all; the others take more than the panel offers.
+    /// three image inputs in all; MiniMax H3 Image was trained on up to 16 pictures (its authors'
+    /// card), the one it edits and fifteen more. The others take [`DEFAULT_REFERENCES`]: what
+    /// they were tried with.
     pub fn max_references(self) -> usize {
-        if self == Family::QwenEdit { 2 } else { MAX_REFERENCES }
+        match self {
+            Family::QwenEdit => 2,
+            Family::MinimaxH3Image => MAX_REFERENCES,
+            _ => DEFAULT_REFERENCES,
+        }
     }
 
     /// A model of this family with the settings its reference workflow uses. File names are the
@@ -488,6 +502,22 @@ impl Family {
                 negative_prompt: FIBO2_NEGATIVE.into(),
                 ..base
             },
+            // ComfyUI's MiniMax H3 Image templates (ComfyUI 0.45.0): six steps without guidance,
+            // at the templates' four megapixels (their notes: the model works from about 4 to 20
+            // megapixels and does poorly below). The templates' prompt writer (Qwen 3.5 9B) is
+            // left out, as FIBO 2's is: the panel's Enhance does that job.
+            Family::MinimaxH3Image => Model {
+                name: "MiniMax H3 Image".into(),
+                unet: "minimax_h3_image_pruned_int8_convrot.safetensors".into(),
+                clip: "qwen3vl_32b_minimax_h3_int8_convrot.safetensors".into(),
+                vae: "minimax_h3_image_vae_fp16.safetensors".into(),
+                steps: 6,
+                cfg: 1.0,
+                sampler: "euler".into(),
+                scheduler: "simple".into(),
+                megapixels: 4.0,
+                ..base
+            },
             Family::MingImage => Model {
                 name: "Ming Image 0.1 Design".into(),
                 unet: "ming_image_0.1_design_int8_convrot.safetensors".into(),
@@ -546,9 +576,13 @@ pub const MOSS_NEGATIVE: &str = "nsfw, worst quality, bad anatomy, watermark, jp
 /// FIBO 2 Edit template). Only CFG above 1 reads it: the distilled Turbo model runs without.
 pub const FIBO2_NEGATIVE: &str = r#"{"short_description":"","objects":[{"description":"the main subject","texture":"smooth, featureless, plastic-like, airbrushed, no fine surface detail","appearance_details":"soft blurred edges, simplified shapes, no fine detail","skin_tone_and_texture":"waxy airbrushed skin, poreless, plastic smooth"}],"background_setting":"a plain seamless studio backdrop, perfectly smooth gradient, blurred and featureless, no visible texture","lighting":{},"aesthetics":{"artifacts":["oversaturated colours","neon colour cast","overexposed highlights","lens flare","slight blur","motion blur","haze"]},"photographic_characteristics":{"depth_of_field":"shallow, heavy bokeh obscuring most of the frame","focus":"soft, slightly out of focus, lacking fine texture"},"style_medium":"","context":"","artistic_style":""}"#;
 
-/// The most reference pictures an edit is given besides the one it edits (`ai.generate`'s
-/// `references`, the Edit tab's rows).
-pub const MAX_REFERENCES: usize = 3;
+/// The most reference pictures any model is given besides the one it edits, and the most a
+/// document keeps (`ai.generate`'s `references`, `ai.setReferences`, the Edit tab's chips). Each
+/// model takes its own number ([`Model::max_references`]): this is MiniMax H3 Image's.
+pub const MAX_REFERENCES: usize = 15;
+/// The reference pictures a model takes unless it is known to take more or fewer
+/// ([`Family::max_references`]), the cloud models among them.
+pub const DEFAULT_REFERENCES: usize = 3;
 
 /// The most LoRAs one generation stacks (`ai.generate`'s `loras`, the panel's Advanced rows).
 pub const MAX_LORAS: usize = 5;
@@ -797,7 +831,7 @@ impl Model {
 
     /// How many reference pictures an edit with this model takes ([`MAX_REFERENCES`] at most).
     pub fn max_references(&self) -> usize {
-        if self.provider.is_local() { self.family.max_references() } else { MAX_REFERENCES }
+        if self.provider.is_local() { self.family.max_references() } else { DEFAULT_REFERENCES }
     }
 
     /// The cloud models offered by "Add Model". GPT Image 2 stays offered beside 2.5: some
@@ -847,6 +881,9 @@ impl Model {
             // Added 2026-10-30 (not in that comparison): edits as well as it generates, beside
             // Qwen Image 2.1, which stays the recommended edit model ([`preferred_edit`]).
             Some(local(Family::Fibo2, "FIBO 2 Dev")),
+            // Added 2026-11-12 (not in that comparison): generates and edits in six steps, with up
+            // to three references; Qwen Image 2.1 stays the recommended edit model.
+            Some(local(Family::MinimaxH3Image, "MiniMax H3 Image")),
             Some(local(Family::Ideogram4, "Ideogram 4")),
             // With its prompt written by Gemma 4 and the result refined by Z-Image Turbo.
             Some(Model {
@@ -891,13 +928,14 @@ impl Model {
             "flux-2",
             "grok-imagine",
         ];
-        const LOCAL: [Family; 19] = [
+        const LOCAL: [Family; 20] = [
             Family::QwenImage21,
             Family::Krea2,
             Family::ZImage,
             Family::Flux3,
             Family::MossImage,
             Family::Fibo2,
+            Family::MinimaxH3Image,
             Family::Flux2,
             Family::Ideogram4,
             Family::HidreamO1,
@@ -1120,7 +1158,7 @@ mod tests {
     #[test]
     fn editing_follows_the_architecture() {
         for f in Family::ALL {
-            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2);
+            let want = matches!(f, Family::QwenImage21 | Family::MingImage | Family::QwenEdit | Family::Flux2 | Family::Fibo2 | Family::MinimaxH3Image);
             assert_eq!((f.preset().can_edit(), f.edits()), (want, want), "{f:?}");
             assert!(f.max_references() <= MAX_REFERENCES && (!f.edit_only() || f.edits()), "{f:?}");
         }
@@ -1128,11 +1166,11 @@ mod tests {
         let edit = Family::QwenEdit.preset();
         assert!(edit.can_edit() && !edit.can_generate() && !edit.can_inpaint() && edit.max_references() == 2);
         // Cloud models are sent the picture and the instruction.
-        assert!(Model::cloud_presets().iter().all(|m| m.can_edit() && m.max_references() == MAX_REFERENCES));
+        assert!(Model::cloud_presets().iter().all(|m| m.can_edit() && m.max_references() == DEFAULT_REFERENCES));
         // Ming Image generates and edits, at its reference size, and can render transparency.
         let ming = Family::MingImage.preset();
         assert!(ming.can_generate() && ming.can_edit() && !ming.can_inpaint() && ming.alpha);
-        assert_eq!((ming.steps, ming.cfg, ming.megapixels, ming.max_references()), (12, 1.0, 2.0, MAX_REFERENCES));
+        assert_eq!((ming.steps, ming.cfg, ming.megapixels, ming.max_references()), (12, 1.0, 2.0, DEFAULT_REFERENCES));
         // Raised to four, it is still given pictures at two; other models, and a lower size, are left.
         assert_eq!(
             (Family::MingImage.source_megapixels(4.0), Family::MingImage.source_megapixels(1.0), Family::MingImage.source_megapixels(0.0)),
@@ -1140,6 +1178,15 @@ mod tests {
         );
         assert_eq!(Family::Flux2.source_megapixels(4.0), 4.0);
         assert!(Family::MingImage.source_megapixels(f64::NAN).is_nan());
+        // MiniMax H3 Image generates and edits at its templates' four megapixels, edges a
+        // multiple of 32, in six steps without guidance; it neither inpaints nor takes regions.
+        // It takes the most references: fifteen besides the picture, sixteen pictures in all.
+        let minimax = Family::MinimaxH3Image.preset();
+        assert!(minimax.can_generate() && minimax.can_edit() && !minimax.can_inpaint() && minimax.layout().is_none());
+        assert_eq!((minimax.steps, minimax.cfg, minimax.megapixels, minimax.max_references()), (6, 1.0, 4.0, 15));
+        assert_eq!(MAX_REFERENCES, Family::ALL.into_iter().map(Family::max_references).max().unwrap());
+        assert_eq!((Family::MinimaxH3Image.source_megapixels(4.0), Family::MinimaxH3Image.size_multiple()), (4.0, 32));
+        assert_eq!(Family::from_key("minimaxH3Image"), Some(Family::MinimaxH3Image));
         // The other local presets don't claim transparency.
         assert!(Family::ALL.into_iter().all(|f| f == Family::MingImage || !f.preset().alpha));
     }
@@ -1164,6 +1211,7 @@ mod tests {
                 "flux-3-klein",
                 "moss-image",
                 "fibo-2-dev",
+                "minimax-h3-image",
                 "ideogram-4",
                 "hidream-o1",
                 "ernie-image-turbo",

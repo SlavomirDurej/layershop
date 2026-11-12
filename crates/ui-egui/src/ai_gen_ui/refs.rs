@@ -177,35 +177,35 @@ pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max:
     let thumbs = thumbs(&app.session, ui.ctx(), &refs);
     let has_doc = app.session.active().is_some();
     ui.add_enabled_ui(!busy && has_doc, |ui| {
-        ui.horizontal(|ui| {
+        ui.horizontal_top(|ui| {
             edit_label(ui, tr("Refs"));
-            ui.spacing_mut().item_spacing.x = 4.0;
-            // The chips share the row (with room for + while there is one to add): a long name is
-            // shortened rather than pushing the panel wider.
-            let addable = refs.len() < max && !offered.is_empty();
-            let plus = if addable { 22.0 + 4.0 } else { 0.0 };
-            let each = ((ui.available_width() - plus) / refs.len().max(1) as f32 - 4.0).max(40.0);
-            for (i, r) in refs.iter().enumerate() {
-                let (state, number) = states.get(i).copied().unwrap_or((Sent::All, None));
-                let label = if r.name.is_empty() { format!("{} {}", tr("Image"), number.unwrap_or(i + 2)) } else { format!("@{}", r.name) };
-                let picture = photocraft_engine::ai_refs_cmds::describe(&app.session, &r.picture);
-                let (body, close) = chip(ui, &label, thumbs.get(i).copied().flatten(), state, open == Some(i), each);
-                if close {
-                    remove = Some(i);
-                } else if body.clicked() {
-                    open = if open == Some(i) { None } else { Some(i) };
+            // The chips wrap onto more rows beside the label (a model may take fifteen).
+            ui.horizontal_wrapped(|ui| {
+                ui.spacing_mut().item_spacing = egui::vec2(4.0, 4.0);
+                let addable = refs.len() < max && !offered.is_empty();
+                let each = chip_width(ui.available_width(), refs.len(), addable);
+                for (i, r) in refs.iter().enumerate() {
+                    let (state, number) = states.get(i).copied().unwrap_or((Sent::All, None));
+                    let label = if r.name.is_empty() { format!("{} {}", tr("Image"), number.unwrap_or(i + 2)) } else { format!("@{}", r.name) };
+                    let picture = photocraft_engine::ai_refs_cmds::describe(&app.session, &r.picture);
+                    let (body, close) = chip(ui, &label, thumbs.get(i).copied().flatten(), state, open == Some(i), each);
+                    if close {
+                        remove = Some(i);
+                    } else if body.clicked() {
+                        open = if open == Some(i) { None } else { Some(i) };
+                    }
+                    body.on_hover_text(chip_tip(&r.name, &picture, state, number));
                 }
-                body.on_hover_text(chip_tip(&r.name, &picture, state, number));
-            }
-            if addable
-                && crate::icons::button(ui, "plus", 22.0, false, tr("Add a picture to refer to: a layer, a document, or a layer of another open document"))
-                    .clicked()
-            {
-                add = true;
-            }
-            if refs.is_empty() {
-                ui.add(egui::Label::new(RichText::new(tr("Characters, objects, places…")).color(t.text_faint).size(super::NOTE_SIZE)).truncate());
-            }
+                if addable
+                    && crate::icons::button(ui, "plus", 22.0, false, tr("Add a picture to refer to: a layer, a document, or a layer of another open document"))
+                        .clicked()
+                {
+                    add = true;
+                }
+                if refs.is_empty() {
+                    ui.add(egui::Label::new(RichText::new(tr("Characters, objects, places…")).color(t.text_faint).size(super::NOTE_SIZE)).truncate());
+                }
+            });
         });
     });
     if let Some(i) = remove {
@@ -242,6 +242,25 @@ pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max:
     }
     ui.add_space(6.0);
     app.ui.ai_gen.editing_ref = open;
+}
+
+/// The narrowest a chip is made to share a row: its thumbnail, a few letters and its ×.
+const CHIP_MIN: f32 = 56.0;
+
+/// How wide each of `count` chips may be in a row `width` wide (with room for the + button when
+/// `addable`): the row shared between them while each gets [`CHIP_MIN`], else as many to a row as
+/// fit at that width, the rest wrapping onto more rows.
+pub(super) fn chip_width(width: f32, count: usize, addable: bool) -> f32 {
+    const GAP: f32 = 4.0;
+    const PLUS: f32 = 22.0;
+    let width = if width.is_finite() { width.max(CHIP_MIN) } else { CHIP_MIN };
+    let plus = if addable { PLUS + GAP } else { 0.0 };
+    let shared = (width - plus) / count.max(1) as f32 - GAP;
+    if shared >= CHIP_MIN {
+        return shared;
+    }
+    let per_row = ((width + GAP) / (CHIP_MIN + GAP)).floor().max(1.0);
+    ((width + GAP) / per_row - GAP).max(CHIP_MIN)
 }
 
 /// What a chip's tooltip says: the picture, and what the prompt does with it.

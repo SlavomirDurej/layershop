@@ -141,7 +141,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Set AI References",
             menu: &[],
             shortcut: None,
-            params: r##"{"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id}|{"keep":index}, each with "name":str? (letters, digits, _ and -; no two alike),…] (3 at most)} → as ai.references: replace the active document's references (saved with it in PSD and .pcraft files). A layer of this document, or the document itself, is read when an edit runs; another open document, or a layer of one, is copied in now; keep takes one the document has, by its index. ai.generate imgEdit without references sends these: those the prompt @mentions by name, else all. One History step"##,
+            params: r##"{"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id}|{"keep":index}, each with "name":str? (letters, digits, _ and -; no two alike),…] (15 at most; most models take 3, see ai.models' references: an edit then needs the prompt to @mention the ones to send)} → as ai.references: replace the active document's references (saved with it in PSD and .pcraft files). A layer of this document, or the document itself, is read when an edit runs; another open document, or a layer of one, is copied in now; keep takes one the document has, by its index. ai.generate imgEdit without references sends these: those the prompt @mentions by name, else all. One History step"##,
             enabled: has_doc,
             run: set_references,
             journal: true,
@@ -228,7 +228,7 @@ mod tests {
             (json!({"references": [{"layer": 999_999}]}), "is not in this document"),
             (json!({"references": [{"document": 999_999}]}), "is not open"),
             (json!({"references": [{"layer": luna, "name": "A"}, {"layer": luna, "name": "a"}]}), "two references are named"),
-            (json!({"references": [{"layer": luna}, {"layer": luna}, {"layer": luna}, {"layer": luna}]}), "3 references at most"),
+            (json!({"references": vec![json!({"layer": luna}); 16]}), "15 references at most"),
         ] {
             let e = fails(&mut s, p.clone());
             assert!(e.contains(want), "{p}: {e}");

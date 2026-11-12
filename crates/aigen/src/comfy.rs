@@ -57,6 +57,7 @@ fn clip_type(family: Family) -> &'static str {
         Family::MossImage => "moss_image",
         Family::Ideogram4 => "ideogram4",
         Family::Fibo2 => "fibo2",
+        Family::MinimaxH3Image => "minimax",
         // Ming Image's encoder is recognised by its weights; its templates load it as this type.
         Family::QwenImage | Family::QwenImage21 | Family::MingImage | Family::QwenInpaint | Family::QwenEdit => "qwen_image",
         _ => "stable_diffusion",
@@ -214,6 +215,59 @@ pub fn moss_scaled(prompt: &str, from: (u32, u32), to: (u32, u32)) -> String {
     Value::Object(layout).to_string()
 }
 
+/// MiniMax H3 Image's conditioning node (ComfyUI's MiniMax H3 Image Conditioning): it shows the
+/// `pictures` to the text encoder with `prompt`, each labelled "Picture N", and gives them to the
+/// model as reference latents. Returns its conditioning and the empty latent of the canvas it
+/// sizes (`width` × `height`), which is 5-dimensional: not one [`latent_node`] could give.
+fn minimax_conditioning(g: &mut Graph, clip: &Link, vae: &Link, prompt: &str, job: &Job, pictures: &[Link]) -> (Link, Link) {
+    let mut inputs = json!({"clip": clip, "vae": vae, "prompt": prompt, "width": job.width, "height": job.height});
+    for (i, picture) in pictures.iter().enumerate() {
+        inputs[format!("images.image_{}", i + 1)] = picture.clone();
+    }
+    let id = g.add("MiniMaxH3ImageConditioning", inputs);
+    (json!([id, 0]), json!([id, 1]))
+}
+
+/// The negative side of MiniMax H3 Image's guidance: zeroed, as its templates have it, unless
+/// CFG above 1 asks for the negative prompt (with the same pictures).
+fn minimax_negative(g: &mut Graph, model: &Model, clip: &Link, vae: &Link, job: &Job, positive: &Link, pictures: &[Link]) -> Link {
+    if finite(model.cfg, 1.0) > 1.0 && !model.negative_prompt.trim().is_empty() {
+        minimax_conditioning(g, clip, vae, &model.negative_prompt, job, pictures).0
+    } else {
+        g.node("ConditioningZeroOut", json!({"conditioning": positive}))
+    }
+}
+
+/// `prompt` with the pictures named the way MiniMax H3 Image was trained to read them: the
+/// panel's "image 2" (as a reference mention is written out, `Luna (image 2)`) becomes
+/// `<Picture 2>`. "images", "image2" and a number run into letters are left alone.
+fn minimax_pictures(prompt: &str) -> String {
+    let mut out = String::with_capacity(prompt.len() + 16);
+    let mut rest = prompt;
+    let mut after_word = false;
+    while !rest.is_empty() {
+        let starts = rest.get(..6).is_some_and(|w| w.eq_ignore_ascii_case("image ")) && !after_word;
+        if starts {
+            let tail = &rest[6..];
+            let digits = tail.bytes().take_while(u8::is_ascii_digit).count();
+            let ends = tail[digits..].chars().next().is_none_or(|c| !c.is_alphanumeric());
+            if digits > 0 && digits <= 3 && ends {
+                out.push_str("<Picture ");
+                out.push_str(&tail[..digits]);
+                out.push('>');
+                rest = &tail[digits..];
+                after_word = true;
+                continue;
+            }
+        }
+        let Some(c) = rest.chars().next() else { break };
+        out.push(c);
+        after_word = c.is_alphanumeric() || c == '_';
+        rest = &rest[c.len_utf8()..];
+    }
+    out
+}
+
 /// The nodes that decode `samples` into the image to show. Ming Image's VAE decodes four
 /// channels, and an image that was not asked to be transparent still comes back with pixels
 /// short of opaque (alpha down to two thirds, measured): its alpha is dropped unless `alpha`.
@@ -253,6 +307,9 @@ pub fn inpaint_workflow(model: &Model, job: &Job, inpaint: &Inpaint<'_>) -> Resu
 /// - FLUX.2: each picture is a reference latent on the conditioning.
 /// - FIBO 2: its encoder takes the pictures with the prompt and gives the latent to sample, at
 ///   the size asked for (ComfyUI's FIBO 2 Edit template).
+/// - MiniMax H3 Image: its conditioning node takes the pictures with the prompt, which names them
+///   `<Picture N>` ([`minimax_pictures`]), and gives the latent to sample, at the size asked for
+///   (ComfyUI's MiniMax H3 Image Edit template).
 ///
 /// With a mask the sampler starts from the encoded picture and denoises only the masked part
 /// (Set Latent Noise Mask, through Differential Diffusion for a soft mask), as an inpainting
@@ -304,6 +361,8 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
     // HiDream O1's prompt writer and refining pass are for a picture made from a prompt alone.
     let polished = f == Family::HidreamO1 && inpaint.is_none();
     let mut text = json!(job.prompt);
+    // The latent a family's own encoder gives, for a text to image.
+    let mut own_latent = None;
     let (mut positive, mut negative) = if f == Family::QwenImage21 {
         // Its own node encodes both prompts (and reference images, of which there are none here).
         let id = g.add(
@@ -319,6 +378,12 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
             json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "width": job.width, "height": job.height, "batch_size": 1}),
         );
         (json!([id, 0]), json!([id, 1]))
+    } else if f == Family::MinimaxH3Image {
+        // Its own node encodes the prompt (no pictures: they are for edits) and sizes the latent.
+        let (positive, latent) = minimax_conditioning(&mut g, &clip, &vae, &job.prompt, job, &[]);
+        own_latent = Some(latent);
+        let negative = minimax_negative(&mut g, model, &clip, &vae, job, &positive, &[]);
+        (positive, negative)
     } else {
         let prompt = if inpaint.is_none() { prompt_for(model, job) } else { job.prompt.clone() };
         text = if polished { enhanced(&mut g, model, job, &prompt) } else { json!(prompt) };
@@ -385,7 +450,10 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
                 }
             }
         }
-        None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
+        None => match own_latent {
+            Some(latent) => latent,
+            None => g.node(latent_node(f), json!({"width": job.width, "height": job.height, "batch_size": 1})),
+        },
     };
     let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise, from_picture: inpaint.is_some() });
     let mut image = decode(&mut g, model, &samples, &vae, transparent(model, job, inpaint.is_some()));
@@ -629,7 +697,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
     let name = if model.name.is_empty() { f.label() } else { model.name.as_str() };
     if !f.edits() {
         return Err(Error::Config(format!(
-            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, FIBO 2, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
+            "{name} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, FIBO 2, MiniMax H3 Image, Ming Image, Qwen Image Edit or FLUX.2) on the Edit tab"
         )));
     }
     if let Some(why) = crate::detect::problem(model) {
@@ -677,6 +745,15 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
             }
             let id = g.add("TextEncodeFibo2", inputs);
             (json!([id, 0]), json!([id, 1]), json!([id, 2]))
+        }
+        Family::MinimaxH3Image => {
+            // Its node shows the pictures to the text encoder, labelled Picture 1, 2, …, and
+            // hands them to the model as reference latents; the latent it gives is the size asked
+            // for, which is the picture's (ComfyUI's MiniMax H3 Image Edit template).
+            let prompt = minimax_pictures(&job.prompt);
+            let (positive, latent) = minimax_conditioning(&mut g, &clip, &vae, &prompt, job, &pictures);
+            let negative = minimax_negative(&mut g, model, &clip, &vae, job, &positive, &pictures);
+            (positive, negative, latent)
         }
         Family::QwenEdit => {
             unet = g.node("CFGNorm", json!({"model": unet, "strength": 1.0}));
@@ -1490,6 +1567,87 @@ mod tests {
         let w = edit_workflow(&guided, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &[] }).unwrap();
         assert_well_formed(&w);
         assert_eq!((count(&w, "TextEncodeMingImageEdit"), has(&w, "CFGGuider")), (2, true));
+    }
+
+    #[test]
+    fn minimax_h3_image_follows_its_templates() {
+        let m = Family::MinimaxH3Image.preset();
+        let has = |w: &Value, class: &str| classes(w).iter().any(|x| x == class);
+        let count = |w: &Value, class: &str| classes(w).iter().filter(|x| *x == class).count();
+        let linked = |w: &Value, link: &Value| w[link[0].as_str().unwrap()].clone();
+
+        // Text to image, as its template: its loaders, its conditioning node sizing the latent,
+        // the negative side zeroed, six Euler steps without guidance.
+        let w = workflow(&m, &job()).unwrap();
+        assert_well_formed(&w);
+        assert_eq!(node(&w, "CLIPLoader")["inputs"]["type"], "minimax");
+        assert_eq!(
+            (&node(&w, "UNETLoader")["inputs"]["unet_name"], &node(&w, "CLIPLoader")["inputs"]["clip_name"], &node(&w, "VAELoader")["inputs"]["vae_name"]),
+            (
+                &json!("minimax_h3_image_pruned_int8_convrot.safetensors"),
+                &json!("qwen3vl_32b_minimax_h3_int8_convrot.safetensors"),
+                &json!("minimax_h3_image_vae_fp16.safetensors")
+            )
+        );
+        let nodes = w.as_object().unwrap();
+        let (id, cond) = nodes.iter().find(|(_, n)| n["class_type"] == "MiniMaxH3ImageConditioning").unwrap();
+        assert_eq!((&cond["inputs"]["prompt"], &cond["inputs"]["width"], &cond["inputs"]["height"]), (&json!("a red frog"), &json!(1024), &json!(768)));
+        assert!(cond["inputs"]["clip"].is_array() && cond["inputs"]["vae"].is_array() && cond["inputs"].get("images.image_1").is_none());
+        let k = &node(&w, "KSampler")["inputs"];
+        assert_eq!((&k["steps"], &k["cfg"], &k["sampler_name"], &k["scheduler"]), (&json!(6), &json!(1.0), &json!("euler"), &json!("simple")));
+        assert_eq!((&k["positive"], &k["latent_image"]), (&json!([id, 0]), &json!([id, 1])));
+        assert_eq!(linked(&w, &k["negative"])["class_type"], "ConditioningZeroOut");
+        assert!(!classes(&w).iter().any(|x| x.starts_with("Empty") || x == "CLIPTextEncode" || x.starts_with("ModelSampling")), "{:?}", classes(&w));
+
+        // An edit, as its Image Edit template: the pictures go to the conditioning node, which
+        // gives the latent of the size asked for; "image 2" is written as it reads it.
+        let references = ["hat.png".to_string(), "dog.png".to_string()];
+        let asked = Job { prompt: "put the hat of image 2 on Rex (Image 3), not images 2".into(), ..job() };
+        let w = edit_workflow(&m, &asked, &Edit { image: "src.png", mask: None, shown: None, references: &references }).unwrap();
+        assert_well_formed(&w);
+        let nodes = w.as_object().unwrap();
+        let (id, cond) = nodes.iter().find(|(_, n)| n["class_type"] == "MiniMaxH3ImageConditioning").unwrap();
+        assert_eq!(cond["inputs"]["prompt"], "put the hat of <Picture 2> on Rex (<Picture 3>), not images 2");
+        let picture = |i: usize| cond["inputs"].get(format!("images.image_{i}")).map(|link| linked(&w, link)["inputs"]["image"].clone());
+        assert_eq!((picture(1), picture(2), picture(3), picture(4)), (Some(json!("src.png")), Some(json!("hat.png")), Some(json!("dog.png")), None));
+        assert_eq!((&cond["inputs"]["width"], &cond["inputs"]["height"]), (&json!(1024), &json!(768)));
+        let k = &node(&w, "KSampler")["inputs"];
+        assert_eq!((&k["positive"], &k["latent_image"], &k["denoise"]), (&json!([id, 0]), &json!([id, 1]), &json!(1.0)));
+        assert!(!has(&w, "VAEEncode") && !has(&w, "ReferenceLatent") && !has(&w, "CLIPTextEncode"), "{:?}", classes(&w));
+        // Masked, the sampler starts from the picture and paints only the mask.
+        let w = edit_workflow(&m, &job(), &Edit { image: "src.png", mask: Some("mask.png"), shown: None, references: &[] }).unwrap();
+        assert_well_formed(&w);
+        assert_eq!(linked(&w, &node(&w, "KSampler")["inputs"]["latent_image"])["class_type"], "SetLatentNoiseMask");
+        assert!(has(&w, "DifferentialDiffusion"));
+        // CFG above 1 with a negative prompt encodes it with the same pictures.
+        let guided = Model { cfg: 3.0, negative_prompt: "blurry".into(), ..m.clone() };
+        let w = edit_workflow(&guided, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &references }).unwrap();
+        assert_well_formed(&w);
+        assert_eq!((count(&w, "MiniMaxH3ImageConditioning"), has(&w, "ConditioningZeroOut")), (2, false));
+        assert!(nodes_with(&w, "MiniMaxH3ImageConditioning").iter().all(|n| n["inputs"].get("images.image_3").is_some()));
+        // Fifteen references, sixteen pictures in all, as its authors' card allows; not sixteen.
+        let many: Vec<String> = (0..16).map(|i| format!("r{i}.png")).collect();
+        let w = edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &many[..15] }).unwrap();
+        assert_well_formed(&w);
+        let cond = node(&w, "MiniMaxH3ImageConditioning");
+        assert!(cond["inputs"].get("images.image_16").is_some() && cond["inputs"].get("images.image_17").is_none());
+        let e = edit_workflow(&m, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &many }).unwrap_err().to_string();
+        assert!(e.contains("15 reference pictures at most"), "{e}");
+        // The others keep their three.
+        let e = edit_workflow(&Family::QwenImage21.preset(), &job(), &Edit { image: "src.png", mask: None, shown: None, references: &many[..4] });
+        assert!(e.unwrap_err().to_string().contains("3 reference pictures at most"));
+    }
+
+    #[test]
+    fn pictures_are_named_as_minimax_reads_them() {
+        assert_eq!(minimax_pictures("Luna (image 2) waves at IMAGE 3."), "Luna (<Picture 2>) waves at <Picture 3>.");
+        assert_eq!(minimax_pictures("image 1"), "<Picture 1>");
+        // Not part of another word, not a number run into letters, not "images" or "image2".
+        for same in ["images 2", "subimage 2", "image 2nd", "image2", "image  2", "image 1234", "image ", "", "an image of a cat"] {
+            assert_eq!(minimax_pictures(same), same);
+        }
+        // Text beyond ASCII passes through whole.
+        assert_eq!(minimax_pictures("é image 2 — 猫 image 3"), "é <Picture 2> — 猫 <Picture 3>");
     }
 
     #[test]
