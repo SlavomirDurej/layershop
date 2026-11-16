@@ -34,7 +34,7 @@ fn no_marker_uses_the_platform_dir() {
     let dir = d.dir.unwrap();
     assert_eq!(Some(dir.clone()), platform_dir(&env));
     assert!(!dir.starts_with(&exe));
-    assert!(!exe.join(portable_data_dir()).exists(), "no portable folder without a marker");
+    assert!(!exe.join(PORTABLE_DATA_DIR).exists(), "no portable folder without a marker");
     // The convention per platform.
     if cfg!(target_os = "macos") {
         assert_eq!(dir, root.join("home/Library/Application Support/LayerShop"));
@@ -57,7 +57,7 @@ fn either_marker_keeps_everything_beside_the_exe() {
         assert_eq!(d.mode, Mode::Portable, "{marker}");
         assert!(d.warning.is_none());
         let dir = d.dir.unwrap();
-        assert_eq!(dir, exe.join(portable_data_dir()));
+        assert_eq!(dir, exe.join(PORTABLE_DATA_DIR));
         assert!(dir.is_dir(), "the data folder is created");
         assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "the write probe is removed");
         // Every derived path sits under the exe dir.
@@ -85,7 +85,7 @@ fn unwritable_portable_folder_falls_back_with_a_warning() {
     std::fs::create_dir_all(&exe).unwrap();
     std::fs::write(exe.join("portable.txt"), b"").unwrap();
     // A file where the data folder should go: it can't be created, on every platform.
-    std::fs::write(exe.join(portable_data_dir()), b"in the way").unwrap();
+    std::fs::write(exe.join(PORTABLE_DATA_DIR), b"in the way").unwrap();
     let env = fake_home(&root);
     let d = resolve(&env, Some(&exe));
     assert_eq!(d.mode, Mode::Platform);
@@ -107,7 +107,7 @@ fn override_wins_over_portable() {
     let custom = root.join("custom");
     let d = resolve(env_of(&[("PHOTOCRAFT_CONFIG_DIR", &custom)]), Some(&exe));
     assert_eq!((d.mode, d.dir), (Mode::Override, Some(custom)));
-    assert!(!exe.join(portable_data_dir()).exists());
+    assert!(!exe.join(PORTABLE_DATA_DIR).exists());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -467,4 +467,11 @@ fn the_write_probe_never_follows_an_entry_already_at_its_name() {
     assert!(ensure_writable(&data).is_err());
     assert_eq!(std::fs::read(&victim).unwrap(), b"keep me");
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_folders_are_named_after_the_brand() {
+    // The shared resolver can't depend on the UI crate, so it holds its own copy of the name.
+    assert_eq!(DIR_NAME, photocraft_ui_egui::brand::NAME);
+    assert_eq!(PORTABLE_DATA_DIR, format!("{DIR_NAME}Data"));
 }
