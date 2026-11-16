@@ -4106,7 +4106,13 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
                         number_row(ui, m, "refineStrength", "Refine strength", 0.05..=1.0, false, "How far the refining pass may move from the picture. 0.35 adds skin and fabric texture and keeps the picture");
                     }
                 }
+            } else if family == Family::QwenEdit && !text_of(m, "checkpoint").trim().is_empty() {
+                // An all-in-one merge holds the other three files.
+                file_row(ui, m, "checkpoint", "All-in-one checkpoint", folder("checkpoints"), true);
             } else {
+                if family == Family::QwenEdit {
+                    file_row(ui, m, "checkpoint", "All-in-one checkpoint", folder("checkpoints"), true);
+                }
                 file_row(ui, m, "unet", "Diffusion model", folder("diffusion_models"), false);
                 if family == Family::Ideogram4 {
                     file_row(ui, m, "unet2", "Unconditional", folder("diffusion_models"), true);

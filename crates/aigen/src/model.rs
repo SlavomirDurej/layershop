@@ -962,6 +962,13 @@ impl Model {
     pub fn main_file(&self) -> &str {
         if self.checkpoint.trim().is_empty() { self.unet.trim() } else { self.checkpoint.trim() }
     }
+
+    /// Its files come from one checkpoint (`models/checkpoints`) that holds the diffusion model,
+    /// the text encoder and the VAE: the families that only come that way, and Qwen Image Edit
+    /// given an all-in-one merge (such as Phr00t's Qwen Image Edit Rapid AIO) as its checkpoint.
+    pub fn loads_checkpoint(&self) -> bool {
+        self.family.uses_checkpoint() || (self.family == Family::QwenEdit && !self.checkpoint.trim().is_empty())
+    }
 }
 
 /// `integrations.ai` in the preferences. API keys are not part of it: they are kept apart from

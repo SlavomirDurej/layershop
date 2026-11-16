@@ -532,7 +532,7 @@ fn refined(g: &mut Graph, model: &Model, job: &Job, image: &Link, text: &Value) 
 /// shift), the text encoder and the VAE.
 fn loaders(g: &mut Graph, model: &Model, job: &Job) -> Result<(Link, Link, Link)> {
     let f = model.family;
-    let (mut unet, mut clip, vae) = if f.uses_checkpoint() {
+    let (mut unet, mut clip, vae) = if model.loads_checkpoint() {
         let id = g.add("CheckpointLoaderSimple", json!({"ckpt_name": file(&model.checkpoint, "a checkpoint file", model)?}));
         (json!([id, 0]), json!([id, 1]), json!([id, 2]))
     } else {
@@ -763,8 +763,10 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
                     inputs[format!("image{}", i + 1)] = picture.clone();
                 }
                 let cond = g.node("TextEncodeQwenImageEditPlus", inputs);
-                // 2511 was trained to tell its pictures apart by index.
-                if model.unet.contains("2511") {
+                // 2511 was trained to tell its pictures apart by index. The all-in-one merges
+                // are built on it since their version 15 (before that on 2509).
+                let aio_2511 = model.loads_checkpoint() && !model.checkpoint.contains("2509");
+                if model.unet.contains("2511") || aio_2511 {
                     g.node("FluxKontextMultiReferenceLatentMethod", json!({"conditioning": cond, "reference_latents_method": "index_timestep_zero"}))
                 } else {
                     cond
@@ -1952,6 +1954,35 @@ mod tests {
         assert!(check_edit(&m).unwrap_err().to_string().contains("VAE"));
         assert_eq!(upload_reference(0), "photocraft_edit_reference_1.png");
         assert_eq!(upload_reference(usize::MAX), format!("photocraft_edit_reference_{}.png", usize::MAX));
+    }
+
+    #[test]
+    fn an_all_in_one_qwen_edit_checkpoint_is_loaded_whole() {
+        // Phr00t's Rapid AIO: diffusion model, text encoder and VAE in one checkpoint.
+        let aio = Model { checkpoint: "Qwen-Rapid-AIO-SFW-v19.safetensors".into(), unet: String::new(), clip: String::new(), vae: String::new(), ..Family::QwenEdit.preset() };
+        let edit = Edit { image: "src.png", mask: None, shown: None, references: &[] };
+        let w = edit_workflow(&aio, &job(), &edit).unwrap();
+        assert_well_formed(&w);
+        let c = classes(&w);
+        assert_eq!(node(&w, "CheckpointLoaderSimple")["inputs"]["ckpt_name"], "Qwen-Rapid-AIO-SFW-v19.safetensors");
+        for gone in ["UNETLoader", "CLIPLoader", "VAELoader"] {
+            assert!(!c.iter().any(|x| x == gone), "{gone}: {c:?}");
+        }
+        // Built on 2511 since its version 15, so the pictures are read by index.
+        assert_eq!(c.iter().filter(|x| *x == "TextEncodeQwenImageEditPlus").count(), 2);
+        assert_eq!(c.iter().filter(|x| *x == "FluxKontextMultiReferenceLatentMethod").count(), 2);
+        let older = Model { checkpoint: "Qwen-Rapid-AIO-2509-v10.safetensors".into(), ..aio.clone() };
+        assert!(!classes(&edit_workflow(&older, &job(), &edit).unwrap()).iter().any(|x| x == "FluxKontextMultiReferenceLatentMethod"));
+    }
+
+    #[test]
+    fn qwen_edit_with_qwen_2_1_files_is_refused_before_comfyui() {
+        // The reported setup: Qwen Image Edit's architecture with Qwen Image 2.1's text encoder,
+        // which ComfyUI fails on with `normalized_shape=[3584] … got [1, 18, 4096]`.
+        let wrong = Model { clip: "qwen3vl_8b_fp8_scaled.safetensors".into(), ..Family::QwenEdit.preset() };
+        let edit = Edit { image: "src.png", mask: None, shown: None, references: &[] };
+        let e = edit_workflow(&wrong, &job(), &edit).unwrap_err().to_string();
+        assert!(e.contains("qwen_2.5_vl_7b") && e.contains("qwen3vl_8b"), "{e}");
     }
 
     #[test]

@@ -413,6 +413,12 @@ and renders a new one from it; the result is a new layer, and the source is not 
   **Ming Image** and **FLUX.2** (which also generate), **Qwen Image Edit** 2509 / 2511 (which do nothing else; Scan Server adds them, with
   their four-step Lightning LoRA when the server has it), and cloud models (OpenAI's image edit
   endpoint, Gemini with the pictures attached).
+- An all-in-one Qwen Image Edit merge (one file with the diffusion model, text encoder and VAE,
+  such as Phr00t's Qwen Image Edit Rapid AIO) goes in `models/checkpoints`: Scan Server adds it as
+  Qwen Image Edit loaded from that checkpoint, at four steps, CFG 1 and euler_ancestral / beta.
+  In the model manager its **All-in-one checkpoint** row replaces the three separate files. Qwen
+  Image Edit with Qwen Image 2.1's text encoder or VAE is refused with what to change, before
+  ComfyUI fails on a tensor shape.
 
 Tried against ComfyUI 0.39 on one 1232 x 816 picture (RTX 4090): Qwen Image 2.1 recolours a
 blouse in 16 s and replaces the fruit in a selected bowl in 11 s, with nothing outside the

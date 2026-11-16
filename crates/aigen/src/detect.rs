@@ -33,7 +33,7 @@ fn title(file: &str) -> String {
 /// than Qwen Image Edit and FIBO 2, are not recognised.
 fn family_of(file: &str) -> Option<Family> {
     let n = file.to_ascii_lowercase();
-    if n.contains("qwen_image_edit") || n.contains("qwen-image-edit") {
+    if n.contains("qwen_image_edit") || n.contains("qwen-image-edit") || is_qwen_edit_aio(&n) {
         return Some(Family::QwenEdit);
     }
     // Its distilled model is named for editing (`fibo2_edit_turbo_…`) but generates as well.
@@ -83,6 +83,20 @@ fn family_of(file: &str) -> Option<Family> {
     })
 }
 
+/// An all-in-one Qwen Image Edit merge: Phr00t's Rapid AIO (`Qwen-Rapid-AIO-SFW-v19…`), which
+/// holds the diffusion model, the text encoder and the VAE in one file. `n` is lowercase.
+fn is_qwen_edit_aio(n: &str) -> bool {
+    n.contains("qwen") && (n.contains("rapid-aio") || n.contains("rapid_aio") || n.contains("edit-aio") || n.contains("edit_aio"))
+}
+
+/// The settings an all-in-one Qwen Image Edit merge renders with: it has the Lightning
+/// accelerator merged in, so four steps without guidance (its author's model card).
+fn qwen_edit_aio_settings(m: &mut Model) {
+    (m.steps, m.cfg) = (4, 1.0);
+    m.sampler = "euler_ancestral".into();
+    m.scheduler = "beta".into();
+}
+
 /// A model set up in a way that is known not to run, and what to do: files of one architecture
 /// under another's settings. Only the combinations that are certain to fail are reported (the
 /// user is free to try anything else); the alternative is ComfyUI's own error, a tensor shape.
@@ -111,6 +125,27 @@ pub fn problem(model: &Model) -> Option<String> {
                 ))
             } else if vae == "qwen_image_vae.safetensors" {
                 Some(format!("{name}: Qwen Image 2.1 needs its own VAE (qwen_image_2.1_vae…), not {}. {fix}, or choose that VAE.", model.vae.trim()))
+            } else {
+                None
+            }
+        }
+        // Its files with Qwen Image 2.1's encoder or VAE: ComfyUI fails with a tensor shape
+        // (`normalized_shape=[3584] … got [1, 18, 4096]`), the 2.1 encoder being wider.
+        Family::QwenEdit if !model.loads_checkpoint() => {
+            let clip = model.clip.to_ascii_lowercase();
+            let vae = model.vae.to_ascii_lowercase();
+            if family_of(&model.unet) == Some(Family::QwenImage21) {
+                Some(format!("{name}: {} is a Qwen Image 2.1 model, not Qwen Image Edit. {fix}, or set its Architecture to Qwen Image 2.1.", model.unet.trim()))
+            } else if clip.contains("qwen3") {
+                Some(format!(
+                    "{name}: Qwen Image Edit needs the Qwen 2.5 VL 7B text encoder (qwen_2.5_vl_7b…), not {}, which is Qwen Image 2.1's. {fix}, or choose that text encoder.",
+                    model.clip.trim()
+                ))
+            } else if vae.contains("2.1") {
+                Some(format!(
+                    "{name}: Qwen Image Edit needs the Qwen Image VAE (qwen_image_vae…), not {}, which is Qwen Image 2.1's. {fix}, or choose that VAE.",
+                    model.vae.trim()
+                ))
             } else {
                 None
             }
@@ -239,6 +274,7 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             // FIBO 2 Edit Turbo, the step and CFG distillation of Dev: its template's four steps
             // without guidance, and so no negative prompt.
             Family::Fibo2 if turbo => (m.steps, m.cfg, m.negative_prompt) = (4, 1.0, String::new()),
+            Family::QwenEdit if is_qwen_edit_aio(&n) => qwen_edit_aio_settings(&mut m),
             Family::QwenEdit => {
                 // With its release's four-step LoRA on the server, the model renders in four steps.
                 let release = ["2509", "2511"].into_iter().find(|r| n.contains(r));
@@ -343,6 +379,13 @@ pub fn detect(folders: &BTreeMap<String, Vec<String>>) -> Vec<Model> {
             {
                 (m.refiner, m.refiner_clip, m.refiner_vae) = (turbo.clone(), clip, vae);
             }
+            out.push(m);
+        } else if is_qwen_edit_aio(&n) {
+            // All three files in one: loaded whole, with no separate encoder or VAE.
+            let mut m = Family::QwenEdit.preset();
+            m.name = title(file);
+            (m.checkpoint, m.unet, m.clip, m.vae) = (file.clone(), String::new(), String::new(), String::new());
+            qwen_edit_aio_settings(&mut m);
             out.push(m);
         } else if n.contains("sdxl") || n.contains("sd_xl") || n.contains("sd15") || n.contains("v1-5") {
             let mut m = Family::Checkpoint.preset();
@@ -687,6 +730,41 @@ mod tests {
             assert_eq!(problem(&f.preset()), None, "{f:?}");
         }
         assert_eq!(problem(&Model { unet: "mystery.safetensors".into(), ..Family::Flux2.preset() }), None);
+    }
+
+    #[test]
+    fn qwen_edit_with_qwen_2_1_files_is_caught() {
+        let right = Family::QwenEdit.preset();
+        assert_eq!(problem(&right), None);
+        let encoder = Model { clip: "qwen3vl_8b_fp8_scaled.safetensors".into(), ..right.clone() };
+        assert!(problem(&encoder).unwrap().contains("qwen_2.5_vl_7b"), "{:?}", problem(&encoder));
+        let vae = Model { vae: "qwen_image_2.1_vae_bf16.safetensors".into(), ..right.clone() };
+        assert!(problem(&vae).unwrap().contains("VAE"), "{:?}", problem(&vae));
+        let unet = Model { unet: "qwen_image_2.1_int8_convrot.safetensors".into(), ..right.clone() };
+        assert!(problem(&unet).unwrap().contains("Qwen Image 2.1 model"), "{:?}", problem(&unet));
+        // An all-in-one checkpoint brings its own encoder and VAE: what is left in those fields is unused.
+        let aio = Model { checkpoint: "Qwen-Rapid-AIO-SFW-v19.safetensors".into(), ..encoder.clone() };
+        assert_eq!(problem(&aio), None);
+    }
+
+    #[test]
+    fn an_all_in_one_qwen_edit_merge_is_found_in_either_folder() {
+        let file = "Qwen-Rapid-AIO-SFW-v19.safetensors".to_string();
+        let mut f = folders();
+        f.insert("checkpoints".into(), vec![file.clone()]);
+        let found = detect(&f);
+        let m = found.iter().find(|m| m.checkpoint == file).unwrap();
+        assert_eq!(m.family, Family::QwenEdit);
+        assert!(m.loads_checkpoint() && m.unet.is_empty() && m.clip.is_empty() && m.vae.is_empty());
+        assert_eq!((m.steps, m.cfg, m.sampler.as_str(), m.scheduler.as_str()), (4, 1.0, "euler_ancestral", "beta"));
+        assert!(m.can_edit() && problem(m).is_none() && on_server(&f, m));
+        // Put with the diffusion models, it is loaded as one, with the server's encoder and VAE.
+        let mut f = folders();
+        f.get_mut("diffusion_models").unwrap().push(file.clone());
+        let found = detect(&f);
+        let m = found.iter().find(|m| m.unet == file).unwrap();
+        assert_eq!((m.family, m.steps, m.cfg), (Family::QwenEdit, 4, 1.0));
+        assert!(!m.loads_checkpoint() && m.clip.contains("qwen_2.5_vl") && m.vae.contains("qwen_image_vae"), "{m:?}");
     }
 
     #[test]
