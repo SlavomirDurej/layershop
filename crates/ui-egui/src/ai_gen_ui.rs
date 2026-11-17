@@ -1625,7 +1625,7 @@ fn model_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, models: &[Model], chose
             // layer, the gear and (the panel laid out that much wider) Generate out of view (#7).
             ui.set_max_width(model_w);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-            widgets::dropdown_sectioned(ui, "ai-gen-model", tr("Model"), chosen, &options, &headings, model_w);
+            widgets::dropdown_sectioned_search(ui, "ai-gen-model", tr("Model"), chosen, &options, &headings, model_w);
         });
         enhance_pressed = enhance::button(app, ui, enhance_words, busy);
         let tip = if source_layer.is_some() {
@@ -2594,7 +2594,7 @@ fn file_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &
                 options.push((String::new(), none.as_str()));
             }
             options.extend(names.iter().map(|n| (n.clone(), n.as_str())));
-            widgets::dropdown(ui, &format!("ai-file-{key}"), tr(title), &mut cur, &options, field_width(ui));
+            widgets::dropdown_search(ui, &format!("ai-file-{key}"), tr(title), &mut cur, &options, field_width(ui));
         }
         None => {
             ui.add(egui::TextEdit::singleline(&mut cur).desired_width(field_width(ui)).hint_text(tr("Not set")));

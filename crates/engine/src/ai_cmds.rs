@@ -677,7 +677,7 @@ fn fill_line(line: &mut [Option<[f32; 3]>]) {
 pub enum SourceRef {
     /// A layer of the active document that has pixels, by id.
     Layer(u64),
-    /// An open document, by id: its image as it shows, all layers together. The active document
+    /// An open document, by id: its image as it shows, its visible layers together. The active document
     /// itself is taken where it is; another one is fitted to the area.
     Document(u64),
     /// A layer of an open document: its pixels alone. Of the active document it is
@@ -894,34 +894,32 @@ fn has_image(doc: &Document) -> bool {
     !canvas.is_empty() && doc.walk().into_iter().any(|(_, _, l)| shows(l))
 }
 
-/// The pictures an image-to-image can start from now, with a name for each: the layers of the
-/// active document that have pixels on the canvas (top first), then the other open documents.
+/// The pictures an image-to-image can start from now, with a name for each: the active document
+/// as it shows (its visible layers together), the layers of the active document that have pixels
+/// on the canvas (top first), then the other open documents.
 pub fn img2img_sources(s: &Session) -> Vec<(SourceRef, String)> {
     let Some(d) = s.active() else { return Vec::new() };
     let canvas = d.doc.bounds();
-    let mut out: Vec<(SourceRef, String)> = d
+    let mut out = Vec::new();
+    if has_image(&d.doc) {
+        out.push((SourceRef::Document(d.doc.id.0), "Document (visible layers)".to_string()));
+    }
+    out.extend(d
         .doc
         .walk()
         .into_iter()
         .rev()
         .filter(|(_, _, l)| l.surface().is_some_and(|px| !px.content_bounds().intersect(&canvas).is_empty()))
-        .map(|(_, _, l)| (SourceRef::Layer(l.id.0), format!("Layer: {}", l.name)))
-        .collect();
+        .map(|(_, _, l)| (SourceRef::Layer(l.id.0), format!("Layer: {}", l.name))));
     let others = s.documents().iter().filter(|o| o.doc.id != d.doc.id && has_image(&o.doc));
     out.extend(others.map(|o| (SourceRef::Document(o.doc.id.0), format!("Document: {}", o.doc.name))));
     out
 }
 
-/// The pictures an edit can start from, or refer to: the active document as it shows (all its
-/// layers together), then [`img2img_sources`].
+/// The pictures an edit can start from, or refer to: the same as a restyle's
+/// ([`img2img_sources`]), the active document as it shows first.
 pub fn edit_sources(s: &Session) -> Vec<(SourceRef, String)> {
-    let Some(d) = s.active() else { return Vec::new() };
-    let mut out = Vec::new();
-    if has_image(&d.doc) {
-        out.push((SourceRef::Document(d.doc.id.0), "This document (all layers)".to_string()));
-    }
-    out.extend(img2img_sources(s));
-    out
+    img2img_sources(s)
 }
 
 /// The pictures an edit can refer to: [`edit_sources`], then the layers with pixels of the other
@@ -2091,7 +2089,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Generate…",
             menu: &[],
             shortcut: None,
-            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, all layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; up to 15 here, and as many as the model takes, see ai.models' references: 3 for most, 15 for MiniMax H3 Image),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"style":id?=none (a style preset of ai.styles: its sentence is added after the prompt, and the layer keeps its id),"enhanced":bool=false (the prompt is one ai.enhancePrompt wrote: a model with a prompt writer of its own, such as HiDream O1, leaves it as it is),"count":1..10=1 (how many images to make, one layer each, in one undo step; each gets a new random seed unless "seed" is given or the model has a fixed one, when they all render alike; an image that fails after others were made ends the batch and keeps those),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-10..10?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt),"animate":bool=false (an animated GIF instead of a still, from a model that makes them, see ai.models' animate: GPT Image 2.6; txt2img, or imgEdit to animate a picture; count 1. It becomes a video layer on the timeline: one without other video layers is made for it (its frames, 1000/frameMs fps), one with others keeps its rate and is grown to hold it (each video layer plays at its own rate); describe the motion and the loop in the prompt),"frames":2..16=9 (animate: how many frames),"frameMs":20..2000=200 (animate: how long each shows, rounded to 10; the timeline plays it at 1000/frameMs fps)} → {layer (the last made, on top),layers:[id,…] (bottom to top),bounds,model,mode,seed (the last image's),seeds:[…],renderSize,modelPrompt (the prompt the model was given, mentions, layout and style written out),cost (USD billed for all the images, when the provider reports or publishes it; else null),stopped (why a batch ended early; else null),frames (animate: the frames of the video layer; else 0),fps (animate: the rate it was made for, 1000/frameMs; else null),timelineFps (animate: the timeline's rate: the animation's, unless the timeline has other video layers, whose rate it keeps; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}]),style (when it had one)}"##,
+            params: r##"{"prompt":str,"model":id?=first enabled model (imgEdit: Qwen Image 2.1 when it is listed, else the first that edits),"mode":"txt2img|inpaint|img2img|imgEdit"="txt2img" (inpaint repaints the selected part of the active pixel layer: it needs a selection and pixels there; img2img redraws a picture; imgEdit changes a picture following the prompt as an instruction, with a model that edits: with a selection only the part around it is sent and the result is masked by it; a local model paints only inside it),"source":{"layer":id}|{"document":id}?=the active layer when it has pixels, else the first of ai.sources (img2img, imgEdit: a layer is taken in place, over the selection's bounds or else its own pixels; the active document likewise, its visible layers together; another open document is fitted to the selection's bounds or else the canvas),"references":[{"layer":id}|{"document":id}|{"document":id,"layer":id} (a layer of another open document), each with "name":str? (letters, digits, _ and -; no two alike),…]?=none (imgEdit: more pictures the instruction may refer to, as image 2, image 3, … or by name as @Name; when the prompt @mentions any, only those are sent, each mention written out for the model as "Name (image N)"; up to 15 here, and as many as the model takes, see ai.models' references: 3 for most, 15 for MiniMax H3 Image),"quality":"draft|standard|detail"="standard" (local models: about a quarter of the model's steps, its steps, or a fifth more),"strength":0..1=1, img2img 0.6 (local models: how far the result may depart from what is there),"context":0..4=0.25 (inpaint, imgEdit with a selection: how much of the picture around the selection the model is shown, as a fraction of the selection's longer edge),"alpha":bool=false (transparent background, models that support it),"seed":int?=the model's (random when -1),"rect":[x,y,w,h]?=the selection's bounds (inpaint: grown by the context), else the canvas,"mask":bool=true (the selection becomes the layer mask),"regions":true|[{kind,caption,text,rect},…]?=none (txt2img with a model trained on boxes, see ai.models' regions: lay the scene out in boxes; true sends the document's, see ai.regions; the prompt is then the scene, and the model is given both in its layout format, see ai.layoutPrompt),"style":id?=none (a style preset of ai.styles: its sentence is added after the prompt, and the layer keeps its id),"enhanced":bool=false (the prompt is one ai.enhancePrompt wrote: a model with a prompt writer of its own, such as HiDream O1, leaves it as it is),"count":1..10=1 (how many images to make, one layer each, in one undo step; each gets a new random seed unless "seed" is given or the model has a fixed one, when they all render alike; an image that fails after others were made ends the batch and keeps those),"loras":[{"lora":str (a LoRA of the model's settings by file or name, see ai.models' loras, or a file of the server's models/loras),"strength":-10..10?=its settings' strength, else 1},…]?=none (local models that take LoRAs: up to 5 stacked on the model, after its own speed LoRA; their trigger words are added to the prompt),"animate":bool=false (an animated GIF instead of a still, from a model that makes them, see ai.models' animate: GPT Image 2.6; txt2img, or imgEdit to animate a picture; count 1. It becomes a video layer on the timeline: one without other video layers is made for it (its frames, 1000/frameMs fps), one with others keeps its rate and is grown to hold it (each video layer plays at its own rate); describe the motion and the loop in the prompt),"frames":2..16=9 (animate: how many frames),"frameMs":20..2000=200 (animate: how long each shows, rounded to 10; the timeline plays it at 1000/frameMs fps)} → {layer (the last made, on top),layers:[id,…] (bottom to top),bounds,model,mode,seed (the last image's),seeds:[…],renderSize,modelPrompt (the prompt the model was given, mentions, layout and style written out),cost (USD billed for all the images, when the provider reports or publishes it; else null),stopped (why a batch ended early; else null),frames (animate: the frames of the video layer; else 0),fps (animate: the rate it was made for, 1000/frameMs; else null),timelineFps (animate: the timeline's rate: the animation's, unless the timeline has other video layers, whose rate it keeps; else null)}; the new layer keeps these settings: its `generation` in the layer tree is {mode,model,modelName,prompt,strength,context,alpha,seed,source,references,quality,regions (when it had any),loras (when it had any: [{file,name,strength}]),style (when it had one)}"##,
             enabled: can_generate,
             run: generate,
             journal: true,
@@ -2111,7 +2109,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Image Sources",
             menu: &[],
             shortcut: None,
-            params: r##"{"mode":"img2img|imgEdit|reference"="img2img"} → {sources:[{source:{"layer":id}|{"document":id}|{"document":id,"layer":id},name,default}]}: what ai.generate can start from in that mode: the active document's layers that have pixels and the other open documents; for imgEdit the active document itself, all layers together, comes first; reference (what an edit's references are chosen from) adds the layers with pixels of the other open documents, each after its document"##,
+            params: r##"{"mode":"img2img|imgEdit|reference"="img2img"} → {sources:[{source:{"layer":id}|{"document":id}|{"document":id,"layer":id},name,default}]}: what ai.generate can start from in that mode: the active document itself (its visible layers together), its layers that have pixels and the other open documents; reference (what an edit's references are chosen from) adds the layers with pixels of the other open documents, each after its document"##,
             enabled: always,
             run: sources,
             journal: false,

@@ -962,8 +962,8 @@ fn image_to_image_from_the_panel_picks_a_layer_or_another_document() {
     assert_eq!(app.ui.ai_gen.img_source, Some(SourceRef::Layer(background)));
     // The other document is empty: it is no picture, and is not offered.
     let offered = photocraft_engine::ai_cmds::img2img_sources(&app.session);
-    assert_eq!(offered.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [SourceRef::Layer(background)]);
-    assert!(offered[0].1.starts_with("Layer: "));
+    assert_eq!(offered.iter().map(|(s, _)| *s).collect::<Vec<_>>(), [SourceRef::Document(pictured), SourceRef::Layer(background)]);
+    assert!(offered[0].1 == "Document (visible layers)" && offered[1].1.starts_with("Layer: "));
     assert!(photocraft_engine::ai_cmds::img2img_plan(&app.session, Some(SourceRef::Document(empty_doc)), None).err().unwrap().contains("is empty"));
     // A selection narrows the area, and masks the result.
     app.run("select.rect", json!({"x": 8, "y": 4, "width": 20, "height": 10})).unwrap();

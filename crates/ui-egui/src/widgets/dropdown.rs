@@ -10,7 +10,7 @@ pub fn dropdown<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current
 /// [`dropdown`] whose option labels are shown exactly as given: names the user typed (a channel
 /// or layer name) must not be translated, unlike the built-in labels [`dropdown`] translates (#5335).
 pub fn dropdown_literal<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current: &mut T, options: &[(T, &str)], width: f32) -> bool {
-    let (chosen, _) = dropdown_with(ui, id, name, current, options, width, false, false, &[], &|_| false, &|_| true);
+    let (chosen, _) = dropdown_with(ui, id, name, current, options, width, false, false, &[], &|_| false, &|_| true, false);
     !chosen.is_empty()
 }
 
@@ -26,7 +26,7 @@ pub fn dropdown_enabled<T: PartialEq + Clone>(
     enabled: impl Fn(&T) -> bool,
 ) -> bool {
     let before = current.clone();
-    let (chosen, _) = dropdown_with(ui, id, name, current, options, width, false, true, &[], &|_| false, &enabled);
+    let (chosen, _) = dropdown_with(ui, id, name, current, options, width, false, true, &[], &|_| false, &enabled, false);
     // The arrow keys and type-ahead step onto greyed rows too; landing there keeps the value.
     if !enabled(current) {
         *current = before;
@@ -38,7 +38,7 @@ pub fn dropdown_enabled<T: PartialEq + Clone>(
 
 /// [`dropdown`], also returning the option under the pointer in its open list (live previews).
 pub fn dropdown_hovered<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current: &mut T, options: &[(T, &str)], width: f32) -> (bool, Option<T>) {
-    let (chosen, hovered) = dropdown_with(ui, id, name, current, options, width, false, true, &[], &|_| false, &|_| true);
+    let (chosen, hovered) = dropdown_with(ui, id, name, current, options, width, false, true, &[], &|_| false, &|_| true, false);
     (!chosen.is_empty(), hovered)
 }
 
@@ -54,7 +54,39 @@ pub fn dropdown_sectioned<T: PartialEq + Clone>(
     headings: &[(usize, &str)],
     width: f32,
 ) -> bool {
-    !dropdown_with(ui, id, name, current, options, width, false, true, headings, &|_| false, &|_| true).0.is_empty()
+    !dropdown_with(ui, id, name, current, options, width, false, true, headings, &|_| false, &|_| true, false).0.is_empty()
+}
+
+/// [`dropdown_literal`] whose open list starts with a search field once it has
+/// [`SEARCH_FROM`] options or more: typing narrows the list to the options whose label holds the
+/// typed text (any case), and ↩ picks the first of them. For long lists of file names (models,
+/// LoRAs) that are found by a word in their name, not scrolled through.
+pub fn dropdown_search<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name: &str, current: &mut T, options: &[(T, &str)], width: f32) -> bool {
+    !dropdown_with(ui, id, name, current, options, width, false, false, &[], &|_| false, &|_| true, true).0.is_empty()
+}
+
+/// [`dropdown_sectioned`] with [`dropdown_search`]'s search field. Its option labels are shown as
+/// given (names, not built-in labels). While the search narrows the list, the headings are left
+/// out: a heading over options that were all filtered away would stand over nothing.
+pub fn dropdown_sectioned_search<T: PartialEq + Clone>(
+    ui: &mut Ui,
+    id: &str,
+    name: &str,
+    current: &mut T,
+    options: &[(T, &str)],
+    headings: &[(usize, &str)],
+    width: f32,
+) -> bool {
+    !dropdown_with(ui, id, name, current, options, width, false, false, headings, &|_| false, &|_| true, true).0.is_empty()
+}
+
+/// How many options a searchable dropdown has before its list shows the search field.
+pub const SEARCH_FROM: usize = 10;
+
+/// Whether `label` holds `query` (its words, any case): "krea dark" finds "krea2_darkbrush".
+pub fn search_matches(label: &str, query: &str) -> bool {
+    let label = label.to_lowercase();
+    query.to_lowercase().split_whitespace().all(|w| label.contains(w))
 }
 
 /// [`dropdown_hovered`] whose value also steps with the wheel over its button or open list: down
@@ -72,7 +104,7 @@ pub fn dropdown_wheel_hovered<T: PartialEq + Clone>(
     options: &[(T, &str)],
     width: f32,
 ) -> (Vec<T>, Option<T>) {
-    dropdown_with(ui, id, name, current, options, width, true, true, &[], &|_| false, &|_| true)
+    dropdown_with(ui, id, name, current, options, width, true, true, &[], &|_| false, &|_| true, false)
 }
 
 /// [`dropdown_wheel_hovered`] whose open list draws a line above each option (but the first) that
@@ -87,7 +119,7 @@ pub fn dropdown_wheel_grouped<T: PartialEq + Clone>(
     width: f32,
     starts_group: impl Fn(&T) -> bool,
 ) -> (Vec<T>, Option<T>) {
-    dropdown_with(ui, id, name, current, options, width, true, true, &[], &starts_group, &|_| true)
+    dropdown_with(ui, id, name, current, options, width, true, true, &[], &starts_group, &|_| true, false)
 }
 
 /// [`dropdown_wheel_grouped`] whose open list greys the options `enabled` refuses: drawn disabled,
@@ -105,7 +137,7 @@ pub fn dropdown_wheel_grouped_enabled<T: PartialEq + Clone>(
     starts_group: impl Fn(&T) -> bool,
     enabled: impl Fn(&T) -> bool,
 ) -> (Vec<T>, Option<T>) {
-    dropdown_with(ui, id, name, current, options, width, true, true, &[], &starts_group, &enabled)
+    dropdown_with(ui, id, name, current, options, width, true, true, &[], &starts_group, &enabled, false)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -121,6 +153,7 @@ fn dropdown_with<T: PartialEq + Clone>(
     headings: &[(usize, &str)],
     starts_group: &dyn Fn(&T) -> bool,
     enabled: &dyn Fn(&T) -> bool,
+    search: bool,
 ) -> (Vec<T>, Option<T>) {
     let shown = |l: &str| if translate { tl!(l).to_string() } else { l.to_string() };
     let label = options.iter().find(|(v, _)| v == current).map(|(_, l)| shown(l)).unwrap_or_else(|| "—".into());
@@ -136,12 +169,27 @@ fn dropdown_with<T: PartialEq + Clone>(
     // The list opens on the press: press, drag onto an option and release to choose it (#2735).
     let (press, close) = crate::press_menu::PressCombo::before(ui, id);
     let texts: Vec<String> = options.iter().map(|(_, l)| shown(l)).collect();
+    let searching = search && options.len() >= SEARCH_FROM;
+    let query_id = ui.make_persistent_id(id).with("search");
     let response = combo_list(ui, id, label, width, close, |ui| {
         fit_widest_option(ui, texts.iter().map(|l| l.as_str()));
+        let query = if searching { search_field(ui, &query_id, &texts) } else { String::new() };
+        let keep = |i: usize| query.is_empty() || texts.get(i).is_some_and(|l| search_matches(l, &query));
+        // ↩ in the search field picks the first option that matches.
+        if !query.is_empty()
+            && ui.input(|i| i.key_pressed(egui::Key::Enter))
+            && let Some((v, _)) = options.iter().enumerate().find(|(i, (v, _))| keep(*i) && enabled(v)).map(|(_, o)| o)
+        {
+            *current = v.clone();
+            chosen.push(v.clone());
+            ui.close();
+        }
         // A typed letter jumps to the next option starting with it, ↩ closes the list (#1481).
+        // With a search field the letters are the search's instead.
         let labels: Vec<&str> = texts.iter().map(|l| l.as_str()).collect();
         let shown = options.iter().position(|(v, _)| v == current);
-        if let Some((v, _)) = type_ahead::keys(ui, ui.make_persistent_id(id), shown, &labels).and_then(|i| options.get(i)) {
+        let typed = if searching { None } else { type_ahead::keys(ui, ui.make_persistent_id(id), shown, &labels) };
+        if let Some((v, _)) = typed.and_then(|i| options.get(i)) {
             *current = v.clone();
             chosen.push(v.clone());
             reveal = true;
@@ -161,7 +209,10 @@ fn dropdown_with<T: PartialEq + Clone>(
         let pointer = ui.ctx().pointer_hover_pos().filter(|_| ui.rect_contains_pointer(ui.clip_rect()));
         let mut nearest: Option<(f32, &T)> = None;
         for (i, ((v, _), text)) in options.iter().zip(texts.iter()).enumerate() {
-            if let Some((_, heading)) = headings.iter().find(|(at, _)| *at == i) {
+            if !keep(i) {
+                continue;
+            }
+            if let Some((_, heading)) = headings.iter().find(|(at, _)| *at == i).filter(|_| query.is_empty()) {
                 let t = crate::theme::Tokens::get(ui.ctx());
                 if i > 0 {
                     ui.add_space(4.0);
@@ -210,6 +261,13 @@ fn dropdown_with<T: PartialEq + Clone>(
         None => response.response.accessible_name(name),
     };
     press.after(&response);
+    // A list opened again starts unfiltered.
+    if searching && !craft_ui::ComboBox::is_open(ui.ctx(), response.id) {
+        ui.data_mut(|d| {
+            d.remove::<String>(query_id);
+            d.remove::<bool>(query_id.with("focused"));
+        });
+    }
     if combo_box_arrow_keys(ui, &response, current, options) {
         chosen.push(current.clone());
     }
@@ -229,6 +287,23 @@ fn dropdown_with<T: PartialEq + Clone>(
         hovered = None;
     }
     (chosen, hovered)
+}
+
+/// The search field at the top of an open searchable list: focused as the list opens, so typing
+/// goes straight into it. Returns what it holds. Says so when nothing matches.
+fn search_field(ui: &mut Ui, id: &egui::Id, texts: &[String]) -> String {
+    let mut query: String = ui.data(|d| d.get_temp(*id)).unwrap_or_default();
+    let field = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tl!("Search")).desired_width(f32::INFINITY));
+    if !field.has_focus() && ui.data(|d| d.get_temp::<bool>(id.with("focused"))).is_none() {
+        field.request_focus();
+        ui.data_mut(|d| d.insert_temp(id.with("focused"), true));
+    }
+    if !query.is_empty() && !texts.iter().any(|l| search_matches(l, &query)) {
+        let t = Tokens::get(ui.ctx());
+        ui.label(egui::RichText::new(tl!("No matches")).color(t.text_faint));
+    }
+    ui.data_mut(|d| d.insert_temp(*id, query.clone()));
+    query
 }
 
 /// A line between two groups of an open dropdown list's options, as wide as the list. Like egui's
@@ -593,4 +668,20 @@ pub fn dropdown_with_tooltips<T: PartialEq + Clone>(ui: &mut Ui, id: &str, name:
         response.on_hover_text(tl!(tip));
     }
     changed
+}
+
+#[cfg(test)]
+mod search_tests {
+    use super::search_matches;
+
+    #[test]
+    fn search_finds_every_word_in_any_case() {
+        assert!(search_matches("krea2_darkbrush.safetensors", "krea"));
+        assert!(search_matches("krea2_darkbrush.safetensors", "KREA dark"));
+        assert!(search_matches("FLUX.1 Krea [dev]", "krea"));
+        assert!(!search_matches("qwen_image_2.1.safetensors", "krea"));
+        assert!(!search_matches("krea2_darkbrush", "krea light"));
+        // Nothing typed: everything stays.
+        assert!(search_matches("anything", "") && search_matches("anything", "   "));
+    }
 }

@@ -33,7 +33,7 @@ pub fn describe(s: &Session, picture: &AiPicture) -> String {
             let name = s.active().and_then(|d| d.doc.layer(LayerId(*id))).map_or_else(|| format!("layer {id}"), |l| l.name.clone());
             format!("Layer: {name}")
         }
-        AiPicture::Document => "This document (all layers)".to_string(),
+        AiPicture::Document => "Document (visible layers)".to_string(),
         AiPicture::Image { label, .. } => format!("Copy of {label}"),
     }
 }

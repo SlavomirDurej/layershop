@@ -386,7 +386,7 @@ oranges", "put the scarf from image 2 around her neck". An edit model is shown t
 and renders a new one from it; the result is a new layer, and the source is not changed.
 
 - **Source** is the picture to change ("image 1" to the model): a **layer** with pixels (the
-  active one unasked), **This document (all layers)**, or another **open document** (fitted to
+  active one unasked), **Document (visible layers)**, or another **open document** (fitted to
   the selection or the canvas, as for a restyle).
 - **A selection scopes the edit** (crop, edit, composite). Only the selection's bounds, with a
   quarter of their longer edge around them for context, are sent to the model, and its answer

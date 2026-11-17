@@ -418,6 +418,20 @@ fn alternate_keys_run_their_command() {
     assert!(take_log(&h.ctx).is_empty());
 }
 
+/// F1 opens the AI Gen panel (Window › AI Gen), from the canvas and from a text field alike: a
+/// panel closed by accident comes back with one key.
+#[test]
+fn f1_opens_the_ai_gen_panel() {
+    let mut h = harness();
+    set_dry_run(&h.ctx, true);
+    for place in [Place::Canvas, Place::OpacityField] {
+        put_focus(&mut h, place);
+        press(&mut h, "F1");
+        let log = take_log(&h.ctx);
+        assert!(matches!(log.as_slice(), [(id, _)] if id == crate::ai_gen_ui::PANEL), "{log:?}");
+    }
+}
+
 /// Ctrl+F4 closes the document beside Ctrl+W, as in Photoshop on Windows, through the same
 /// guarded Close: unsaved changes still get the save prompt.
 #[cfg(not(target_os = "macos"))]

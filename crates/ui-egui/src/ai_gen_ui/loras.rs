@@ -108,22 +108,49 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Mode
                 let full = list.len() >= MAX_LORAS;
                 let tip = if full { tr("Five LoRAs at most: remove one to add another") } else { tr("Add a LoRA: one of those this model's settings offer") };
                 let plus = ui.add_enabled_ui(!full, |ui| crate::icons::button(ui, "plus", 24.0, false, tip)).inner;
+                // A menu opened again starts unfiltered.
+                if !egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&plus)) {
+                    let id = ui.make_persistent_id("ai-lora-search");
+                    ui.data_mut(|d| {
+                        d.remove::<String>(id);
+                        d.remove::<bool>(id.with("focused"));
+                    });
+                }
                 egui::Popup::menu(&plus).show(|ui| {
                     widgets::menu_scroll(ui, |ui| {
                         if current.loras.is_empty() {
                             ui.label(RichText::new(tr("This model has no LoRAs set up yet.")).color(t.text_faint).size(11.0));
                         }
+                        // A long list starts with a search field: a word of the name or the file.
+                        let search_id = ui.make_persistent_id("ai-lora-search");
+                        let mut query: String = ui.data(|d| d.get_temp(search_id)).unwrap_or_default();
+                        if current.loras.len() >= widgets::SEARCH_FROM {
+                            let field = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tr("Search")).desired_width(f32::INFINITY));
+                            if ui.data(|d| d.get_temp::<bool>(search_id.with("focused"))).is_none() {
+                                field.request_focus();
+                                ui.data_mut(|d| d.insert_temp(search_id.with("focused"), true));
+                            }
+                            ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
+                        }
+                        let mut shown = 0;
                         for lora in &current.loras {
                             let file = lora.file.trim();
                             if file.is_empty() {
                                 continue;
                             }
+                            if !widgets::search_matches(&format!("{} {file}", lora.label()), &query) {
+                                continue;
+                            }
+                            shown += 1;
                             let there = list.iter().any(|l| l.file.trim() == file);
                             let item = ui.add_enabled(!there, egui::Button::new(lora.label())).on_hover_text(file);
                             if item.clicked() {
                                 list.push(PanelLora { file: file.to_string(), strength: lora.strength, on: true });
                                 ui.close();
                             }
+                        }
+                        if shown == 0 && !current.loras.is_empty() {
+                            ui.label(RichText::new(tr("No matches")).color(t.text_faint).size(11.0));
                         }
                         ui.separator();
                         if ui.button(tr("Manage LoRAs…")).clicked() {
@@ -216,7 +243,7 @@ pub(super) fn library(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Opti
                     options.push((String::new(), none.as_str()));
                 }
                 options.extend(names.iter().map(|n| (n.clone(), n.as_str())));
-                widgets::dropdown_literal(ui, &format!("ai-lora-{id}-{i}"), tr("LoRA file"), &mut lora.file, &options, file_width);
+                widgets::dropdown_search(ui, &format!("ai-lora-{id}-{i}"), tr("LoRA file"), &mut lora.file, &options, file_width);
             }
             ui.add_space(4.0);
             if ui.add_enabled_ui(i > 0, |ui| crate::icons::button(ui, "chevron-up", 24.0, false, tr("Move up"))).inner.clicked() {

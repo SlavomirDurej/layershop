@@ -756,11 +756,12 @@ fn image_to_image_takes_another_open_document_fitted_to_the_area() {
     // The active document has only an empty layer: no layer to start from, the other document is
     // what is offered, and it is the default.
     let listed = s.execute("ai.sources", json!({})).unwrap();
-    assert_eq!(listed["sources"].as_array().unwrap().len(), 2, "{listed}");
-    assert_eq!(listed["sources"][1]["source"], json!({"document": first}));
-    assert!(listed["sources"][1]["name"].as_str().unwrap().starts_with("Document: "));
-    // (The generated layer is now the first source, and the default.)
-    assert_eq!(listed["sources"][0]["default"], true);
+    assert_eq!(listed["sources"].as_array().unwrap().len(), 3, "{listed}");
+    assert_eq!(listed["sources"][0]["name"], "Document (visible layers)");
+    assert_eq!(listed["sources"][2]["source"], json!({"document": first}));
+    assert!(listed["sources"][2]["name"].as_str().unwrap().starts_with("Document: "));
+    // (The generated layer, the active one, is the default: after the document as it shows.)
+    assert_eq!(listed["sources"][1]["default"], true);
 }
 
 #[test]
@@ -1286,9 +1287,13 @@ fn an_edit_without_a_selection_takes_the_whole_picture() {
     // The document as it shows is a source too, taken where it is: first on the list for an edit,
     // while the active layer stays the default.
     let listed = s.execute("ai.sources", json!({"mode": "imgEdit"})).unwrap();
-    assert_eq!((&listed["sources"][0]["source"], listed["sources"][0]["name"].as_str()), (&json!({"document": doc}), Some("This document (all layers)")));
+    assert_eq!((&listed["sources"][0]["source"], listed["sources"][0]["name"].as_str()), (&json!({"document": doc}), Some("Document (visible layers)")));
     assert_eq!(listed["sources"].as_array().unwrap().iter().filter(|x| x["default"] == true).count(), 1);
-    assert_eq!(s.execute("ai.sources", json!({})).unwrap()["sources"].as_array().unwrap().len(), listed["sources"].as_array().unwrap().len() - 1);
+    // A restyle offers the document as it shows too, first.
+    let restyle = s.execute("ai.sources", json!({})).unwrap();
+    assert_eq!(restyle["sources"], listed["sources"]);
+    let plan = img2img_plan(&s, Some(SourceRef::Document(doc)), None).unwrap();
+    assert_eq!((plan.area, plan.source_rect), (s.active().unwrap().doc.bounds(), s.active().unwrap().doc.bounds()));
     assert!(s.execute("ai.sources", json!({"mode": "txt2img"})).is_err());
     s.execute("select.rect", json!({"x": 40, "y": 20, "width": 8, "height": 8})).unwrap();
     let plan = edit_plan(&s, Some(SourceRef::Document(doc)), 0.5, None).unwrap();
@@ -1899,4 +1904,20 @@ fn live_openai_animation() {
     eprintln!("{t}");
     assert_eq!(t["timeline"]["duration"], r["frames"]);
     eprintln!("{}", s.execute("file.export.renderVideo", json!({"dir": out, "format": "gif"})).unwrap());
+}
+
+/// "Document (visible layers)" is the document as it shows: a hidden layer is left out.
+#[test]
+fn the_document_source_leaves_hidden_layers_out() {
+    let mut s = Session::new();
+    s.execute("file.new", json!({"width": 8, "height": 8, "background": "white"})).unwrap();
+    let doc = s.active().unwrap().doc.id.0;
+    let red = s.execute("layer.new.layer", json!({})).unwrap()["layer"].clone();
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    let picture = |s: &Session| Picture::Document(s.documents().iter().find(|o| o.doc.id.0 == doc).unwrap().doc.clone());
+    let rect = Rect::new(0, 0, 8, 8);
+    assert!(picture(&s).pixels(rect, (8, 8)).unwrap()[0][1] < 0.05, "the shown red layer is in it");
+    s.execute("layer.setProps", json!({"layer": red, "visible": false})).unwrap();
+    let p = picture(&s).pixels(rect, (8, 8)).unwrap()[0];
+    assert!(p[0] > 0.95 && p[1] > 0.95 && p[2] > 0.95, "hidden red is left out: {p:?}");
 }
