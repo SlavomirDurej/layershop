@@ -171,6 +171,9 @@ fn dropdown_with<T: PartialEq + Clone>(
     let texts: Vec<String> = options.iter().map(|(_, l)| shown(l)).collect();
     let searching = search && options.len() >= SEARCH_FROM;
     let query_id = ui.make_persistent_id(id).with("search");
+    // A click into the search field must not close the list: it closes on a click outside, or
+    // when an option is picked.
+    let close = if searching && close == egui::PopupCloseBehavior::CloseOnClick { egui::PopupCloseBehavior::CloseOnClickOutside } else { close };
     let response = combo_list(ui, id, label, width, close, |ui| {
         fit_widest_option(ui, texts.iter().map(|l| l.as_str()));
         let query = if searching { search_field(ui, &query_id, &texts) } else { String::new() };
@@ -247,6 +250,9 @@ fn dropdown_with<T: PartialEq + Clone>(
             if press.chosen(ui, &item) {
                 *current = v.clone();
                 chosen.push(v.clone());
+                if searching {
+                    ui.close();
+                }
             }
         }
         // Between two rows (item spacing) the pointer hovers neither; it is still over the list,

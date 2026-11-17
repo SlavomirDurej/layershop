@@ -2161,3 +2161,40 @@ fn a_grouped_dropdown_list_draws_a_line_above_each_group_and_keeps_its_width() {
     assert!((rows[0].top() - plain[0].top()).abs() < 0.5, "no line above the first row: {rows:?} vs {plain:?}");
     assert_eq!(list.width(), plain_list.width(), "the line doesn't widen the list");
 }
+
+/// A searchable dropdown stays open when its search field is clicked, filters as you type, and
+/// closes when an option is picked (the LoRA file list closed on the first click into the field).
+#[test]
+fn search_dropdown_stays_open_while_searching_and_closes_on_a_pick() {
+    use egui::accesskit::Role;
+    use egui_kittest::{Harness, kittest::Queryable};
+
+    let names = [
+        "anima.safetensors", "anireal.safetensors", "dr34ml4y.safetensors", "flux2_turbo.safetensors", "gemma.safetensors",
+        "krea2_darkbrush.safetensors", "krea2_warmpastel.safetensors", "moss.safetensors", "qwen.safetensors", "zimage.safetensors",
+    ];
+    let mut h = Harness::builder().with_size(egui::vec2(400.0, 600.0)).build_ui_state(
+        move |ui, chosen: &mut String| {
+            let options: Vec<(String, &str)> = names.iter().map(|n| (n.to_string(), *n)).collect();
+            super::dropdown_search(ui, "lora-file", "LoRA file", chosen, &options, 200.0);
+        },
+        names[0].to_string(),
+    );
+    let open = |h: &Harness<'_, String>| h.ctx.memory(|m| m.layer_ids().any(|l| l.order == egui::Order::Foreground && m.areas().is_visible(&l)));
+    h.run();
+    h.get_by_role(Role::ComboBox).click();
+    h.run_steps(3);
+    assert!(open(&h), "the list opens");
+    // Clicking into the search field keeps it open.
+    h.get_by_role(Role::TextInput).click();
+    h.run_steps(3);
+    assert!(open(&h), "a click into the search field must not close the list");
+    h.get_by_role(Role::TextInput).type_text("krea warm");
+    h.run_steps(3);
+    assert!(open(&h), "typing keeps it open");
+    assert!(h.query_by_label("krea2_darkbrush.safetensors").is_none(), "filtered out");
+    h.get_by_label("krea2_warmpastel.safetensors").click();
+    h.run_steps(3);
+    assert_eq!(h.state(), "krea2_warmpastel.safetensors");
+    assert!(!open(&h), "picking an option closes the list");
+}
