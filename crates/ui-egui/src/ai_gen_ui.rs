@@ -1062,8 +1062,11 @@ fn target_size(app: &PhotocraftApp) -> Option<(u32, u32, bool)> {
             Some((plan.area.width(), plan.area.height(), d.doc.selection.is_some()))
         }
         GenerationMode::ImgEdit => {
-            // What the model is sent: the selection with its context, the layer's pixels, or the canvas.
-            let plan = photocraft_engine::ai_cmds::edit_plan(&app.session, edit_source(app), ui.context(), None).ok()?;
+            // What the model is sent: the selection with its context (asked for transparency: the
+            // selection alone), the layer's pixels, or the canvas.
+            let transparent = ui.alpha && current_model(app).is_some_and(Model::can_alpha);
+            let context = if transparent { 0.0 } else { ui.context() };
+            let plan = photocraft_engine::ai_cmds::edit_plan(&app.session, edit_source(app), context, None).ok()?;
             Some((plan.area.width(), plan.area.height(), photocraft_engine::ai_cmds::inpaint_marked(&app.session)))
         }
         kind @ (GenerationMode::Txt2img | GenerationMode::Inpaint) => {

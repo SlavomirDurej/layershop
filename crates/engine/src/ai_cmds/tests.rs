@@ -1049,27 +1049,39 @@ fn edit_session(fake: &Arc<FakeComfy>) -> Session {
     s
 }
 
-/// An edit of a selection asked for transparency: around the selection the model's answer is the
-/// picture painted again, opaque. The layer keeps only what is inside the selection, so turning
-/// its mask off or deleting it does not bring that back.
+/// An edit of a selection asked for transparency is sent the selection's bounds alone, without a
+/// mask: around and under a masked edit's selection the model keeps painting the picture on,
+/// opaque (a frame of it inside the selection, all of it around), and shown more than the
+/// selection it frames its object in all of it. The layer keeps only what is inside the
+/// selection, so turning its mask off or deleting it brings nothing back.
 #[test]
-fn a_transparent_edit_of_a_selection_keeps_nothing_outside_it() {
+fn a_transparent_edit_of_a_selection_is_made_in_the_selection_alone() {
     let fake = FakeComfy::new(32, 32, [0, 255, 0, 128]);
     let mut s = edit_session(&fake);
-    s.execute("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
+    s.execute("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16, "ellipse": true})).unwrap();
     let r = s.execute("ai.generate", json!({"prompt": "a watch", "mode": "imgEdit", "alpha": true, "seed": 3})).unwrap();
-    assert_eq!((r["model"].as_str(), &r["bounds"]), (Some("q21"), &json!([12, 8, 24, 24])));
+    assert_eq!((r["model"].as_str(), &r["bounds"]), (Some("q21"), &json!([16, 12, 16, 16])));
+    let uploads = fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/upload/image")).count();
+    assert_eq!(uploads, 1, "the picture, and no mask");
+    let queued = fake.queued().to_string();
+    assert!(queued.contains("transparent background") && !queued.contains("SetLatentNoiseMask"), "{queued}");
     let d = s.active().unwrap();
     let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
     assert!(layer.generation.as_ref().unwrap().alpha);
     let pixels = layer.surface().unwrap();
-    assert_eq!(pixels.content_bounds(), Rect::new(16, 12, 32, 28));
     let alpha_at = |x: i32, y: i32| pixels.read_region(Rect::new(x, y, x + 1, y + 1))[3];
-    assert!((0.4..0.6).contains(&alpha_at(20, 20)), "inside keeps the model's alpha: {}", alpha_at(20, 20));
-    for (x, y) in [(13, 9), (34, 30)] {
-        assert_eq!(alpha_at(x, y), 0.0, "({x},{y}) outside the selection");
-    }
-    assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), Rect::new(16, 12, 32, 28), "the mask stays");
+    assert!((0.4..0.6).contains(&alpha_at(24, 20)), "inside keeps the model's alpha: {}", alpha_at(24, 20));
+    // The corner of the ellipse's bounds is outside it: cleared, not hidden by the mask alone.
+    assert_eq!(alpha_at(16, 12), 0.0);
+    assert!(Rect::new(16, 12, 32, 28).contains_rect(&pixels.content_bounds()), "{:?}", pixels.content_bounds());
+    assert!(layer.mask.is_some(), "the mask stays");
+    // Without transparency the same edit is sent the selection with context, under a mask.
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    s.execute("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16, "ellipse": true})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "a watch", "mode": "imgEdit", "seed": 3})).unwrap();
+    assert_eq!(r["bounds"], json!([12, 8, 24, 24]));
+    assert!(fake.queued().to_string().contains("SetLatentNoiseMask"));
 }
 
 #[test]

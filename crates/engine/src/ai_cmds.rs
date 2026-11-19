@@ -1460,6 +1460,12 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let strength = number("strength", if img2img { DEFAULT_IMG2IMG_STRENGTH } else { 1.0 }, 1.0)?;
     let context = number("context", DEFAULT_CONTEXT, 4.0)?;
+    // Only a model that can return transparency is asked for it (and the layer records it).
+    let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false) && model.can_alpha();
+    // A transparent edit of a selection is sent the selection's bounds alone, without a mask: the
+    // picture kept around and under a masked edit's selection pulls the model into painting it on,
+    // opaque, and a model shown more than the selection frames its object in all of it.
+    let edit_context = if alpha { 0.0 } else { context };
     if edit && !model.can_edit() {
         return Err(EngineError::Other(format!(
             "{} can't edit a picture from an instruction: choose an edit model (Qwen Image 2.1, FIBO 2, MiniMax H3 Image, Ming Image, Qwen Image Edit, FLUX.2 or a cloud model; the panel's Edit tab lists them)",
@@ -1523,7 +1529,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
             // An edit that can't run is refused before the mask is given up.
             let canvas = s.active().ok_or(EngineError::NoDocument)?.doc.bounds();
             let rect = if p.get("rect").is_some() { Some(target_area(p, None, canvas)?) } else { None };
-            edit_plan(s, source_param(p)?, context, rect).map_err(EngineError::Other)?;
+            edit_plan(s, source_param(p)?, edit_context, rect).map_err(EngineError::Other)?;
         }
         leave_quick_mask(s)?;
     }
@@ -1543,15 +1549,16 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     let source = if img2img || edit { source_param(p)?.or_else(|| default_img2img_source(s)).map(|r| r.settled(s)) } else { None };
     let plan = if img2img || edit {
         let rect = if p.get("rect").is_some() { Some(target_area(p, None, d.doc.bounds())?) } else { None };
-        let plan = if edit { edit_plan(s, source, context, rect) } else { img2img_plan(s, source, rect) };
+        let plan = if edit { edit_plan(s, source, edit_context, rect) } else { img2img_plan(s, source, rect) };
         Some(plan.map_err(EngineError::Other)?)
     } else {
         None
     };
     // An edit of a picture of this document by a local model paints only inside the selection
-    // ([`edit_mask`]). A cloud model is shown the picture and answers with all of it.
+    // ([`edit_mask`]), unless asked for transparency. A cloud model is shown the picture and
+    // answers with all of it.
     let here = !matches!(source, Some(SourceRef::Document(id) | SourceRef::DocumentLayer { document: id, .. }) if id != d.doc.id.0);
-    let edit_selection = selection.clone().filter(|_| edit && here && model.provider.is_local());
+    let edit_selection = selection.clone().filter(|_| edit && here && model.provider.is_local() && !alpha);
     let canvas = d.doc.bounds();
     // The pictures an edit refers to, as they are now.
     let reference_pictures = sent
@@ -1583,9 +1590,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // A seed the user asked for stays; only a random one is changed when the model refuses it.
     let reseed = p.get("seed").is_none() && model.seed < 0;
-    // Only a model that can return transparency is asked for it (and the layer records it).
-    let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false) && model.can_alpha();
-    let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
+    let masked =p.get("mask").and_then(Value::as_bool).unwrap_or(true);
     // The LoRAs' trigger words go with the prompt (with regions: the scene).
     resolved.prompt = with_triggers(resolved.prompt, &triggers);
     // The style preset's sentence goes after the prompt (with regions: after the scene).
