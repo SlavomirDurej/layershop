@@ -128,26 +128,73 @@ const MING_TRANSPARENT: [&str; 10] = [
     "不要白底，不要棋盘格，只要透明通道",
 ];
 
-/// Is `job` a transparent background that `model`'s workflow can ask for? Ming Image generating
-/// from the prompt alone: given a picture it answers opaque whatever the prompt says (measured
-/// with an edit at 1024 and 1536 px).
-fn transparent(model: &Model, job: &Job, from_picture: bool) -> bool {
-    model.family == Family::MingImage && job.alpha && !from_picture
+/// What Qwen Image 2.1 is told before and after the prompt to answer with a transparent
+/// background (the "Transparent Image" note of ComfyUI's Qwen Image 2.1 text-to-image template).
+/// Its VAE decodes four channels.
+const QWEN21_TRANSPARENT: (&str, &str) = ("This is an RGBA format image with transparency.", "The image has an alpha channel and a transparent background.");
+
+/// What an edit by Qwen Image 2.1 is told after the instruction to answer with a transparent
+/// background (ComfyUI's Qwen Image 2.1 background removal template asks to "output a PNG image").
+const QWEN21_TRANSPARENT_EDIT: &str = "Output a PNG image with an alpha channel and a transparent background.";
+
+/// What a workflow starts from: the prompt alone, a picture to edit by instruction, or a picture
+/// to repaint (an inpainting, an image to image).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Start {
+    Prompt,
+    Edit,
+    Repaint,
+}
+
+/// Is `job` a transparent background that `model`'s workflow can ask for? Ming Image from the
+/// prompt alone: given a picture it answers opaque whatever the prompt says (measured with an
+/// edit at 1024 and 1536 px). Qwen Image 2.1 from the prompt or in an edit (its templates do
+/// both); a repaint starts from the picture's opaque latent.
+fn transparent(model: &Model, job: &Job, start: Start) -> bool {
+    job.alpha
+        && match model.family {
+            Family::MingImage => start == Start::Prompt,
+            Family::QwenImage21 => start != Start::Repaint,
+            _ => false,
+        }
 }
 
 /// `job`'s prompt as a text-to-image with `model` is given it: for MOSS Image, a layout prompt
 /// ([`moss_layout`]); for a transparent background from Ming Image, behind the phrase that asks
-/// for one, unless the prompt starts with one itself.
+/// for one, unless the prompt starts with one itself; from Qwen Image 2.1, between the sentences
+/// that ask for one ([`QWEN21_TRANSPARENT`]).
 fn prompt_for(model: &Model, job: &Job) -> String {
     if model.family == Family::MossImage {
         return moss_layout(&job.prompt, job.width, job.height);
     }
-    let prompt = job.prompt.trim_start();
+    if !transparent(model, job, Start::Prompt) {
+        return job.prompt.clone();
+    }
+    let prompt = job.prompt.trim();
+    if model.family == Family::QwenImage21 {
+        let (before, after) = QWEN21_TRANSPARENT;
+        let prompt = prompt.trim_end_matches('.');
+        return if prompt.is_empty() { format!("{before} {after}") } else { format!("{before} {prompt}. {after}") };
+    }
     let lower = prompt.to_lowercase();
-    if !transparent(model, job, false) || MING_TRANSPARENT.iter().any(|phrase| lower.starts_with(&phrase.to_lowercase())) {
+    if MING_TRANSPARENT.iter().any(|phrase| lower.starts_with(&phrase.to_lowercase())) {
         return job.prompt.clone();
     }
     format!("{}, {prompt}", MING_TRANSPARENT[0])
+}
+
+/// An edit's instruction as `model` is given it: with a transparent background asked of Qwen
+/// Image 2.1, followed by the sentence that asks for one ([`QWEN21_TRANSPARENT_EDIT`]).
+fn edit_prompt(model: &Model, job: &Job) -> String {
+    if !transparent(model, job, Start::Edit) {
+        return job.prompt.clone();
+    }
+    let prompt = job.prompt.trim();
+    if prompt.is_empty() {
+        return QWEN21_TRANSPARENT_EDIT.into();
+    }
+    let stop = if prompt.ends_with(['.', '!', '?']) { "" } else { "." };
+    format!("{prompt}{stop} {QWEN21_TRANSPARENT_EDIT}")
 }
 
 /// How far in from the canvas's edges the box of a typed prompt's subject is, as a fraction of
@@ -268,12 +315,14 @@ fn minimax_pictures(prompt: &str) -> String {
     out
 }
 
-/// The nodes that decode `samples` into the image to show. Ming Image's VAE decodes four
-/// channels, and an image that was not asked to be transparent still comes back with pixels
-/// short of opaque (alpha down to two thirds, measured): its alpha is dropped unless `alpha`.
+/// The nodes that decode `samples` into the image to show. Ming Image's and Qwen Image 2.1's
+/// VAEs decode four channels, and a Ming image that was not asked to be transparent still comes
+/// back with pixels short of opaque (alpha down to two thirds, measured): their alpha is dropped
+/// unless `alpha`, so only the Alpha Channel box makes a transparent layer.
 fn decode(g: &mut Graph, model: &Model, samples: &Link, vae: &Link, alpha: bool) -> Link {
     let image = g.node("VAEDecode", json!({"samples": samples, "vae": vae}));
-    if model.family == Family::MingImage && !alpha { g.node("SplitImageWithAlpha", json!({"image": image})) } else { image }
+    let rgba = matches!(model.family, Family::MingImage | Family::QwenImage21);
+    if rgba && !alpha { g.node("SplitImageWithAlpha", json!({"image": image})) } else { image }
 }
 
 /// The workflow that renders `job` with `model`, ending in a preview image (kept in ComfyUI's
@@ -365,9 +414,10 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
     let mut own_latent = None;
     let (mut positive, mut negative) = if f == Family::QwenImage21 {
         // Its own node encodes both prompts (and reference images, of which there are none here).
+        let prompt = if inpaint.is_none() { prompt_for(model, job) } else { job.prompt.clone() };
         let id = g.add(
             "TextEncodeQwenImage21",
-            json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "resolution": 1024, "vae": vae}),
+            json!({"clip": clip, "prompt": prompt, "negative_prompt": model.negative_prompt, "resolution": 1024, "vae": vae}),
         );
         (json!([id, 0]), json!([id, 1]))
     } else if f == Family::Fibo2 {
@@ -456,7 +506,8 @@ fn build(model: &Model, job: &Job, inpaint: Option<&Inpaint<'_>>) -> Result<Valu
         },
     };
     let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise, from_picture: inpaint.is_some() });
-    let mut image = decode(&mut g, model, &samples, &vae, transparent(model, job, inpaint.is_some()));
+    let start = if inpaint.is_some() { Start::Repaint } else { Start::Prompt };
+    let mut image = decode(&mut g, model, &samples, &vae, transparent(model, job, start));
     if polished && !model.refiner.trim().is_empty() {
         image = refined(&mut g, model, job, &image, &text)?;
     }
@@ -724,7 +775,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
             unet = g.node("QwenImage21Cache", json!({"model": unet, "device": "auto", "dtype": "default"}));
             // Resolution 0: the pictures are taken at the size they were sent, so the latent the
             // node gives (the first picture's size) is the size asked for.
-            let mut inputs = json!({"clip": clip, "prompt": job.prompt, "negative_prompt": model.negative_prompt, "resolution": 0, "vae": vae});
+            let mut inputs = json!({"clip": clip, "prompt": edit_prompt(model, job), "negative_prompt": model.negative_prompt, "resolution": 0, "vae": vae});
             for (i, picture) in pictures.iter().enumerate() {
                 inputs[format!("images.image_{}", i + 1)] = picture.clone();
             }
@@ -822,7 +873,7 @@ fn build_edit(model: &Model, job: &Job, edit: &Edit<'_>) -> Result<Value> {
         None => latent,
     };
     let samples = sample(&mut g, model, job, &Sampling { unet, positive, negative, latent, denoise: 1.0, from_picture: true });
-    let image = decode(&mut g, model, &samples, &vae, transparent(model, job, true));
+    let image = decode(&mut g, model, &samples, &vae, transparent(model, job, Start::Edit));
     g.add("PreviewImage", json!({"images": image}));
     Ok(Value::Object(g.nodes))
 }
@@ -1569,6 +1620,44 @@ mod tests {
         let w = edit_workflow(&guided, &job(), &Edit { image: "src.png", mask: None, shown: None, references: &[] }).unwrap();
         assert_well_formed(&w);
         assert_eq!((count(&w, "TextEncodeMingImageEdit"), has(&w, "CFGGuider")), (2, true));
+    }
+
+    #[test]
+    fn qwen_image_2_1_asks_for_transparency_in_its_templates_words() {
+        let qwen = Family::QwenImage21.preset();
+        let shown = |w: &Value| w[node(w, "PreviewImage")["inputs"]["images"][0].as_str().unwrap()]["class_type"].as_str().unwrap().to_string();
+        let prompt = |w: &Value| node(w, "TextEncodeQwenImage21")["inputs"]["prompt"].as_str().unwrap().to_string();
+        let alpha = Job { alpha: true, ..job() };
+
+        // Text to image: the prompt between its template's two sentences, and the VAE's alpha kept.
+        let w = workflow(&qwen, &alpha).unwrap();
+        assert_well_formed(&w);
+        assert_eq!(prompt(&w), "This is an RGBA format image with transparency. a red frog. The image has an alpha channel and a transparent background.");
+        assert_eq!(shown(&w), "VAEDecode");
+        // A prompt's own full stop is not doubled.
+        let stop = Job { prompt: " A red frog. ".into(), ..alpha.clone() };
+        assert_eq!(prompt(&workflow(&qwen, &stop).unwrap()), "This is an RGBA format image with transparency. A red frog. The image has an alpha channel and a transparent background.");
+        // Without the box the prompt is the user's and the alpha is dropped: the layer is opaque.
+        let w = workflow(&qwen, &job()).unwrap();
+        assert_eq!((prompt(&w).as_str(), shown(&w).as_str()), ("a red frog", "SplitImageWithAlpha"));
+
+        // An edit: the instruction, then the sentence that asks for transparency.
+        let edit = Edit { image: "src.png", mask: None, shown: None, references: &[] };
+        let w = edit_workflow(&qwen, &alpha, &edit).unwrap();
+        assert_well_formed(&w);
+        assert_eq!(prompt(&w), "a red frog. Output a PNG image with an alpha channel and a transparent background.");
+        assert_eq!(shown(&w), "VAEDecode");
+        let w = edit_workflow(&qwen, &Job { prompt: "Remove the background!".into(), ..alpha.clone() }, &edit).unwrap();
+        assert_eq!(prompt(&w), "Remove the background! Output a PNG image with an alpha channel and a transparent background.");
+        let w = edit_workflow(&qwen, &job(), &edit).unwrap();
+        assert_eq!((prompt(&w).as_str(), shown(&w).as_str()), ("a red frog", "SplitImageWithAlpha"));
+
+        // A repaint starts from the picture's opaque latent: no transparency is asked for.
+        for source in [&INPAINT, &IMG2IMG] {
+            let w = inpaint_workflow(&qwen, &alpha, source).unwrap();
+            assert_well_formed(&w);
+            assert_eq!((prompt(&w).as_str(), shown(&w).as_str()), ("a red frog", "SplitImageWithAlpha"));
+        }
     }
 
     #[test]

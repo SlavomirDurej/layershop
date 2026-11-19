@@ -707,7 +707,10 @@ pub struct Model {
     /// The size the model renders at, in megapixels, with the selection's aspect ratio; the
     /// result is then fitted to the selection. 0 renders at the selection's own size.
     pub megapixels: f64,
-    /// The model can return a transparent background (the panel's Alpha Channel box).
+    /// An OpenAI model can return a transparent background (it is sent `background:
+    /// transparent`). Other models ignore it: [`Model::can_alpha`] decides from what each request
+    /// can ask for, so settings that marked a model that can't (older versions let any be
+    /// ticked) don't offer the Alpha Channel box for it.
     pub alpha: bool,
     /// Offered for inpainting (the panel's Edit tab). `None`: what its architecture or
     /// provider can do ([`Model::can_inpaint`]); the settings' checkbox overrides that.
@@ -798,6 +801,19 @@ impl Model {
         match self.provider {
             Provider::Comfy => self.family.edits(),
             Provider::Openai | Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => true,
+        }
+    }
+
+    /// Returns a transparent background when a job asks for one ([`crate::Job::alpha`], the
+    /// panel's Alpha Channel box). Local: Ming Image and Qwen Image 2.1, the architectures whose
+    /// workflows here ask for it in the model's own words (their VAEs decode RGBA); the others'
+    /// graphs decode RGB. Cloud: an OpenAI model marked [`Model::alpha`] (the GPT Image models,
+    /// sent `background: transparent`); the other providers' requests have no way to ask.
+    pub fn can_alpha(&self) -> bool {
+        match self.provider {
+            Provider::Comfy => matches!(self.family, Family::MingImage | Family::QwenImage21),
+            Provider::Openai => self.alpha,
+            Provider::Gemini | Provider::Xai | Provider::Meta | Provider::Bfl => false,
         }
     }
 
@@ -1199,6 +1215,27 @@ mod tests {
         assert_eq!(Family::from_key("minimaxH3Image"), Some(Family::MinimaxH3Image));
         // The other local presets don't claim transparency.
         assert!(Family::ALL.into_iter().all(|f| f == Family::MingImage || !f.preset().alpha));
+    }
+
+    #[test]
+    fn only_models_whose_request_asks_for_it_can_return_transparency() {
+        // Settings saved by older versions marked local models that can't (FLUX.3 Klein, MOSS
+        // Image, FIBO 2, Ideogram 4): their graphs decode RGB, so the mark is ignored. Only Ming
+        // Image's and Qwen Image 2.1's workflows ask for alpha, marked or not.
+        for family in Family::ALL {
+            let can = matches!(family, Family::MingImage | Family::QwenImage21);
+            assert_eq!(Model { alpha: true, ..family.preset() }.can_alpha(), can, "{family:?}");
+            assert_eq!(Model { alpha: false, ..family.preset() }.can_alpha(), can, "{family:?}");
+        }
+        // Cloud: the OpenAI GPT Image models marked for it (sent `background: transparent`);
+        // the other providers' requests can't ask, whatever their settings say.
+        let presets = Model::cloud_presets();
+        let alpha: Vec<&str> = presets.iter().filter(|m| m.can_alpha()).map(|m| m.api_model.as_str()).collect();
+        assert_eq!(alpha, ["gpt-image-2.6-sunburst", "gpt-image-2.6-flare", "gpt-image-2.5-sunburst", "gpt-image-2.5-flare"]);
+        for provider in [Provider::Gemini, Provider::Xai, Provider::Meta, Provider::Bfl] {
+            assert!(!Model::cloud(provider, "Marked", "some-model", true).can_alpha(), "{provider:?}");
+        }
+        assert!(Model::cloud(Provider::Openai, "GPT Image 1.5", "gpt-image-1.5", true).can_alpha());
     }
 
     #[test]

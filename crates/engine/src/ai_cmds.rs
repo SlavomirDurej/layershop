@@ -1574,7 +1574,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
     };
     // A seed the user asked for stays; only a random one is changed when the model refuses it.
     let reseed = p.get("seed").is_none() && model.seed < 0;
-    let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false);
+    // Only a model that can return transparency is asked for it (and the layer records it).
+    let alpha = p.get("alpha").and_then(Value::as_bool).unwrap_or(false) && model.can_alpha();
     let masked = p.get("mask").and_then(Value::as_bool).unwrap_or(true);
     // The LoRAs' trigger words go with the prompt (with regions: the scene).
     resolved.prompt = with_triggers(resolved.prompt, &triggers);
@@ -1926,7 +1927,7 @@ fn models(s: &mut Session, _: &Value) -> Result<Value> {
             json!({
                 "id": m.id, "name": m.name, "provider": m.provider.key(), "local": m.provider.is_local(), "enabled": m.enabled,
                 "listed": listed.contains(&m.id.as_str()),
-                "alpha": m.alpha, "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "animate": m.can_animate(), "references": m.max_references(),
+                "alpha": m.can_alpha(), "generate": m.can_generate(), "inpaint": m.can_inpaint(), "edit": m.can_edit(), "animate": m.can_animate(), "references": m.max_references(),
                 "regions": m.layout().map(|f| f.key()),
                 "loras": if m.takes_loras() {
                     json!(m.loras.iter().map(|l| json!({"file": l.file, "name": l.label(), "strength": l.strength, "trigger": l.trigger})).collect::<Vec<_>>())

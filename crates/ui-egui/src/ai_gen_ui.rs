@@ -1308,13 +1308,14 @@ fn edit_label(ui: &mut egui::Ui, text: &str) {
     });
 }
 
-/// The Alpha Channel box. The choice is kept across models; one without alpha shows it off and
-/// ignores it.
+/// The Alpha Channel box. The choice is kept across models; one that can't return transparency
+/// ([`Model::can_alpha`]) shows it off and ignores it.
 fn alpha_box(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model) {
-    ui.add_enabled_ui(current.alpha, |ui| {
-        let mut on = app.ui.ai_gen.alpha && current.alpha;
+    let can = current.can_alpha();
+    ui.add_enabled_ui(can, |ui| {
+        let mut on = app.ui.ai_gen.alpha && can;
         let resp = widgets::checkbox(ui, &mut on, tr("Alpha Channel"));
-        if current.alpha {
+        if can {
             app.ui.ai_gen.alpha = on;
             resp.on_hover_text(tr("Ask the model for a transparent background"));
         } else {
@@ -4190,9 +4191,18 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
             }
         }
         label(ui, "Transparency");
-        let mut alpha = m.get("alpha").and_then(Value::as_bool).unwrap_or(false);
-        widgets::checkbox(ui, &mut alpha, tr("Can generate it")).on_hover_text(tr("The model can return a transparent background. Enables the Alpha Channel box in the AI Gen panel for it"));
-        m.insert("alpha".into(), json!(alpha));
+        // Only an OpenAI model's request can ask for it, so only there is it the user's to say;
+        // for the rest the box shows what the model does ([`Model::can_alpha`]).
+        if provider == Provider::Openai {
+            let mut alpha = m.get("alpha").and_then(Value::as_bool).unwrap_or(false);
+            widgets::checkbox(ui, &mut alpha, tr("Can generate it")).on_hover_text(tr("The model can return a transparent background. Enables the Alpha Channel box in the AI Gen panel for it"));
+            m.insert("alpha".into(), json!(alpha));
+        } else {
+            let mut can = serde_json::from_value::<Model>(Value::Object(m.clone())).is_ok_and(|model| model.can_alpha());
+            ui.add_enabled_ui(false, |ui| widgets::checkbox(ui, &mut can, tr("Can generate it"))).inner.on_disabled_hover_text(tr(
+                "Set by the model: of the local models only Ming Image and Qwen Image 2.1 return a transparent background, and of the cloud models only OpenAI's GPT Image models",
+            ));
+        }
         ui.end_row();
         // A dedicated inpainting or edit model does nothing else: there is nothing to tick.
         if provider.is_local() && Family::from_key(&text_of(m, "family")).is_some_and(|f| f.inpaint_only() || f.edit_only()) {

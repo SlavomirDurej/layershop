@@ -133,7 +133,7 @@ pub fn openai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
         if matches!(quality, "low" | "medium" | "high" | "xhigh" | "max") {
             body["quality"] = json!(quality);
         }
-        if job.alpha && model.alpha {
+        if job.alpha && model.can_alpha() {
             body["background"] = json!("transparent");
         }
     } else {
@@ -142,7 +142,7 @@ pub fn openai_request(model: &Model, job: &Job, key: &str, timeout_seconds: u64)
         if matches!(quality, "low" | "medium" | "high" | "xhigh" | "max") {
             body["quality"] = json!(quality);
         }
-        if job.alpha && model.alpha {
+        if job.alpha && model.can_alpha() {
             body["background"] = json!("transparent");
         }
     }
@@ -178,7 +178,7 @@ pub fn openai_edit_request(model: &Model, job: &Job, source: &Source, key: &str,
         parts.push(Part::png("image[]", "image.png", &source.image));
         parts.extend(source.references.iter().map(|bytes| Part::png("image[]", "reference.png", bytes)));
     }
-    if source.edit && job.alpha && model.alpha {
+    if source.edit && job.alpha && model.can_alpha() {
         parts.push(Part::text("background", "transparent"));
     }
     // Without a mask the whole picture is the model's to redraw (image to image).

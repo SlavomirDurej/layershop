@@ -12,6 +12,7 @@
 //! The second form renders the detected model with that number at the given selection size and
 //! writes the image. `PHOTOCRAFT_LORAS=file:strength,file:strength` stacks LoRAs from the
 //! server's `loras` on it, and `PHOTOCRAFT_SEED` fixes the seed (to compare with and without).
+//! `PHOTOCRAFT_ALPHA=1` asks an edit for a transparent background.
 
 use std::time::Duration;
 
@@ -126,7 +127,8 @@ fn run() -> Result<(), String> {
             width,
             height,
             seed,
-            alpha: false,
+            // `PHOTOCRAFT_ALPHA=1` asks an edit for a transparent background.
+            alpha: edit && std::env::var("PHOTOCRAFT_ALPHA").is_ok_and(|v| v == "1"),
             source: Some(Source { image, mask, width, height, strength, edit, references: Vec::new(), shown: Vec::new() }),
             loras: loras.clone(),
             animation: None,

@@ -1020,6 +1020,22 @@ fn ming_image_generates_transparency_and_edits_at_half_its_size() {
     assert!(p[0] < 0.05 && p[1] > 0.95, "{p:?}");
 }
 
+/// A local model that settings mark as transparent but whose workflow decodes RGB (older
+/// versions let any be ticked) is listed without alpha, and a request for it is dropped: the
+/// layer does not record a transparency it never got.
+#[test]
+fn a_model_marked_transparent_that_cant_be_is_not_asked_for_it() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = session(&fake);
+    let model = serde_json::to_value(Model { id: "z".into(), alpha: true, ..Family::ZImage.preset() }).unwrap();
+    s.execute("prefs.set", json!({"path": "integrations.ai.models", "value": [model]})).unwrap();
+    assert_eq!(s.execute("ai.models", json!({})).unwrap()["models"][0]["alpha"], json!(false));
+    s.execute("ai.generate", json!({"prompt": "a logo", "alpha": true, "seed": 3})).unwrap();
+    let d = s.active().unwrap();
+    let made = d.doc.layer(d.active_layer.unwrap()).unwrap().generation.as_deref().cloned().unwrap();
+    assert!(!made.alpha);
+}
+
 /// [`session`] with the models an edit is tried with: Qwen Image 2.1 (the default), Qwen Image
 /// Edit, and Z-Image, which can't edit.
 fn edit_session(fake: &Arc<FakeComfy>) -> Session {
