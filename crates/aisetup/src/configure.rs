@@ -132,9 +132,12 @@ pub fn existing(settings: &mut Settings, manifest: &Manifest, url: &str, launch:
 }
 
 /// The model the test image is rendered with: the first the panel offers that the setup made
-/// runnable and that generates from a prompt alone.
-pub fn test_model<'a>(settings: &'a Settings, ready: &[String]) -> Option<&'a Model> {
-    settings.models.iter().find(|m| m.provider.is_local() && m.enabled && m.can_generate() && ready.contains(&m.id))
+/// runnable and that generates from a prompt alone, of those it downloaded (`fetched`, from
+/// [`crate::plan::Plan::fetched`]) when there is one, so a setup that adds a model shows that
+/// model working, not the one already there.
+pub fn test_model<'a>(settings: &'a Settings, ready: &[String], fetched: &[String]) -> Option<&'a Model> {
+    let runs = |m: &&Model| m.provider.is_local() && m.enabled && m.can_generate() && ready.contains(&m.id);
+    settings.models.iter().filter(runs).find(|m| fetched.contains(&m.id)).or_else(|| settings.models.iter().find(runs))
 }
 
 #[cfg(test)]
@@ -176,7 +179,7 @@ mod tests {
         assert_eq!(s.models.len(), Settings::default().models.len());
         // Cloud models are not the engine's business.
         assert_eq!(s.models.iter().filter(|m| !m.provider.is_local()).cloned().collect::<Vec<_>>(), cloud_before);
-        assert_eq!(test_model(&s, &done.ready).map(|m| m.id.as_str()), Some("qwen-image-2-1"));
+        assert_eq!(test_model(&s, &done.ready, &ids(&["qwen-image-2-1"])).map(|m| m.id.as_str()), Some("qwen-image-2-1"));
     }
 
     #[test]
@@ -189,6 +192,20 @@ mod tests {
         // HiDream O1 keeps its prompt writer and refiner: their files came with it.
         let o1 = s.model("hidream-o1").unwrap();
         assert_eq!((o1.enhancer.as_str(), o1.refiner.as_str()), ("gemma4_e4b_it_fp8_scaled.safetensors", "z_image_turbo_bf16.safetensors"));
+    }
+
+    #[test]
+    fn the_test_image_is_rendered_with_a_model_the_setup_added() {
+        let mut s = Settings::default();
+        managed(&mut s, manifest(), "http://127.0.0.1:8190", &launch(), &folders(&["qwen-image-2-1"]));
+        let done = managed(&mut s, manifest(), "http://127.0.0.1:8190", &launch(), &folders(&["qwen-image-2-1", "z-image-turbo", "hidream-o1"]));
+        // Z-Image Turbo was added: it renders the test image, though Qwen Image 2.1 comes first.
+        assert_eq!(test_model(&s, &done.ready, &ids(&["z-image-turbo"])).map(|m| m.id.as_str()), Some("z-image-turbo"));
+        // Of several added, the first the panel offers.
+        assert_eq!(test_model(&s, &done.ready, &ids(&["hidream-o1", "z-image-turbo"])).map(|m| m.id.as_str()), Some("z-image-turbo"));
+        // Nothing added (a repair), or only one that can't run here: the first that runs.
+        assert_eq!(test_model(&s, &done.ready, &[]).map(|m| m.id.as_str()), Some("qwen-image-2-1"));
+        assert_eq!(test_model(&s, &done.ready, &ids(&["flux-3-klein"])).map(|m| m.id.as_str()), Some("qwen-image-2-1"));
     }
 
     #[test]
@@ -260,7 +277,7 @@ mod tests {
         assert_eq!((done.added, done.repaired), (0, 1));
         assert_eq!((s.models.len(), s.models[0].family, s.models[0].id.as_str(), s.models[0].name.as_str()), (1, Family::QwenImage21, "old", "my qwen"));
         // No model can render the test image when none is ready.
-        assert!(test_model(&s, &[]).is_none());
+        assert!(test_model(&s, &[], &ids(&["qwen-image-2-1"])).is_none());
         assert!(scan(&mut Settings::default(), &BTreeMap::new()) == Configured::default());
     }
 }

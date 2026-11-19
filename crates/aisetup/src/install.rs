@@ -675,7 +675,7 @@ local models can only run on the processor: open this setup again and continue i
             }
             return Err(e);
         }
-        let test_model = configure::test_model(&settings, &configured.ready).filter(|m| outcome.installed.contains(&m.id) || !managed);
+        let test_model = configure::test_model(&settings, &configured.ready, &plan.fetched(&job.manifest)).filter(|m| outcome.installed.contains(&m.id) || !managed);
         match test_model {
             // On the processor these models take far too long (and too much memory) for a test.
             Some(_) if managed && job.choices.cpu => {

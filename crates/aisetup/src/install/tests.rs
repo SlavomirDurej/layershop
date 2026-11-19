@@ -383,6 +383,9 @@ fn adding_a_model_later_downloads_only_its_own_files_and_keeps_the_port() {
     let added: u64 = rig.manifest.model("z-image-turbo").unwrap().files.iter().map(|k| rig.manifest.files[k].size).sum();
     assert_eq!(rig.net.total_served() - before, added);
     assert!(progress.steps.iter().all(|s| s.state == StepState::Done));
+    // The test image shows the model that was added working, not the one that was there.
+    assert_eq!(first.test.map(|t| t.model).as_deref(), Some("qwen-image-2-1"));
+    assert_eq!(done.test.map(|t| (t.model, t.model_name)), Some(("z-image-turbo".into(), "Z-Image Turbo".into())));
 }
 
 #[test]

@@ -179,6 +179,21 @@ impl Plan {
     pub fn installable(&self) -> Vec<String> {
         self.models.iter().filter(|m| m.skipped.is_none()).map(|m| m.id.clone()).collect()
     }
+
+    /// The ids of the models this plan downloads a file of, in the order chosen: what the setup
+    /// adds, as against a chosen model whose files are all there already, found in one of the
+    /// user's own models folders, or only looked at again. The test image is rendered with one of
+    /// them ([`crate::configure::test_model`]).
+    pub fn fetched(&self, manifest: &Manifest) -> Vec<String> {
+        let downloads = |key: &String| {
+            self.steps.iter().any(|s| matches!(&s.step, Step::FetchFile(k) if k == key) && !s.done && !s.recheck && s.skipped.is_none() && s.linked.is_none())
+        };
+        self.models
+            .iter()
+            .filter(|m| m.skipped.is_none() && manifest.model(&m.id).is_some_and(|entry| entry.files.iter().any(downloads)))
+            .map(|m| m.id.clone())
+            .collect()
+    }
 }
 
 /// What [`plan`] asks about the disk. The tests answer from a table.
@@ -565,6 +580,24 @@ mod tests {
         // A marker without its Python is not an engine.
         disk.0.remove(&layout.python);
         assert!(!plan(m, &c, &disk).unwrap().steps[1].done);
+    }
+
+    #[test]
+    fn the_models_a_plan_adds_are_those_it_downloads_a_file_of() {
+        let m = manifest();
+        let c = choices(&["qwen-image-2-1", "z-image-turbo"]);
+        let layout = Layout::new(m, &c).unwrap();
+        // A clean machine: both are added.
+        assert_eq!(plan(m, &c, &Fake::default()).unwrap().fetched(m), ["qwen-image-2-1", "z-image-turbo"]);
+        // Qwen Image 2.1 is there whole from an earlier setup: only Z-Image Turbo is added.
+        let mut disk = Fake::default();
+        for key in &m.model("qwen-image-2-1").unwrap().files {
+            disk.0.insert(layout.model_file(key).unwrap(), m.files[key].size);
+        }
+        assert_eq!(plan(m, &c, &disk).unwrap().fetched(m), ["z-image-turbo"]);
+        // A repair only looks at the files that are there: it adds nothing it had.
+        let repair = Choices { recheck: true, ..choices(&["qwen-image-2-1"]) };
+        assert!(plan(m, &repair, &disk).unwrap().fetched(m).is_empty());
     }
 
     #[test]
