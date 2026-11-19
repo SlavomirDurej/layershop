@@ -1049,6 +1049,29 @@ fn edit_session(fake: &Arc<FakeComfy>) -> Session {
     s
 }
 
+/// An edit of a selection asked for transparency: around the selection the model's answer is the
+/// picture painted again, opaque. The layer keeps only what is inside the selection, so turning
+/// its mask off or deleting it does not bring that back.
+#[test]
+fn a_transparent_edit_of_a_selection_keeps_nothing_outside_it() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 128]);
+    let mut s = edit_session(&fake);
+    s.execute("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
+    let r = s.execute("ai.generate", json!({"prompt": "a watch", "mode": "imgEdit", "alpha": true, "seed": 3})).unwrap();
+    assert_eq!((r["model"].as_str(), &r["bounds"]), (Some("q21"), &json!([12, 8, 24, 24])));
+    let d = s.active().unwrap();
+    let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
+    assert!(layer.generation.as_ref().unwrap().alpha);
+    let pixels = layer.surface().unwrap();
+    assert_eq!(pixels.content_bounds(), Rect::new(16, 12, 32, 28));
+    let alpha_at = |x: i32, y: i32| pixels.read_region(Rect::new(x, y, x + 1, y + 1))[3];
+    assert!((0.4..0.6).contains(&alpha_at(20, 20)), "inside keeps the model's alpha: {}", alpha_at(20, 20));
+    for (x, y) in [(13, 9), (34, 30)] {
+        assert_eq!(alpha_at(x, y), 0.0, "({x},{y}) outside the selection");
+    }
+    assert_eq!(layer.mask.as_ref().unwrap().surface.content_bounds(), Rect::new(16, 12, 32, 28), "the mask stays");
+}
+
 #[test]
 fn an_edit_with_a_selection_is_cropped_edited_and_composited() {
     let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);

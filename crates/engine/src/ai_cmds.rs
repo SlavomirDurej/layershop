@@ -1332,6 +1332,15 @@ fn fit(bytes: &[u8], fmt: PixelFormat, area: Rect, exact: bool) -> Result<Surfac
     fit_document(&src, fmt, area, exact)
 }
 
+/// Clear what `frame` holds outside `selection` within `area` (a feathered edge partly), so a
+/// transparent result stays transparent with its layer mask off or deleted.
+fn keep_selected(frame: &mut Surface, selection: &Surface, area: Rect) -> Result<()> {
+    let outside = photocraft_algo::selection::inverse_surface(selection, area);
+    crate::pixels::try_clear_surface(frame, area, Some(&outside))?;
+    frame.prune();
+    Ok(())
+}
+
 /// A generated animated GIF fitted to `area` frame by frame, as [`fit`] fits a still, with the
 /// frame rate its delays imply.
 fn fit_frames(bytes: &[u8], fmt: PixelFormat, area: Rect, exact: bool) -> Result<(Vec<Surface>, Option<f32>)> {
@@ -1632,6 +1641,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         model.steps = quality.steps(model.steps);
     }
     let job_selection = selection.clone().filter(|_| inpaint);
+    // Asked for transparency, the layer holds only what was made inside the selection: around
+    // it an edit's answer is the picture painted again, opaque, which the mask alone would hide.
+    let alpha_selection = selection.clone().filter(|_| alpha);
     crate::jobs::run(
         s,
         label,
@@ -1697,12 +1709,19 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                         step(0.98, "Placing the image\u{2026}");
                         // What was given a picture answers in its shape: it goes back where that came from.
                         let exact = kind != GenerationMode::Txt2img;
-                        if let Some(animation) = animation {
-                            let (frames, fps) = fit_frames(&image.bytes, fmt, area, exact)?;
-                            made.push((frames, Some(fps.unwrap_or(1000.0 / animation.frame_ms as f32)), image));
-                        } else {
-                            made.push((vec![fit(&image.bytes, fmt, area, exact)?], None, image));
+                        let (mut frames, fps) = match animation {
+                            Some(animation) => {
+                                let (frames, fps) = fit_frames(&image.bytes, fmt, area, exact)?;
+                                (frames, Some(fps.unwrap_or(1000.0 / animation.frame_ms as f32)))
+                            }
+                            None => (vec![fit(&image.bytes, fmt, area, exact)?], None),
+                        };
+                        if let Some(selection) = &alpha_selection {
+                            for frame in &mut frames {
+                                keep_selected(frame, selection, area)?;
+                            }
                         }
+                        made.push((frames, fps, image));
                     }
                     Err(e) if !made.is_empty() && !ctx.cancelled() => {
                         stopped = Some(e.to_string());
