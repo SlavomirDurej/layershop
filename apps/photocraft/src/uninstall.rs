@@ -187,6 +187,14 @@ pub struct Choice {
 pub fn remove(found: &Survey, choice: Choice) -> Vec<String> {
     let mut failed = Vec::new();
     let settings = found.settings.as_ref().map(|s| s.path.clone());
+    // A running engine keeps its files open (and its models, memory-mapped), and Windows can't
+    // delete an open file: removed while it ran, an engine lost ComfyUI's own files and kept its
+    // Python and marker, which the next setup took for a whole engine. It is stopped first.
+    if choice.engine || choice.models {
+        for item in &found.engine {
+            photocraft_aigen::launch::stop_processes_in(&item.path);
+        }
+    }
     // A setup in folders the user chose: the app's own removal, which takes only what the setup
     // installed and tells the settings the engine is gone.
     if (choice.engine || choice.models)
@@ -196,7 +204,7 @@ pub fn remove(found: &Survey, choice: Choice) -> Vec<String> {
     {
         failed.extend(remove_through_the_app(settings, found, choice));
     }
-    let mut delete = |path: &Path| {
+    let delete = |path: &Path, failed: &mut Vec<String>| {
         if path.exists()
             && let Err(e) = std::fs::remove_dir_all(path)
         {
@@ -205,14 +213,18 @@ pub fn remove(found: &Survey, choice: Choice) -> Vec<String> {
     };
     if let Some(home) = &found.home {
         if choice.engine {
-            delete(&home.join("engine"));
+            // All or nothing ([`photocraft_aisetup::runtime::remove_folder`]): an engine still
+            // in use stays whole, and the window says so.
+            if let Err(e) = photocraft_aisetup::runtime::remove_folder(&home.join("engine")) {
+                failed.push(e.to_string());
+            }
         }
         if choice.models {
-            delete(&home.join("models"));
+            delete(&home.join("models"), &mut failed);
         }
         // Nothing of LayerShop's left in it (its downloads, a record): it goes too.
         if choice.engine && choice.models {
-            delete(home);
+            delete(home, &mut failed);
         } else if std::fs::read_dir(home).is_ok_and(|mut d| d.next().is_none()) {
             let _ = std::fs::remove_dir(home);
         }
@@ -220,7 +232,7 @@ pub fn remove(found: &Survey, choice: Choice) -> Vec<String> {
     if choice.settings
         && let Some(settings) = &settings
     {
-        delete(settings);
+        delete(settings, &mut failed);
     }
     failed
 }

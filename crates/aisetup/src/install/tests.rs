@@ -334,6 +334,31 @@ fn a_clean_machine_ends_with_an_engine_its_models_and_a_test_image() {
     assert_eq!((settings.comfy_url.as_str(), settings.comfy_autostart), (done.url.as_str(), true));
 }
 
+/// An uninstall that ran into a running engine deleted ComfyUI's files and kept the marker and
+/// the Python; the setup run after took that for an engine and started a `main.py` that was gone.
+#[test]
+fn an_engine_left_half_removed_is_installed_again() {
+    let rig = Rig::new();
+    rig.run(&["qwen-image-2-1"]).0.unwrap();
+    let layout = rig.layout();
+    std::fs::remove_file(&layout.script).unwrap();
+    let leftover = layout.engine_root.join("ComfyUI").join("user").join("comfy.settings.json");
+    std::fs::create_dir_all(leftover.parent().unwrap()).unwrap();
+    std::fs::write(&leftover, b"{}").unwrap();
+    assert!(runtime::read_marker(&layout.engine_root).is_some() && layout.python.is_file());
+    // And the rest of an earlier removal that stopped part way, under the name it was given.
+    std::fs::create_dir_all(layout.engine_dir.join("0.45.0.removing").join("python_embeded")).unwrap();
+    let runtime_before = rig.net.served(&rig.manifest, "runtime");
+    let (result, progress) = rig.run(&["qwen-image-2-1"]);
+    result.unwrap();
+    // Fetched and unpacked again, in place of what was left.
+    assert!(layout.script.is_file() && layout.python.is_file() && !leftover.exists());
+    assert!(rig.net.served(&rig.manifest, "runtime") > runtime_before);
+    assert!(progress.steps.iter().all(|s| s.state == StepState::Done), "{:?}", progress.steps);
+    let names: Vec<String> = std::fs::read_dir(&layout.engine_dir).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    assert_eq!(names, ["0.45.0"]);
+}
+
 #[test]
 fn a_setup_stopped_half_way_continues_with_only_what_is_missing() {
     let rig = Rig::new();

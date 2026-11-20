@@ -449,6 +449,14 @@ fn unpack_step(job: &Job, layout: &Layout, shared: &Shared, index: usize, stop: 
         }
         runtime::write_marker(staging, &marker)
     };
+    // An engine of ours the plan did not take as whole (files missing): it makes way. So does
+    // what a removal that stopped part way left of it (gigabytes no setup would use).
+    if runtime::read_marker(&layout.engine_root).is_some() {
+        runtime::remove_folder(&layout.engine_root)?;
+    }
+    if let Some(name) = layout.engine_root.file_name() {
+        let _ = runtime::remove_folder(&layout.engine_root.with_file_name(format!("{}{}", name.to_string_lossy(), runtime::REMOVING)));
+    }
     let done =
         unpack::unpack(&layout.archive, &layout.engine_root, &Limits::default(), stop, &|done, total| shared.bytes(index, done.min(total), false), &finish);
     match done {

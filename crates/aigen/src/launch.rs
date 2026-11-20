@@ -1102,10 +1102,48 @@ mod native {
         let folder = pick_folder(&candidates, &script, version.as_deref(), &small_text, &|p| p.is_file());
         Ok(Launch { python: server.exe.clone(), folder: folder.map(|d| d.to_string_lossy().into_owned()).unwrap_or_default(), args })
     }
+
+    /// Stop every process whose program lives inside `folder`, and the processes they started.
+    /// For an engine about to be removed: Windows can't delete a file a running program has
+    /// open (its Python's DLLs, a memory-mapped model), so a removal while the engine runs
+    /// leaves half of it behind. Returns how many were stopped. Never this process.
+    pub fn stop_processes_in(folder: &Path) -> usize {
+        let me = std::process::id();
+        let pids: Vec<u32> = python_processes().into_iter().filter(|p| p.pid != me && super::program_inside(&p.exe, folder)).map(|p| p.pid).collect();
+        for pid in &pids {
+            stop_process(*pid);
+        }
+        pids.len()
+    }
+
+    #[cfg(windows)]
+    fn stop_process(pid: u32) {
+        use std::os::windows::process::CommandExt;
+        let _ = Command::new("taskkill")
+            .args(["/PID", &pid.to_string(), "/T", "/F"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(0x0800_0000)
+            .status();
+    }
+
+    #[cfg(not(windows))]
+    fn stop_process(pid: u32) {
+        let _ = Command::new("kill").args(["-9", &pid.to_string()]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).status();
+    }
+}
+
+/// Is the program at `exe` inside `folder` (or in a folder under it)? Paths from the process list
+/// and the settings may differ in case and in the kind of slash on Windows, so neither counts.
+pub fn program_inside(exe: &str, folder: &std::path::Path) -> bool {
+    let norm = |p: &str| p.replace('\\', "/").trim_end_matches('/').to_lowercase();
+    let (exe, folder) = (norm(exe), norm(&folder.to_string_lossy()));
+    !folder.is_empty() && exe.len() > folder.len() + 1 && exe.starts_with(&folder) && exe.as_bytes().get(folder.len()) == Some(&b'/')
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use native::{find_installed, find_running, models_folders_here, version_here};
+pub use native::{find_installed, find_running, models_folders_here, stop_processes_in, version_here};
 
 #[cfg(test)]
 mod tests {
@@ -1135,6 +1173,19 @@ mod tests {
         for odd in ["", "http://", "::::", "127.0.0.1"] {
             assert!(!addresses(odd).is_empty(), "{odd}");
         }
+    }
+
+    #[test]
+    fn a_program_is_inside_a_folder_whatever_its_case_and_slashes() {
+        let engine = std::path::Path::new(r"C:\Users\u\AppData\Local\LayerShop\engine\0.45.0");
+        assert!(program_inside(r"C:\Users\u\AppData\Local\LayerShop\engine\0.45.0\python_embeded\python.exe", engine));
+        assert!(program_inside("c:/users/U/appdata/local/layershop/ENGINE/0.45.0/python_embeded/python.exe", engine));
+        assert!(program_inside(r"C:\Users\u\AppData\Local\LayerShop\engine\0.45.0\python.exe", std::path::Path::new(r"C:\Users\u\AppData\Local\LayerShop\engine\0.45.0\")));
+        // A sibling whose name starts the same, the folder itself and an unknown program are not.
+        assert!(!program_inside(r"C:\Users\u\AppData\Local\LayerShop\engine\0.45.0-old\python_embeded\python.exe", engine));
+        assert!(!program_inside(r"C:\Users\u\AppData\Local\LayerShop\engine\0.45.0", engine));
+        assert!(!program_inside("", engine) && !program_inside(r"C:\Python312\python.exe", engine));
+        assert!(!program_inside(r"C:\anything\python.exe", std::path::Path::new("")));
     }
 
     #[test]
@@ -1420,6 +1471,28 @@ mod tests {
     mod process {
         use super::*;
         use std::sync::atomic::{AtomicU32, Ordering};
+
+        /// A program running from a folder is stopped, so the folder can be removed (an open
+        /// program can't be deleted on Windows); one running from elsewhere is not.
+        #[cfg(windows)]
+        #[test]
+        fn a_program_running_from_a_folder_is_stopped_and_the_folder_can_go() {
+            let dir = std::env::temp_dir().join(format!("photocraft-stop-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(dir.join("bin")).unwrap();
+            let system = std::path::PathBuf::from(std::env::var("SystemRoot").unwrap_or_else(|_| r"C:\Windows".into())).join("System32");
+            let program = dir.join("bin").join("ping.exe");
+            std::fs::copy(system.join("PING.EXE"), &program).unwrap();
+            let mut inside = std::process::Command::new(&program).args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+            let mut outside = std::process::Command::new(system.join("PING.EXE")).args(["-n", "120", "127.0.0.1"]).stdout(std::process::Stdio::null()).spawn().unwrap();
+            assert!(std::fs::remove_file(&program).is_err(), "a running program can't be deleted");
+            assert_eq!(stop_processes_in(&dir), 1);
+            assert!(inside.wait().is_ok());
+            assert!(outside.try_wait().unwrap().is_none(), "a program from elsewhere keeps running");
+            let _ = outside.kill();
+            let _ = outside.wait();
+            std::fs::remove_dir_all(&dir).unwrap();
+        }
 
         fn control<'a>(cancelled: &'a (dyn Fn() -> bool + Sync)) -> Control<'a> {
             Control { cancelled, progress: &|_, _| {}, sleep: &|_| {} }

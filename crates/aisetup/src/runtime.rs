@@ -252,9 +252,57 @@ pub fn installed_engines(engine_dir: &Path) -> Vec<(PathBuf, Marker)> {
     out
 }
 
+/// The suffix a folder takes while [`remove_folder`] deletes it.
+pub const REMOVING: &str = ".removing";
+
+/// How long a folder may stay in use after the programs in it were stopped (Windows lets go of a
+/// stopped process's files a moment after it ends).
+const RELEASE_TRIES: u32 = 20;
+const RELEASE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Remove the folder `path` (an engine, or the folder of engines), all or nothing: the programs
+/// running from inside it are stopped first (a running engine keeps its files open, and Windows
+/// can't delete an open file), then it is renamed to `<name>.removing` and only then deleted.
+/// A folder still in use can't be renamed, so it stays whole and this says why; one whose
+/// deletion stops part way keeps the `.removing` name, which no setup takes for an engine and
+/// [`remove_engines`] clears later. Returns the bytes freed.
+pub fn remove_folder(path: &Path) -> Result<u64> {
+    if std::fs::symlink_metadata(path).is_err() {
+        return Ok(0);
+    }
+    let size = size_of(path);
+    photocraft_aigen::launch::stop_processes_in(path);
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let aside = if name.ends_with(REMOVING) { path.to_path_buf() } else { path.with_file_name(format!("{name}{REMOVING}")) };
+    if aside != path {
+        if aside.exists() {
+            // An earlier removal that stopped part way: its name says it is ours to clear.
+            std::fs::remove_dir_all(&aside).map_err(|e| in_use(&aside, &e))?;
+        }
+        let mut tries = 0;
+        while let Err(e) = std::fs::rename(path, &aside) {
+            tries += 1;
+            if tries >= RELEASE_TRIES {
+                return Err(in_use(path, &e));
+            }
+            std::thread::sleep(RELEASE_WAIT);
+        }
+    }
+    std::fs::remove_dir_all(&aside).map_err(|e| in_use(&aside, &e))?;
+    Ok(size)
+}
+
+/// A folder that could not be removed, and what to do about it.
+fn in_use(path: &Path, e: &std::io::Error) -> Error {
+    Error::Disk(format!(
+        "Could not remove `{}`: {e}. A program may still be using it: close LayerShop and anything started from that folder, then try again.",
+        path.display()
+    ))
+}
+
 /// Remove what the setup put in `engine_dir`: every engine that carries the marker, unfinished
-/// unpacks and runtime archives. Anything else in the folder is not this app's and stays.
-/// Returns the bytes freed.
+/// unpacks and removals, and runtime archives. Anything else in the folder is not this app's and
+/// stays. Returns the bytes freed.
 pub fn remove_engines(engine_dir: &Path) -> Result<u64> {
     let mut freed = 0u64;
     let Ok(entries) = std::fs::read_dir(engine_dir) else { return Ok(0) };
@@ -262,10 +310,8 @@ pub fn remove_engines(engine_dir: &Path) -> Result<u64> {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
         let Ok(kind) = entry.file_type() else { continue };
-        if kind.is_dir() && (read_marker(&path).is_some() || name.ends_with(".unpacking")) {
-            let size = size_of(&path);
-            std::fs::remove_dir_all(&path).map_err(|e| disk(&path, "remove", &e))?;
-            freed = freed.saturating_add(size);
+        if kind.is_dir() && (read_marker(&path).is_some() || name.ends_with(".unpacking") || name.ends_with(REMOVING)) {
+            freed = freed.saturating_add(remove_folder(&path)?);
         } else if kind.is_file()
             && name.starts_with("ComfyUI_windows_portable")
             && (name.ends_with(".7z") || name.ends_with(".7z.part") || name.ends_with(".7z.part.etag"))
@@ -455,6 +501,20 @@ mod tests {
     }
 
     #[test]
+    fn a_folder_is_removed_whole_and_a_removal_left_part_way_is_finished() {
+        let dir = tempfile::tempdir().unwrap();
+        let engine = dir.path().join("0.45.0");
+        std::fs::create_dir_all(engine.join("ComfyUI")).unwrap();
+        std::fs::write(engine.join("ComfyUI").join("main.py"), b"print()").unwrap();
+        // One that stopped part way before: cleared on the way.
+        std::fs::create_dir_all(dir.path().join("0.45.0.removing").join("stale")).unwrap();
+        assert_eq!(remove_folder(&engine).unwrap(), 7);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+        // Nothing there: nothing to do.
+        assert_eq!(remove_folder(&engine).unwrap(), 0);
+    }
+
+    #[test]
     fn removing_takes_only_what_the_setup_installed() {
         let dir = tempfile::tempdir().unwrap();
         let engines = dir.path().join("engine");
@@ -463,6 +523,8 @@ mod tests {
         std::fs::create_dir_all(ours.join("python_embeded")).unwrap();
         std::fs::create_dir_all(&theirs).unwrap();
         std::fs::create_dir_all(engines.join("0.40.0.unpacking")).unwrap();
+        // What a removal that stopped part way left.
+        std::fs::create_dir_all(engines.join("0.38.0.removing").join("python_embeded")).unwrap();
         std::fs::write(ours.join("python_embeded").join("python.exe"), vec![0u8; 1000]).unwrap();
         write_marker(&ours, &Marker { version: "0.39.0".into(), variant: "nvidia".into(), sha256: "ab".into() }).unwrap();
         std::fs::write(theirs.join("keep.txt"), b"mine").unwrap();
@@ -472,6 +534,7 @@ mod tests {
         let freed = remove_engines(&engines).unwrap();
         assert!(freed >= 1500, "{freed}");
         assert!(!ours.exists() && !engines.join("0.40.0.unpacking").exists() && !engines.join("ComfyUI_windows_portable_nvidia.7z.part").exists());
+        assert!(!engines.join("0.38.0.removing").exists() && !engines.join("0.39.0.removing").exists());
         assert!(theirs.join("keep.txt").is_file() && engines.join("holiday.7z").is_file());
         assert_eq!(remove_engines(&dir.path().join("missing")).unwrap(), 0);
         // A marker that is not one (a huge file, junk) marks nothing.

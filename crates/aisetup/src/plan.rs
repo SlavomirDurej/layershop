@@ -379,7 +379,9 @@ pub fn plan(manifest: &Manifest, choices: &Choices, disk: &dyn Disk) -> Result<P
 
     if managed {
         let asset = manifest.asset(&choices.variant)?;
-        let installed = disk.len(&layout.marker).is_some() && disk.len(&layout.python).is_some();
+        // The marker with what the engine is started with: an uninstall that ran into a running
+        // engine has been seen to leave the marker and the Python but not ComfyUI's own files.
+        let installed = [&layout.marker, &layout.python, &layout.script].into_iter().all(|f| disk.len(f).is_some());
         let fetched = installed || disk.len(&layout.archive) == Some(asset.size);
         let have = if fetched { 0 } else { disk.len(&part_of(&layout.archive)).unwrap_or(0).min(asset.size) };
         out.steps.push(Planned {
@@ -561,6 +563,7 @@ mod tests {
         disk.0.clear();
         disk.0.insert(layout.marker.clone(), 80);
         disk.0.insert(layout.python.clone(), 100_000);
+        disk.0.insert(layout.script.clone(), 1_000);
         disk.0.insert(layout.model_file(unet).unwrap(), m.files[unet].size);
         disk.0.insert(part_of(&layout.model_file(encoder).unwrap()), 5_000_000_000);
         let p = plan(m, &c, &disk).unwrap();
@@ -580,6 +583,13 @@ mod tests {
         // A marker without its Python is not an engine.
         disk.0.remove(&layout.python);
         assert!(!plan(m, &c, &disk).unwrap().steps[1].done);
+        // Nor is one without ComfyUI's script (half removed): it is fetched and unpacked again.
+        disk.0.insert(layout.python.clone(), 100_000);
+        disk.0.remove(&layout.script);
+        let p = plan(m, &c, &disk).unwrap();
+        assert!(!p.steps[0].done && !p.steps[1].done);
+        disk.0.insert(layout.script.clone(), 1_000);
+        assert!(plan(m, &c, &disk).unwrap().steps[1].done);
     }
 
     #[test]
