@@ -1465,6 +1465,18 @@ fn absolute_paths_are_checked_against_the_authority_s_own_root() {
 }
 
 #[test]
+fn desktop_save_path_is_anchored_to_the_write_root() {
+    let (write, read, _) = roots("desktop-save-path");
+    let workspace = AuthorizedWorkspace::new(Some(&read), Some(&write)).unwrap();
+    let path = workspace.desktop_save_path("draft.psd").unwrap();
+    assert_eq!(Path::new(&path), std::fs::canonicalize(&write).unwrap().join("draft.psd"));
+    workspace.write(&path, b"saved").unwrap();
+    assert_eq!(std::fs::read(write.join("draft.psd")).unwrap(), b"saved");
+    assert!(workspace.desktop_save_path("../draft.psd").is_err());
+    assert!(workspace.desktop_save_path(&read.join("draft.psd").to_string_lossy()).is_err());
+}
+
+#[test]
 fn ordered_read_roots_keep_write_authority_and_save_provenance_separate() {
     let (library, work, _) = roots("multiple-roots");
     std::fs::write(library.join("photo.txt"), b"library").unwrap();

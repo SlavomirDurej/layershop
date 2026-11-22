@@ -1752,6 +1752,38 @@ fn automation_open_and_save_use_the_roots_and_reply_with_warnings() {
     assert!(r["error"].as_str().unwrap().contains("pass `path`"), "{r}");
 }
 
+#[test]
+fn interactive_save_reuses_the_resolved_automation_destination() {
+    let dest = if cfg!(windows) { "C:/test-write-root/document.psd" } else { "/test-write-root/document.psd" };
+    let interactive_writes = std::rc::Rc::new(std::cell::Cell::new(0));
+    let writes = interactive_writes.clone();
+    let services = crate::Services {
+        automation_save_path: Some(Box::new(move |path| {
+            assert_eq!(path, "document.psd");
+            Ok(dest.into())
+        })),
+        export: Some(Box::new(|_, _, _| Ok((vec![1], Vec::new())))),
+        automation_write: Some(Box::new(move |path, _| {
+            assert_eq!(path, dest);
+            Ok(())
+        })),
+        write: Some(Box::new(move |path, _| {
+            assert_eq!(path, dest);
+            writes.set(writes.get() + 1);
+            Ok(())
+        })),
+        ..Default::default()
+    };
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), services);
+    let ctx = egui::Context::default();
+    app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+    let saved = call(&mut app, &ctx, "app.save", json!({"path":"document.psd"}));
+    assert_eq!(saved["result"]["path"], dest);
+    assert_eq!(app.session.active().unwrap().path.as_deref(), Some(dest));
+    crate::menus::invoke(&mut app, &ctx, "file.save", json!({})).unwrap();
+    assert_eq!(interactive_writes.get(), 1);
+}
+
 fn deny_ambient_file(id: &str, _: &serde_json::Value) -> photocraft_engine::Result<()> {
     if id.starts_with("file.") && id != "file.new" {
         Err(photocraft_engine::EngineError::Other(format!("automation command `{id}` is disabled")))

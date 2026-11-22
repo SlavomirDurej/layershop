@@ -822,6 +822,11 @@ impl PhotocraftApp {
                 "pass `path`: a save without one writes back only to the document's own PSD, PSB, .pcraft or OpenRaster file, and to OpenRaster only when it holds everything (adjustment layers, styles and masks don't fit)",
             )?
         };
+        // Interactive Save must refer to the capability destination, not the process CWD.
+        let target = match &self.services.automation_save_path {
+            Some(resolve) => resolve(&target)?,
+            None => target,
+        };
         let reply = |path: &str, warnings: &[String]| json!({"path": path, "warnings": warnings});
         // Only the target is granted: a linked smart object's stored path is document data, so
         // PSD export writes that layer as pixels instead of embedding the file.

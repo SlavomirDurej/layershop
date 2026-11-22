@@ -733,6 +733,7 @@ pub fn automation(workspace: Option<photocraft_automation::AuthorizedWorkspace>)
     let read = workspace.clone().map(|workspace| {
         Box::new(move |path: &str| {
             let (bytes, save_path) = workspace.read_with_save_path(path).map_err(|error| error.to_string())?;
+            let save_path = save_path.and_then(|path| workspace.desktop_save_path(&path).ok());
             let name = Path::new(path).file_name().and_then(|name| name.to_str()).unwrap_or(path).to_string();
             Ok(photocraft_ui_egui::AutomationReadResult { name, bytes, save_path })
         }) as photocraft_ui_egui::AutomationReadFn
@@ -754,12 +755,15 @@ pub fn automation(workspace: Option<photocraft_automation::AuthorizedWorkspace>)
     });
     let step: photocraft_ui_egui::AutomationAuthorizeFn = photocraft_automation::workspace::authorize_desktop_engine_step;
     let authorize = workspace.is_some().then_some(step);
+    let save_path = workspace.clone().map(|workspace| {
+        Box::new(move |path: &str| workspace.desktop_save_path(path).map_err(|error| error.to_string())) as photocraft_ui_egui::AutomationSavePathFn
+    });
     let command = workspace.map(|_| {
         Box::new(|id: &str, params: &serde_json::Value| {
             photocraft_automation::workspace::authorize_desktop_engine_command(id, params).map_err(|error| error.to_string())
         }) as photocraft_ui_egui::AutomationCommandFn
     });
-    photocraft_ui_egui::AutomationServices { read, write, open_pcraft, save, command, authorize }
+    photocraft_ui_egui::AutomationServices { read, write, open_pcraft, save, save_path, command, authorize }
 }
 
 pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) -> Services {
@@ -789,6 +793,7 @@ pub fn native(automation: Option<photocraft_automation::AuthorizedWorkspace>) ->
         automation_write: automation.write,
         automation_open_pcraft: automation.open_pcraft,
         automation_save: automation.save,
+        automation_save_path: automation.save_path,
         automation_command: automation.command,
         automation_authorize: automation.authorize,
         encode_png: Some(Box::new(|w, h, rgba| {
