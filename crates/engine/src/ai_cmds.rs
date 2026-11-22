@@ -92,6 +92,8 @@ pub struct AiRuntime {
     /// Starts ComfyUI when a local model needs it and none is running (desktop; see
     /// `photocraft_aigen::launch`). `None`: the user starts it.
     pub server: Option<Arc<dyn LocalServer>>,
+    /// A process-owner configured endpoint for headless upscale only. It never starts a server.
+    pub(crate) headless_upscale: Option<(String, Arc<dyn Transport>)>,
     /// API keys by provider key (`openai`, `gemini`), and the Hugging Face sign-in. Never
     /// serialised with the preferences.
     keys: BTreeMap<String, String>,
@@ -640,7 +642,7 @@ fn extended(pixels: &[[f32; 4]], width: usize, height: usize) -> Vec<[f32; 3]> {
 
 /// Give each empty (`None`) entry of `line` the nearest filled one's value; a line with none
 /// filled stays empty.
-fn fill_line(line: &mut [Option<[f32; 3]>]) {
+pub(crate) fn fill_line<T: Copy>(line: &mut [Option<T>]) {
     if line.iter().all(Option::is_some) || line.iter().all(Option::is_none) {
         return;
     }
@@ -1981,6 +1983,18 @@ fn server_settings(s: &Session, p: &Value, cmd: &str) -> Result<Settings> {
 fn comfy_models(s: &mut Session, p: &Value) -> Result<Value> {
     let settings = server_settings(s, p, "ai.comfyModels")?;
     let transport = transport(s)?;
+    if p.get("upscaleOnly").and_then(Value::as_bool) == Some(true) {
+        return crate::jobs::run(
+            s,
+            "Find upscale models",
+            false,
+            move |ctx| {
+                let control = Control { cancelled: &|| ctx.cancelled(), progress: &|_, _| {}, sleep: &|_| {} };
+                photocraft_aigen::upscale_models(transport.as_ref(), &settings.comfy_url, &control).map_err(ai_error)
+            },
+            |_, models| Ok(json!({"upscaleModels": models})),
+        );
+    }
     // `"start": false` only looks: the Preferences page checks the server when it opens.
     let server = s.ai.server.clone().filter(|_| p.get("start").and_then(Value::as_bool).unwrap_or(true));
     // `"findPort": true`: a ComfyUI on this computer that is not at the address may be on the
@@ -2164,7 +2178,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "ComfyUI Model Files",
             menu: &[],
             shortcut: None,
-            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"start":bool=true,"findPort":bool=false (an address on this computer that doesn't answer: try ComfyUI's other port too, 8000 for ComfyUI Desktop, 8188 for the portable build)} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere,url (the address that answered),version (the ComfyUI version it reports; empty when it doesn't)} (starts ComfyUI first when the settings say so and none is running)"##,
+            params: r##"{"url":str?=the ComfyUI address in the preferences,"settings":{…}?=the saved integrations.ai,"upscaleOnly":bool=false (model names and supported factors, no autostart),"start":bool=true,"findPort":bool=false (an address on this computer that doesn't answer: try ComfyUI's other port too, 8000 for ComfyUI Desktop, 8188 for the portable build)} → {folders:{diffusion_models|text_encoders|vae|checkpoints|loras|controlnet:[file,…]},modelsFolders:[folder,…] (where it reads model files, where it saves new ones first; empty when it doesn't say),startedHere,url (the address that answered),version (the ComfyUI version it reports; empty when it doesn't)} (starts ComfyUI first when the settings say so and none is running)"##,
             enabled: always,
             run: comfy_models,
             journal: false,

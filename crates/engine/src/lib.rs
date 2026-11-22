@@ -15,6 +15,7 @@ pub mod ai_refs;
 pub mod ai_refs_cmds;
 pub mod ai_regions_cmds;
 pub mod ai_setup_cmds;
+pub mod ai_upscale_cmds;
 mod allocation;
 pub mod build_info;
 mod canvas_geom;
@@ -69,6 +70,7 @@ pub mod cmd;
 mod doc_state;
 mod error;
 mod session;
+mod upscale_placement;
 
 pub use cmd as commands;
 pub use cmd::actions_cmds;

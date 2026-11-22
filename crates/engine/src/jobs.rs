@@ -90,6 +90,7 @@ pub struct JobId(pub u64);
 /// clones share the same state.
 #[derive(Clone, Default)]
 pub struct JobCtx {
+    id: Option<JobId>,
     shared: Arc<Shared>,
 }
 
@@ -149,6 +150,10 @@ impl std::fmt::Debug for JobCtx {
 impl JobCtx {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub(crate) fn id(&self) -> Option<JobId> {
+        self.id
     }
 
     /// Report progress in `0.0..=1.0` with a short status (empty keeps the previous one).
@@ -874,7 +879,7 @@ fn new_job<T: Send + 'static>(
         before: crate::actions_record::Before::capture(s),
         doc,
         snapshot,
-        ctx: JobCtx::new(),
+        ctx: JobCtx { id: Some(JobId(s.jobs.next)), ..JobCtx::default() },
         started_ms: now_ms(),
         coalesce: s.coalesce_request.clone(),
         color_restrict: s.color_restrict,

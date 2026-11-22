@@ -170,6 +170,8 @@ const POLL: Duration = Duration::from_millis(500);
 /// Polls that may fail in a row before giving up (the server stalls while it loads a model).
 const MAX_POLL_FAILURES: u32 = 30;
 
+pub(crate) mod upscale;
+
 /// A seed for a model set to "random": 48 bits, which every back end and JSON number holds.
 pub fn random_seed() -> u64 {
     use std::sync::atomic::{AtomicU64, Ordering};
@@ -1153,10 +1155,19 @@ mod tests {
 
     #[test]
     fn model_lists_come_from_each_folder() {
-        let fake = Fake::new(|r, _| if r.url.ends_with("/models/loras") { Ok(Response { status: 404, body: Vec::new() }) } else { ok(r#"["a.safetensors"]"#) });
+        let fake = Fake::new(|r, _| {
+            if r.url.ends_with("/models/loras") {
+                Ok(Response { status: 404, body: Vec::new() })
+            } else if r.url.ends_with("/models/upscale_models") {
+                ok(r#"["upscalers/RealESRGAN_x2plus.pth"]"#)
+            } else {
+                ok(r#"["a.safetensors"]"#)
+            }
+        });
         let m = comfy_models(&fake, "http://comfy:8188").unwrap();
-        assert_eq!(m.len(), 5);
+        assert_eq!(m.len(), 6);
         assert_eq!(m["vae"], vec!["a.safetensors"]);
+        assert_eq!(m["upscale_models"], vec!["upscalers/RealESRGAN_x2plus.pth"]);
         let down = Fake::new(|_, _| Err(Error::Network("refused".into())));
         assert!(comfy_models(&down, "http://comfy:8188").unwrap_err().to_string().contains("Is it running?"));
         assert!(comfy_models(&down, "nope").is_err());

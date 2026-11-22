@@ -13,8 +13,19 @@ use serde_json::{Value, json};
 use crate::workspace::{ExportSequence, authorize_engine_command, authorize_engine_step};
 use crate::{AuthorizedWorkspace, AutomationError, files};
 
-fn untrusted(filesystem: Filesystem) -> Headless {
+fn headless_session() -> Session {
     let mut session = Session::new();
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Ok(url) = std::env::var("PHOTOCRAFT_UPSCALE_COMFY_URL")
+        && !url.trim().is_empty()
+    {
+        session.configure_headless_upscale(url);
+    }
+    session
+}
+
+fn untrusted(filesystem: Filesystem) -> Headless {
+    let mut session = headless_session();
     session.authorize = Some(authorize_engine_step);
     Headless { session, writers: HashMap::new(), filesystem, renderer: None, pending_diagnostics: Vec::new(), waited: HashMap::new() }
 }
@@ -73,7 +84,7 @@ impl Headless {
     /// `actions.play` steps are not re-checked: this caller is already trusted.
     pub fn trusted_local() -> Self {
         Self {
-            session: Session::new(),
+            session: headless_session(),
             writers: HashMap::new(),
             filesystem: Filesystem::TrustedLocal,
             renderer: None,
@@ -506,12 +517,13 @@ impl Headless {
         // Commands such as `file.close`, `file.closeAll` and `file.closeOthers` remove
         // documents directly through the session, so release their GPU caches here too.
         let before = self.document_ids();
-        let result = if wait {
+        let result = if wait && id != "ai.upscale" {
             self.session.execute(id, params).map_err(AutomationError::from)
         } else {
-            self.session.start(id, params).map_err(AutomationError::from).map(|started| match started {
-                Started::Done(v) => v,
-                Started::Job(job) => json!({"job": job.0, "pending": true}),
+            self.session.start(id, params).map_err(AutomationError::from).and_then(|started| match started {
+                Started::Done(v) => Ok(v),
+                Started::Job(job) if wait => self.session.wait_job(job).map_err(AutomationError::from),
+                Started::Job(job) => Ok(json!({"job": job.0, "pending": true})),
             })
         };
         self.forget_removed_documents(&before);

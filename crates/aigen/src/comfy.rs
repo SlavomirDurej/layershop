@@ -14,7 +14,7 @@ use crate::run::Job;
 use crate::{Error, Result};
 
 /// The folders of `models/` that hold each kind of file, as `GET /models/<folder>` names them.
-pub const FOLDERS: [&str; 6] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet"];
+pub const FOLDERS: [&str; 7] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet", "upscale_models"];
 
 /// A workflow under construction, in ComfyUI's API format: `{"<id>": {class_type, inputs}}`.
 #[derive(Default)]
@@ -966,7 +966,7 @@ pub fn queue_body(workflow: &Value, client_id: &str) -> Vec<u8> {
     json!({"prompt": workflow, "client_id": client_id}).to_string().into_bytes()
 }
 
-fn json_of(body: &[u8], what: &str) -> Result<Value> {
+pub(crate) fn json_of(body: &[u8], what: &str) -> Result<Value> {
     serde_json::from_slice(body).map_err(|_| Error::BadResponse(format!("ComfyUI's {what} answer was not JSON; is the address a ComfyUI server?")))
 }
 
@@ -1110,7 +1110,7 @@ pub fn parse_text_history(body: &[u8], id: &str) -> Result<Option<String>> {
 }
 
 /// The error of a workflow whose node failed, from its history entry's `status`.
-fn node_failed(status: Option<&Value>) -> Option<Error> {
+pub(crate) fn node_failed(status: Option<&Value>) -> Option<Error> {
     if status.and_then(|s| s.get("status_str")).and_then(Value::as_str) == Some("error") {
         let detail = status
             .and_then(|s| s.get("messages"))
@@ -1131,7 +1131,7 @@ fn node_failed(status: Option<&Value>) -> Option<Error> {
 }
 
 /// Percent-encode a query value.
-fn encode(s: &str) -> String {
+pub(crate) fn encode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
         if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
@@ -1153,6 +1153,12 @@ pub fn parse_models(body: &[u8]) -> Result<Vec<String>> {
     let v = json_of(body, "model list")?;
     let list = v.as_array().ok_or_else(|| Error::BadResponse("ComfyUI's model list was not a list".into()))?;
     Ok(list.iter().filter_map(Value::as_str).filter(|s| !s.is_empty() && s.len() <= 512).take(10_000).map(str::to_string).collect())
+}
+
+/// Dimensions from a PNG's mandatory first chunk, without allocating decoded pixels.
+pub fn png_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
+    let ihdr = bytes.strip_prefix(b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR")?;
+    Some((u32::from_be_bytes(ihdr.get(..4)?.try_into().ok()?), u32::from_be_bytes(ihdr.get(4..8)?.try_into().ok()?)))
 }
 
 #[cfg(test)]

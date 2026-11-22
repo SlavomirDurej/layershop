@@ -32,6 +32,8 @@ pub mod size;
 pub mod style;
 mod ws;
 
+pub use run::upscale::{UpscalePlan, run_upscale, upscale_models};
+
 #[cfg(not(target_arch = "wasm32"))]
 pub use http::UreqTransport;
 pub use http::{MAX_RESPONSE_BYTES, Method, Part, Request, Response, Transport};

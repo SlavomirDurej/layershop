@@ -78,15 +78,17 @@ pub(crate) fn source_pixels(bytes: &[u8]) -> u64 {
     header_pixels(bytes).unwrap_or_else(|| (bytes.len() as u64).saturating_mul(FALLBACK_PX_PER_FILE_BYTE))
 }
 
+/// Dimensions from a PNG's mandatory first chunk, without decoding its pixels.
+pub(crate) use photocraft_aigen::comfy::png_dimensions;
+
 fn header_pixels(bytes: &[u8]) -> Option<u64> {
     if let Ok((w, h)) = photocraft_codecs::probe_size(bytes) {
         return Some(u64::from(w) * u64::from(h));
     }
     let be32 = |at: usize| -> Option<u64> { Some(u64::from(u32::from_be_bytes(bytes.get(at..at.checked_add(4)?)?.try_into().ok()?))) };
     let be16 = |at: usize| -> Option<u64> { Some(u64::from(u16::from_be_bytes(bytes.get(at..at.checked_add(2)?)?.try_into().ok()?))) };
-    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        // IHDR: width, height.
-        return Some(be32(16)?.saturating_mul(be32(20)?));
+    if let Some((w, h)) = png_dimensions(bytes) {
+        return Some(u64::from(w) * u64::from(h));
     }
     if bytes.starts_with(b"8BPS") {
         // PSD / PSB header: height then width.
