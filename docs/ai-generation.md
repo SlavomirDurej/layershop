@@ -55,9 +55,10 @@ back end you set up, and places the answer on a new layer.
      time a local model needs it). **Add Folder…** and **Download
      Models…** (the setup wizard) are underneath. With your own ComfyUI there is only its
      folder: its own `extra_model_paths.yaml` names any others.
-2. **Window › AI Gen** — a tab next to Properties and Adjustments. It has two tabs of its own:
-   **Create** makes a new image from a prompt, **Edit** changes a picture that is there (below).
-   Pick a model, write a prompt, press **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt
+2. Open **Window › AI Gen** next to Properties and Adjustments. **Create** makes a new
+   image from a prompt, **Edit** changes an existing picture, and **Upscale** increases the
+   resolution of a raster layer. In Create or Edit, pick a model, write a prompt, and press
+   **Generate** (or ⌘/Ctrl+Return in the prompt). The prompt
    box fills the height of the panel: drag the edge of the dock group to make it taller. The gear
    opens that model's settings.
 3. The result is a new layer over the **selection's bounds** (the whole canvas without a
@@ -88,8 +89,6 @@ under *Local models*). MOSS Image is the other: it renders at the selection's ow
 *MOSS Image*).
 
 ## Create and Edit
-
-The two tabs across the top of the panel say what you are there to do.
 
 **Create** generates a new image from the prompt alone, as above. It lists the models that
 generate. Its second tab, **Regions**, lays the scene out in boxes for the models trained on
@@ -192,6 +191,54 @@ true, "frames": 9, "frameMs": 200}` does the same for agents.
 *Supports a transparent background* in their settings (the GPT Image 2.6 and 2.5 presets have it on; the
 Gemini models cannot). If a provider rejects the option, untick it there. Of the local models
 **Ming Image** has it on: see *Ming Image* under *Local models*.
+
+## Upscaling a raster layer (AI Gen › Upscale)
+
+1. In **Layers**, select one raster layer in an 8-bit sRGB document. Open
+   **Window › AI Gen** and select **Upscale**, beside **Create** and **Edit**.
+2. In **Edit › Preferences › Generative AI**, use the address of your running
+   ComfyUI server. Put the model weights in that server's `models/upscale_models`
+   directory or configured extra model path. Open **Upscale** or click **Refresh**
+   to query the server. If the connection fails, check the address and retry.
+3. Choose an available model and scale. `RealESRGAN_x2plus.pth` supports **2×**.
+   `RealESRGAN_x4plus.pth` and `RealESRGAN_x4plus.safetensors` support **4×**
+   and can produce **2×** through ComfyUI's ImageScale node. The latter route
+   still processes a 4× intermediate. The panel previews the output resolution
+   using the full pixel bounds, including pixels outside the canvas.
+4. Click **Upscale Selected Layer**. Follow the stage in AI Gen or click **Cancel**
+   to discard the job before it adds the result. A server that cannot stop its
+   own running task may finish computing it. Other server jobs continue.
+
+![The Upscale tab with a 768 × 512 raster layer, a 4× model and a 3072 × 2048 output preview](images/ai-gen-upscale.png)
+
+The source stays in place. The result is an embedded Smart Object directly
+above it, with the same visual dimensions and the higher pixel resolution.
+Use **Undo** to remove the result in one step or **Redo** to restore it. The
+upscaled pixels are stored with the document in native and PSD saves.
+
+Upscale requires a single supported raster layer. Clipping groups, video and
+frame contents, unsupported blending and effects, and vector masks can make a
+layer ineligible. Oversized images are refused before transfer. The Upscale
+tab uses the configured ComfyUI server and lists only recognized profiles
+currently offered by that server.
+
+### Saving the Upscaled Image at Full Resolution
+
+Upscale places a new embedded Smart Object directly above the original raster
+layer and leaves that layer unchanged. The Smart Object stores the full 2× or
+4× pixel resolution and keeps the original layer's visual size on the canvas.
+Saving the main document keeps its canvas dimensions. A layered `.pcraft` or
+PSD save also preserves the full-resolution pixels inside the Smart Object.
+
+1. In **Layers**, double-click the new Smart Object's thumbnail. Its embedded
+   image opens in a separate document tab at full resolution.
+2. With that tab active, choose **File › Export › Export As** and select PNG.
+   Keep **Scale All** at 1× and **Image Size › Scale** at 100% to retain the
+   full pixel dimensions. Click **Export** and choose a separate file name.
+   For example, a 768 × 512 raster layer upscaled at 2× opens as 1536 × 1024
+   pixels.
+3. Return to the main document. The original raster layer and canvas are
+   unchanged.
 
 ## Regions (Create › Regions)
 
@@ -1204,6 +1251,7 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.generate {"prompt", "regions": true or [...], …}` | a text to image laid out in the document's regions (or those given), with a model trained on boxes; `modelPrompt` in the result is the layout sent |
 | `ai.generate {"prompt", "loras": [{"lora", "strength"?}, …], …}` | stack up to five LoRAs on a local model: `lora` is one of the model's (by file or name, see `ai.models`) or a file of the server's `models/loras`; `strength` −10 to 10, unasked the one its settings start it at, else 1. Their trigger words are added to `modelPrompt`. Refused for a model that takes none |
 | `ai.comfyModels {"url"?}` | the model files a ComfyUI server has |
+| `ai.upscale {"scale":2\|4,"model":string,"layer"?:id}` | upscale one 8-bit sRGB raster layer through ComfyUI and place an embedded Smart Object above it at the original visual size. The selected layer is used when `layer` is omitted. The job result includes `job`, `status`, `sourceLayer`, `layer`, `scale`, `model`, `sourceSize` and `outputSize`. Inline calls report `job: null`. |
 | `ai.server.status` / `ai.server.find` / `ai.server.stop` | the local server: state, how the running one was started, stop the one PhotoCraft started |
 | `ai.setKey {"provider", "key"}` / `ai.keys` | set a key for this session / which providers have one (`openrouter` and `anthropic` are prompt enhancement's own; `openai`, `xai` and `gemini` serve both) |
 | `ai.enhancePrompt {"prompt", "mode"?: "txt2img"/"imgEdit"/"inpaint"/"img2img", "model"?, "provider"?, "textModel"?, "timeout"?, "words"?, "style"?}` → `{prompt, original, provider, textModel, style}` (`provider: "local"`: a local model on the engine) | rewrite a prompt with the service in `integrations.ai.enhance` (or the one given); a background job, cancellable, that changes no document |
@@ -1221,6 +1269,29 @@ Everything is a command (`photocraft-cli commands | grep '^ai\.'`):
 | `ai.setup.hfAccess {"models"?}` | where each gated model stands (`signIn`, `licence`, `ready`): one `HEAD` of its gated file. Renews a sign-in about to expire. A background job |
 | `ai.setup.start`, `ai.setup.cancel`, `ai.setup.repair`, `ai.setup.remove`, `ai.setup.hfSignIn`, `ai.setup.hfSignOut`, `ai.setup.setToken`, `ai.setup.hfUseFound` | install, stop, fix, delete, sign in and out of Hugging Face, an access token, the token found on this PC. **Refused to agents**: they download and start a program, delete files, or sign in, and are the user's to do from the wizard. So is `ai.setup.plan` with a folder or a server listing of the agent's choosing |
 | `ai.setup.open {"page"?, "route"?, "open"?}` | a shell command (the running app): open the wizard, on a screen (`pc`, `location`, `models`, `install`, `ready`), or close it |
+
+Upscale accepts the exact server filenames `RealESRGAN_x2plus.pth`,
+`RealESRGAN_x4plus.pth` and `RealESRGAN_x4plus.safetensors`, including any subfolder. Put them in ComfyUI's `upscale_models`
+directory. A 4× model can also produce 2×. The server must expose the standard image upscale
+nodes. Only the raw RGB pixels of the source layer are uploaded, including pixels outside the
+canvas. LayerShop restores intrinsic alpha locally and keeps the layer's opacity and raster mask
+as separate properties. The embedded PNG keeps the higher resolution through PSD and native
+saves.
+
+Desktop and bridged MCP use the desktop's Generative AI settings. To enable Upscale in a
+standalone CLI or headless MCP process, set `PHOTOCRAFT_UPSCALE_COMFY_URL` in that process's
+environment to a ComfyUI server you operate or trust. This explicitly allows that process's
+Upscale commands to send layer pixels to the server. Headless Upscale connects to an existing
+server and performs no setup or autostart. For example:
+
+```text
+photocraft-cli run image.png --cmd ai.upscale --params '{"scale":2,"model":"RealESRGAN_x2plus.pth"}' --out result.pcraft
+```
+
+The CLI waits for the layer before saving. MCP can wait for completion through `command_run`, or
+poll a returned job with `jobs_list`. On older servers LayerShop can remove its pending prompt by
+ID. If it was already running and the server lacks per-job cancellation, it may finish after
+LayerShop discards the result.
 
 `ai.models` returns every model with `listed` (offered in the panel) and, as `listed`, the ids
 the panel offers in its order.
