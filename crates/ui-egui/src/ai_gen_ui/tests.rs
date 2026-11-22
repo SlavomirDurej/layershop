@@ -31,7 +31,7 @@ impl Transport for Fake {
 
 /// An app with the fake server and no models: each test lists its own, not the recommended
 /// ones a new installation starts with.
-fn app() -> PhotocraftApp {
+pub(super) fn app() -> PhotocraftApp {
     let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
     app.session.ai.transport = Some(Arc::new(Fake));
     app.run("prefs.set", json!({"path": "integrations.ai.models", "value": []})).unwrap();
@@ -749,7 +749,7 @@ fn a_change_lists_the_models_that_edit_or_inpaint_and_keeps_its_own_choice() {
     assert_eq!(app.ui.ai_gen.mode, Mode::Edit);
     assert!(generate(&mut app).unwrap_err().contains("No AI model"));
     // The state names the tabs and tasks; the tabs of an earlier build, one per technique, load.
-    assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["create", "edit"]));
+    assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["create", "edit", "upscale"]));
     assert_eq!(serde_json::to_value((EditTask::ALL, [Method::Instruct, Method::Fill])).unwrap(), json!([["change", "restyle"], ["instruct", "fill"]]));
     for (saved, mode) in [("txt2img", Mode::Create), ("inpaint", Mode::Edit), ("img2img", Mode::Edit), ("imgEdit", Mode::Edit), ("edit", Mode::Edit)] {
         let old: AiGenUi = serde_json::from_value(json!({"mode": saved, "inpaintModel": "gone"})).unwrap();

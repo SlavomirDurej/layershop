@@ -849,12 +849,12 @@ fn print_status_progress(app: &PhotocraftApp, ui: &mut egui::Ui, j: &JobInfo) {
 
 /// Progress that has been reported, or `None` (indeterminate) while it's still 0.
 fn shown_fraction(j: &JobInfo) -> Option<f32> {
-    (j.progress > 0.0).then_some(j.progress)
+    (j.command != "ai.upscale" && j.progress > 0.0).then_some(j.progress)
 }
 
 fn percent(j: &JobInfo) -> String {
     // Nothing yet reported: the bar is indeterminate, so no number.
-    if j.progress > 0.0 { whole_percent(j.progress) } else { String::new() }
+    shown_fraction(j).map_or_else(String::new, whole_percent)
 }
 
 /// "45%": rounded down, so a job reads 100% only once it's done.
@@ -974,7 +974,12 @@ pub fn dialog(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 &j.command,
                 !app.ui.view.hides_chrome() && app.ui.panels.status_bar && job_in_view(app).is_some_and(|shown| shown.id == j.id),
             );
-            if j.command == "file.automate.batch" || j.elapsed_ms < DIALOG_DELAY_MS || place || app.jobs.saves.iter().any(|s| s.job == j.id) {
+            // Upscale already shows its stage and Cancel in AI Gen and the status bar.
+            if matches!(j.command.as_str(), "file.automate.batch" | "ai.upscale")
+                || j.elapsed_ms < DIALOG_DELAY_MS
+                || place
+                || app.jobs.saves.iter().any(|s| s.job == j.id)
+            {
                 return;
             }
             j

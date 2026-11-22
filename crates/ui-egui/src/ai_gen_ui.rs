@@ -2,10 +2,11 @@
 //! and the model settings in Edit › Preferences › Generative AI.
 //!
 //! The panel picks a model, takes a prompt and runs the engine's `ai.generate` as a background
-//! job: the result lands on a new layer over the selection. Its two tabs say what the user is
+//! job: the result lands on a new layer over the selection. The tabs say what the user is
 //! there to do ([`Mode`]): **Create** a new image from the prompt alone, or **Edit** a picture
-//! that is there. Edit has a task row ([`EditTask`]): **Change** the picture, or the selected
-//! part of it, as the prompt says, or **Restyle** it (redraw it, keeping its composition). Which
+//! that is there, or **Upscale** a raster layer into a Smart Object. Edit has a task row
+//! ([`EditTask`]): **Change** the picture or selected part as the prompt says, or **Restyle** it
+//! (redraw it, keeping its composition). Which
 //! of the engine's techniques that is (`ai.generate`'s `mode`: txt2img, inpaint, img2img,
 //! imgEdit) follows from the task and from what the chosen model can do ([`technique`]); the
 //! settings few people change sit in a section that opens (Advanced). The settings page edits
@@ -40,7 +41,7 @@ pub const TAB: usize = 2;
 /// The engine command the panel runs.
 const GENERATE: &str = "ai.generate";
 
-/// What the user is there to do: the panel's two tabs.
+/// What the user is there to do: the panel's tabs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Mode {
@@ -52,20 +53,24 @@ pub enum Mode {
     /// build had, one per technique: a state saved then still loads.
     #[serde(alias = "inpaint", alias = "img2img", alias = "imgEdit")]
     Edit,
+    /// Super-resolution of the selected raster layer.
+    Upscale,
 }
 
 impl Mode {
-    pub const ALL: [Mode; 2] = [Mode::Create, Mode::Edit];
+    pub const ALL: [Mode; 3] = [Mode::Create, Mode::Edit, Mode::Upscale];
 
     pub fn label(self) -> &'static str {
         match self {
             Mode::Create => "Create",
             Mode::Edit => "Edit",
+            Mode::Upscale => "Upscale",
         }
     }
 
     fn tip(self) -> &'static str {
         match self {
+            Mode::Upscale => "Upscale the selected raster layer into a new Smart Object",
             Mode::Create => "Generate a new image from the prompt, into the selection or the whole canvas",
             Mode::Edit => "Change a picture that is there: repaint a selection, change it as you say, or restyle it. The result is a new layer",
         }
@@ -145,6 +150,8 @@ pub enum Method {
 pub struct AiGenUi {
     /// The tab in front.
     pub mode: Mode,
+    #[serde(skip)]
+    upscale: upscale::UpscaleUi,
     /// Edit: what to do with the picture.
     pub task: EditTask,
     /// Create: the prompt alone, or the scene laid out in regions (a model that takes them).
@@ -248,6 +255,7 @@ impl Default for AiGenUi {
     fn default() -> Self {
         Self {
             mode: Mode::default(),
+            upscale: upscale::UpscaleUi::default(),
             task: EditTask::default(),
             create_task: CreateTask::default(),
             region: None,
@@ -360,7 +368,7 @@ const SEED_MASK: u64 = 0xFFFF_FFFF_FFFF;
 /// (`None`: none is set up for the task) a change is taken for an instruction.
 fn technique(ui: &AiGenUi, model: Option<&Model>) -> GenerationMode {
     match (ui.mode, ui.task) {
-        (Mode::Create, _) => GenerationMode::Txt2img,
+        (Mode::Create | Mode::Upscale, _) => GenerationMode::Txt2img,
         (Mode::Edit, EditTask::Restyle) => GenerationMode::Img2img,
         (Mode::Edit, EditTask::Change) => {
             let fill = match model.map_or((true, false), |m| (m.can_edit(), m.can_inpaint())) {
@@ -587,6 +595,9 @@ fn server_answered(app: &mut PhotocraftApp, found: &Value) {
 /// The end of a job: the panel's own look at the server is taken here, without a notice when it
 /// failed. Returns whether it was that.
 pub fn on_job_event(app: &mut PhotocraftApp, e: &photocraft_engine::jobs::JobEvent) -> bool {
+    if upscale::on_job_event(app, e) {
+        return true;
+    }
     // The panel's prompt enhancement: its answer goes in the prompt box.
     if enhance::on_job_event(app, e) {
         return true;
@@ -902,6 +913,9 @@ const NOTHING_READY_MARGIN: f32 = 20.0;
 
 /// Start a generation with the panel's model, prompt and options.
 pub fn generate(app: &mut PhotocraftApp) -> Result<Value, String> {
+    if app.ui.ai_gen.mode == Mode::Upscale {
+        return upscale::start(app);
+    }
     let Some(model) = current_model(app).cloned() else {
         return Err(tr("No AI model is set up for this.").to_string());
     };
@@ -1174,6 +1188,9 @@ fn rows_below(ui: &AiGenUi, model: Option<&Model>, kind: GenerationMode) -> usiz
 /// the task in front adds.
 pub fn wanted_height(app: &PhotocraftApp) -> f32 {
     let ui = &app.ui.ai_gen;
+    if ui.mode == Mode::Upscale {
+        return 260.0;
+    }
     let model = current_model(app);
     let kind = technique(ui, model);
     let rows = 30.0 + 30.0 + 56.0 + BELOW_PROMPT + 2.0 * (NOTE_SIZE + 6.0) + 12.0;
@@ -1657,8 +1674,6 @@ fn model_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, models: &[Model], chose
 fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     let t = Tokens::get(ui.ctx());
     let top = ui.cursor().top();
-    // Which local models can run is the server's to say.
-    look_at_server(app, ui.ctx());
     let job = running(app);
     let busy = job.is_some();
     // A prompt being enhanced is veiled, and nothing runs until it is back.
@@ -1666,8 +1681,15 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     // What the user is there to do. A running generation keeps the tab and task it was started on.
     let mut mode = app.ui.ai_gen.mode;
     mode_tabs(ui, &mut mode, !busy);
+    let entered = mode != app.ui.ai_gen.mode;
     app.ui.ai_gen.mode = mode;
     ui.add_space(6.0);
+    if mode == Mode::Upscale {
+        upscale::panel(app, ui, entered);
+        return;
+    }
+    // Which local models can run is the server's to say.
+    look_at_server(app, ui.ctx());
     if mode == Mode::Edit {
         let mut task = app.ui.ai_gen.task;
         task_row(ui, &mut task, !busy);
@@ -4536,3 +4558,4 @@ pub mod regions;
 mod styles;
 #[cfg(test)]
 mod tests;
+mod upscale;
