@@ -18,7 +18,7 @@ use crate::{Error, Result};
 /// The manifest format this build reads.
 pub const VERSION: u32 = 1;
 /// The folders of a ComfyUI `models` directory a file may go to.
-pub const FOLDERS: [&str; 6] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet"];
+pub const FOLDERS: [&str; 7] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet", "background_removal"];
 /// ComfyUI's older names for two of [`FOLDERS`], which it still reads as those (models folders
 /// made for older versions keep their diffusion models in `unet`).
 pub const LEGACY_FOLDERS: [(&str, &str); 2] = [("diffusion_models", "unet"), ("text_encoders", "clip")];
@@ -358,11 +358,20 @@ mod tests {
         assert!(m.asset("nvidia").is_ok() && m.asset("voodoo").is_err());
         // Measured from each archive's header (`--example archive_contents`).
         assert!(m.comfy.assets.values().all(|a| a.unpacked_bytes > a.size && (100..=200).contains(&a.longest_path)));
-        // Every file is used by a model or by prompt enhancement on this computer: nothing is
-        // listed that nobody would download.
+        // Every file is used by a model, by prompt enhancement on this computer or by background
+        // removal: nothing is listed that nobody would download.
         let enhancers: Vec<String> = photocraft_aigen::enhance::local::MODELS.iter().map(|x| x.manifest_key()).collect();
-        let used: BTreeSet<&str> = m.models.iter().flat_map(|x| x.files.iter().map(String::as_str)).chain(enhancers.iter().map(String::as_str)).collect();
+        let removers: Vec<String> = photocraft_aigen::bg_removal::models().iter().map(|x| x.manifest_key()).collect();
+        let used: BTreeSet<&str> =
+            m.models.iter().flat_map(|x| x.files.iter().map(String::as_str)).chain(enhancers.iter().map(String::as_str)).chain(removers.iter().map(String::as_str)).collect();
         assert_eq!(used.len(), m.files.len());
+        // Each background-removal model is pinned at the size the app knows it by.
+        for x in photocraft_aigen::bg_removal::models() {
+            assert_eq!(m.files.get(&x.manifest_key()).map(|f| f.size), Some(x.size), "{}", x.id);
+            for shared in x.shared {
+                assert_eq!(m.files.get(&shared.manifest_key()).map(|f| f.size), Some(shared.size), "{} of {}", shared.file, x.id);
+            }
+        }
         // Each local enhancer is pinned at the size the app knows it by.
         for x in photocraft_aigen::enhance::local::MODELS {
             assert_eq!(m.files.get(&x.manifest_key()).map(|f| f.size), Some(x.size), "{}", x.id);

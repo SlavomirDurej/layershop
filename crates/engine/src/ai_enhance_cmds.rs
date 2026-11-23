@@ -128,7 +128,7 @@ fn enhance_locally(s: &mut Session, transport: std::sync::Arc<dyn photocraft_aig
 
 /// The folders the engine reads models from: the setup's own, then the user's it was given.
 #[cfg(not(target_arch = "wasm32"))]
-fn model_dirs(s: &Session) -> Vec<std::path::PathBuf> {
+pub(crate) fn model_dirs(s: &Session) -> Vec<std::path::PathBuf> {
     let record = s.ai_setup.record();
     let own = record.choices.models_dir.trim().to_string();
     let own = if own.is_empty() { s.ai_setup.env.as_ref().map(|e| e.models_dir.clone()).unwrap_or_default() } else { own };

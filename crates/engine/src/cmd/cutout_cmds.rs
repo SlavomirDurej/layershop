@@ -20,7 +20,7 @@ const CMD: &str = "layer.removeBackground";
 const REFINE: RefineParams = RefineParams { radius: 2.0, smart_radius: true, smooth: 10.0, feather: 0.5, contrast: 10.0, shift_edge: 0.0 };
 
 /// Remove Background needs an unlocked pixel layer.
-fn check(doc: &Document, l: &Layer) -> std::result::Result<(), String> {
+pub(crate) fn check(doc: &Document, l: &Layer) -> std::result::Result<(), String> {
     if !matches!(l.content, LayerContent::Raster(_)) {
         return Err(format!("the layer is {} {} layer, not a pixel layer", l.content.article(), l.content.kind_name()));
     }
@@ -40,7 +40,7 @@ fn enabled(s: &Session) -> std::result::Result<(), String> {
 /// doesn't fill the canvas (placed, or the canvas grown) would otherwise stand out from the
 /// empty canvas around it as the subject, and the mask would reveal its whole rectangle, which a
 /// Stroke then outlines (#8235). The whole canvas when sampling all layers.
-fn subject_area(l: &Layer, canvas: Rect, sample_all: bool) -> Rect {
+pub(crate) fn subject_area(l: &Layer, canvas: Rect, sample_all: bool) -> Rect {
     let Some(s) = l.surface().filter(|_| !sample_all) else { return canvas };
     let empty_around = s.format().alpha && s.default_pixel().last().is_some_and(|a| *a <= 0.0);
     let b = s.content_bounds().intersect(&canvas);

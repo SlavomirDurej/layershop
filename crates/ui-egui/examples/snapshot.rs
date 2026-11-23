@@ -26,7 +26,9 @@
 //! `env` gives the app the stand-in with the wizard closed. `enhance` is the AI Gen panel while
 //! its prompt is enhanced, `enhanced` once it has been, and `enhance-prefs` the Prompt
 //! Enhancement settings (`enhance-settings` their Settings tab, `enhance-local` Local Models),
-//! against a stand-in text service.
+//! against a stand-in text service. `remove-bg`, `remove-bg-describe`, `remove-bg-click`,
+//! `remove-bg-none` and `remove-bg-no-sam` are AI Gen's Remove BG tab, and `remove-bg-prefs` its
+//! Preferences page.
 //! `--hardware-filtering` respects texture samplers; the default predictable renderer forces bilinear filtering.
 //! `--wayland-notice` previews the native file drag-and-drop guidance shown in Wayland sessions.
 //! `--update-notice` previews a newer release without contacting the network.
@@ -149,7 +151,7 @@ fn main() {
                 && !photocraft_ui_egui::ai_setup_ui::demo::show(&mut app, &demo_dir_in, page)
             {
                 eprintln!(
-                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, installed-own, installed-location-own, installed-models-own, installed-prefs-own, installed-prefs-remove-own, installed-prefs-engine-own, installed-prefs-keys-own, installed-prefs-models-own, installed-prefs-reset-own, pc-checking, pc-comfy, location-comfy, pc-comfy-old, location-comfy-old, models-comfy-old, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, models-moved, sign-in, sign-in-licence, sign-in-moved, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full, enhance, enhanced, enhance-prefs, enhance-settings, enhance-local or env"
+                    "--ai-setup-demo must be pc, location, models, install, ready, installed, installed-models, installed-own, installed-location-own, installed-models-own, installed-prefs-own, installed-prefs-remove-own, installed-prefs-engine-own, installed-prefs-keys-own, installed-prefs-models-own, installed-prefs-reset-own, pc-checking, pc-comfy, location-comfy, pc-comfy-old, location-comfy-old, models-comfy-old, pc-no-card, pc-no-card-cpu, models-light, models-hf, models-licence, models-ready, models-moved, sign-in, sign-in-licence, sign-in-moved, close, not-running, aigen-empty, install-error, install-failed, install-engine, install-engine-details, location-full, enhance, enhanced, enhance-prefs, enhance-settings, enhance-local, remove-bg, remove-bg-describe, remove-bg-click, remove-bg-none, remove-bg-no-sam, remove-bg-prefs or env"
                 );
                 std::process::exit(2);
             }

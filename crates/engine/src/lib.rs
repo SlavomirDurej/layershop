@@ -10,6 +10,7 @@
 mod actions_record;
 pub mod adjust_params;
 pub mod ai_cmds;
+pub mod ai_bg_cmds;
 pub mod ai_enhance_cmds;
 pub mod ai_refs;
 pub mod ai_refs_cmds;

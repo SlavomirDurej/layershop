@@ -1807,6 +1807,7 @@ fn paint_primary_overlays(app: &mut PhotocraftApp, ui: &mut egui::Ui, view: &mut
     let hover =
         input.response.hover_pos().filter(|_| !crate::tool_cursor::pointer_elsewhere(input.ctx, &crate::panel_docking::native_viewports(app, input.ctx)));
     crate::ai_gen_ui::regions::canvas(app, ui, painter, xf, hover);
+    crate::ai_gen_ui::remove_bg::canvas(app, ui, painter, xf, hover);
 }
 
 /// An eyedropper owns the image: a dialog's (Levels, Curves, Replace Color, a colour picker's)

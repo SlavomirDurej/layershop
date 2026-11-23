@@ -507,6 +507,10 @@ pub(super) fn tool_event_with_view(app: &mut PhotocraftApp, ev: ToolEvent, mods:
     if crate::ai_gen_ui::regions::pointer(app, ev) {
         return;
     }
+    // AI Gen › Edit › Remove BG, keeping what is clicked: the pointer places its dots.
+    if crate::ai_gen_ui::remove_bg::pointer(app, ev, mods) {
+        return;
+    }
     if consumes_cancelled_vector_event(app, ev) {
         return;
     }

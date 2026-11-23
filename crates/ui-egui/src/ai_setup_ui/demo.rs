@@ -620,6 +620,13 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
     if matches!(page, "enhance" | "enhanced" | "enhance-prefs" | "enhance-settings" | "enhance-local" | "animate") {
         return enhancement(app, page);
     }
+    // AI Gen › Edit › Remove BG (`-describe`, `-click`), and its Preferences page (`-prefs`).
+    if let Some(what) = page.strip_prefix("remove-bg") {
+        app.session.ai.transport = Some(Arc::new(Down));
+        let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+        app.ui.dock.heights.insert(crate::dock::Group::Properties, 430.0);
+        return crate::ai_gen_ui::remove_bg::demo(app, what);
+    }
     if page == "aigen-empty" {
         install(app, dir, Scale::Real);
         app.session.ai.transport = Some(Arc::new(Down));

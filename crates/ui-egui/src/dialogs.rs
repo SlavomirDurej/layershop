@@ -945,7 +945,8 @@ pub fn title(d: &Dialog) -> String {
         DialogKind::About => "About PhotoCraft".into(),
         DialogKind::LayerStyle => "Layer Style".into(),
         DialogKind::Command => d.fields.get("__label").and_then(Value::as_str).unwrap_or("Command").trim_end_matches('…').to_string(),
-        DialogKind::Error => "Error".into(),
+        // An alert that is no failure says what it is about.
+        DialogKind::Error => d.fields.get("__title").and_then(Value::as_str).unwrap_or("Error").into(),
     }
 }
 

@@ -384,7 +384,7 @@ fn mask(s: &mut Session, p: &Value) -> Result<Value> {
 }
 
 /// Leave Quick Mask: the mask becomes the selection (an empty one: none).
-fn leave_quick_mask(s: &mut Session) -> Result<()> {
+pub(crate) fn leave_quick_mask(s: &mut Session) -> Result<()> {
     s.edit("Exit Quick Mask", |doc, _| {
         if let Some(q) = doc.quick_mask.take() {
             doc.selection = crate::channel_cmds::selection_from(doc, &q).filter(|sel| !sel.content_bounds().is_empty());
@@ -455,7 +455,7 @@ fn byte(v: f32) -> u8 {
 
 /// Blur `v` (`width` wide) with a box of `radius` on each side, along rows; beyond the edges it
 /// counts as zero.
-fn box_blur_rows(v: &[f32], width: usize, radius: usize) -> Vec<f32> {
+pub(crate) fn box_blur_rows(v: &[f32], width: usize, radius: usize) -> Vec<f32> {
     let mut out = vec![0.0; v.len()];
     let window = (2 * radius + 1) as f32;
     for (row, out_row) in v.chunks_exact(width.max(1)).zip(out.chunks_exact_mut(width.max(1))) {
@@ -468,7 +468,7 @@ fn box_blur_rows(v: &[f32], width: usize, radius: usize) -> Vec<f32> {
     out
 }
 
-fn transposed(v: &[f32], width: usize, height: usize) -> Vec<f32> {
+pub(crate) fn transposed(v: &[f32], width: usize, height: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(v.len());
     for x in 0..width {
         out.extend((0..height).map(|y| v.get(y * width + x).copied().unwrap_or(0.0)));
@@ -517,7 +517,7 @@ fn pixel_count(size: (u32, u32)) -> Result<usize> {
 }
 
 /// The pixels of `picture` inside `crop` at `size`, as straight RGBA in 0..=1.
-fn picture_pixels(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec<[f32; 4]>> {
+pub(crate) fn picture_pixels(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec<[f32; 4]>> {
     let pixels = pixel_count(size)?;
     let fmt = picture.format();
     let unit = |v: f32, or: f32| if v.is_finite() { v.clamp(0.0, 1.0) } else { or };
@@ -538,7 +538,7 @@ fn picture_pixels(picture: &Surface, crop: Rect, size: (u32, u32)) -> Result<Vec
 /// except where they are `free` (0..=1 each: the part the model paints), which is over the
 /// picture's own colours carried out ([`extended`]). An edit model keeps what it is shown in an
 /// empty part: white comes back white, so an outpainting would stay blank.
-fn opaque_png(pixels: &[[f32; 4]], size: (u32, u32), free: &[f32]) -> Result<Vec<u8>> {
+pub(crate) fn opaque_png(pixels: &[[f32; 4]], size: (u32, u32), free: &[f32]) -> Result<Vec<u8>> {
     png(size.0, size.1, ChannelLayout::Rgb, opaque_rgb(pixels, size, free)?)
 }
 
@@ -1241,7 +1241,7 @@ fn edge_held_coverage(selection: &Surface, crop: Rect, size: (u32, u32)) -> Vec<
 }
 
 /// How much of each pixel of `crop`, rendered at `size`, the selection covers (0..=1).
-fn coverage(selection: &Surface, crop: Rect, size: (u32, u32)) -> Vec<f32> {
+pub(crate) fn coverage(selection: &Surface, crop: Rect, size: (u32, u32)) -> Vec<f32> {
     resampled(selection, crop, size.0, size.1)
         .chunks_exact(selection.format().channels().max(1))
         .map(|px| px.first().copied().filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0))

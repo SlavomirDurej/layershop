@@ -5,7 +5,8 @@
 //! job: the result lands on a new layer over the selection. Its two tabs say what the user is
 //! there to do ([`Mode`]): **Create** a new image from the prompt alone, or **Edit** a picture
 //! that is there. Edit has a task row ([`EditTask`]): **Change** the picture, or the selected
-//! part of it, as the prompt says, or **Restyle** it (redraw it, keeping its composition). Which
+//! part of it, as the prompt says, **Restyle** it (redraw it, keeping its composition), or
+//! **Remove BG** ([`remove_bg`], which runs models of its own and takes no prompt). Which
 //! of the engine's techniques that is (`ai.generate`'s `mode`: txt2img, inpaint, img2img,
 //! imgEdit) follows from the task and from what the chosen model can do ([`technique`]); the
 //! settings few people change sit in a section that opens (Advanced). The settings page edits
@@ -81,15 +82,18 @@ pub enum EditTask {
     Change,
     /// The picture is redrawn following the prompt, as closely as the strength says.
     Restyle,
+    /// The layer's background is taken away ([`remove_bg`]): no prompt, no image model.
+    RemoveBg,
 }
 
 impl EditTask {
-    pub const ALL: [EditTask; 2] = [EditTask::Change, EditTask::Restyle];
+    pub const ALL: [EditTask; 3] = [EditTask::Change, EditTask::Restyle, EditTask::RemoveBg];
 
     pub fn label(self) -> &'static str {
         match self {
             EditTask::Change => "Change",
             EditTask::Restyle => "Restyle",
+            EditTask::RemoveBg => "Remove BG",
         }
     }
 
@@ -101,6 +105,7 @@ impl EditTask {
             EditTask::Restyle => {
                 "Redraw the picture following the prompt, keeping its composition: a layer of this document, or another open document. Strength is how far it may depart"
             }
+            EditTask::RemoveBg => "Take the layer's background away on this computer: the main subject, what is selected, or what you describe or click",
         }
     }
 }
@@ -147,6 +152,8 @@ pub struct AiGenUi {
     pub mode: Mode,
     /// Edit: what to do with the picture.
     pub task: EditTask,
+    /// Edit › Remove BG: what to keep, and where the result goes.
+    pub remove_bg: remove_bg::RemoveBgUi,
     /// Create: the prompt alone, or the scene laid out in regions (a model that takes them).
     pub create_task: CreateTask,
     /// Create › Regions: the region selected in the list and on the canvas.
@@ -249,6 +256,7 @@ impl Default for AiGenUi {
         Self {
             mode: Mode::default(),
             task: EditTask::default(),
+            remove_bg: remove_bg::RemoveBgUi::default(),
             create_task: CreateTask::default(),
             region: None,
             regions: regions::RegionsUi::default(),
@@ -361,7 +369,8 @@ const SEED_MASK: u64 = 0xFFFF_FFFF_FFFF;
 fn technique(ui: &AiGenUi, model: Option<&Model>) -> GenerationMode {
     match (ui.mode, ui.task) {
         (Mode::Create, _) => GenerationMode::Txt2img,
-        (Mode::Edit, EditTask::Restyle) => GenerationMode::Img2img,
+        // Remove BG has no generation of its own: the panel never asks for one on that tab.
+        (Mode::Edit, EditTask::Restyle | EditTask::RemoveBg) => GenerationMode::Img2img,
         (Mode::Edit, EditTask::Change) => {
             let fill = match model.map_or((true, false), |m| (m.can_edit(), m.can_inpaint())) {
                 (true, true) => ui.method == Method::Fill,
@@ -734,7 +743,7 @@ fn create_row(ui: &mut egui::Ui, task: &mut CreateTask, enabled: bool, model: Op
 
 /// The running generation, if any.
 fn running(app: &PhotocraftApp) -> Option<JobInfo> {
-    app.session.jobs().into_iter().find(|j| j.command == GENERATE)
+    app.session.jobs().into_iter().find(|j| j.command == GENERATE || j.command == remove_bg::CMD)
 }
 
 /// Open Preferences on Generative AI › Manage Models with `model` selected for editing.
@@ -1685,10 +1694,17 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
         ui.add_space(6.0);
     }
     regions::follow(app);
+    remove_bg::follow(app);
     let changing = app.ui.ai_gen.changing();
     // The panel's brush paints the mask only while the mask is there to paint.
     if !photocraft_engine::ai_cmds::mask_painting(&app.session) {
         app.ui.ai_gen.mask_brush = false;
+    }
+    // Remove BG takes no prompt and no image model: it has a body of its own.
+    if remove_bg::tab_open(app) {
+        let left = room.map(|r| r - (ui.cursor().top() - top));
+        remove_bg::body(app, ui, job.as_ref(), left);
+        return;
     }
     let models = enabled_models(app);
     if models.is_empty() {
@@ -2657,11 +2673,12 @@ fn push_model(ai: &mut Map<String, Value>, f: &mut Map<String, Value>, mut model
 /// ComfyUI that runs local models (the key is older than the name); `folders` the models folders
 /// it reads.
 /// `fill` is Generative Fill: the model Edit › Fill's AI Gen contents runs.
-const PAGES: [(&str, &str); 6] = [
+const PAGES: [(&str, &str); 7] = [
     ("models", "Manage Models"),
     ("keys", "API Keys"),
     ("enhance", "Prompt Enhancement"),
     (fill::PAGE, "Generative Fill"),
+    (remove_bg::PAGE, "Remove BG"),
     ("server", "Engine"),
     ("folders", "Model Folders"),
 ];
@@ -2880,9 +2897,9 @@ fn is_local_model(m: &Value) -> bool {
 
 /// The Generative AI section's body: draws and edits `integrations.ai` in the dialog's draft
 /// (`obj` is the Integrations object; `f` the dialog's fields), in the `height` the dialog has
-/// for it. Six pages: Manage Models (every model in a list beside the selected one's
+/// for it. Seven pages: Manage Models (every model in a list beside the selected one's
 /// settings), API keys, Prompt Enhancement (the text model behind the panel's Enhance),
-/// Generative Fill (the model Edit › Fill's AI Gen runs), the engine (the ComfyUI that runs local
+/// Generative Fill (the model Edit › Fill's AI Gen runs), Remove BG (its models), the engine (the ComfyUI that runs local
 /// models) and its models folders.
 pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Map<String, Value>, height: f32) {
     let mut ai = obj.get("ai").and_then(Value::as_object).cloned().unwrap_or_default();
@@ -2912,6 +2929,7 @@ pub fn prefs_section(ui: &mut egui::Ui, obj: &mut Map<String, Value>, f: &mut Ma
                 "keys" => keys_page(ui, &ai, f),
                 "enhance" => enhance::page(ui, &mut ai, f),
                 fill::PAGE => fill::page(ui, &mut ai, f),
+                remove_bg::PAGE => remove_bg::page(ui, f),
                 "folders" => folders::page(ui, f, busy),
                 _ => server_page(ui, &mut ai, f),
             });
@@ -4345,6 +4363,7 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
     f.insert(SETUP.into(), crate::ai_setup_ui::summary(app));
     folders::ensure_listed(app, f);
     enhance::follow(app, f);
+    remove_bg::follow_install(app, f);
     // The list's folded groups are a view, not a setting to confirm: kept at once.
     if let Some(folded) = f.get("values").and_then(|v| v.pointer("/integrations/ai/listCollapsed")).and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
         && app.session.prefs().integrations.ai.list_collapsed != folded
@@ -4414,6 +4433,8 @@ pub fn after_body(app: &mut PhotocraftApp, f: &mut Map<String, Value>) {
         _ if folders::act(app, f, &action) => {}
         // Prompt Enhancement's List Models.
         _ if enhance::page_action(app, f, &action) => {}
+        // Remove BG's Install and Stop.
+        _ if remove_bg::page_action(app, f, &action) => {}
         // Models were reset or removed: the LoRAs added for them in the panel go with their own.
         _ if action.starts_with(PANEL_LORAS) => {
             for id in action.trim_start_matches(PANEL_LORAS).lines() {
@@ -4533,6 +4554,7 @@ pub(crate) mod folders;
 pub(crate) mod loras;
 mod refs;
 pub mod regions;
+pub mod remove_bg;
 mod styles;
 #[cfg(test)]
 mod tests;

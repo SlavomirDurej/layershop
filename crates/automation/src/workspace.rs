@@ -703,7 +703,9 @@ fn installs_local_ai(id: &str, params: &Value) -> bool {
         | "ai.setup.hfUseFound"
         | "ai.setup.openModelFolder"
         // Downloads a text model of several gigabytes into the engine's models folder.
-        | "ai.enhanceInstall" => true,
+        | "ai.enhanceInstall"
+        // Downloads a background-removal model into the engine's models folder.
+        | "ai.removeBackgroundInstall" => true,
         "ai.setup.plan" => ["engineDir", "modelsDir", "serverFiles", "extraModelsDirs"].iter().any(|key| params.get(key).is_some()),
         "ai.setup.manifest" => params.get("extraModelsDirs").is_some(),
         "ai.setup.modelFolders" => params.get("folders").is_some(),

@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "checked": "2026-11-12",
+  "checked": "2026-11-23",
   "comfy": {
     "version": "0.45.0",
     "python": "python_embeded/python.exe",
@@ -192,6 +192,26 @@
       "url": "https://huggingface.co/Comfy-Org/Z-Image-Turbo/resolve/main/split_files/diffusion_models/z_image_turbo_bf16.safetensors",
       "size": 12309866400,
       "sha256": "2407613050b809ffdff18a4ac99af83ea6b95443ecebdf80e064a79c825574a6"
+    },
+    "background_removal/birefnet.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/birefnet.safetensors",
+      "size": 444473596,
+      "sha256": "9ab37426bf4de0567af6b5d21b16151357149139362e6e8992021b8ce356a154"
+    },
+    "background_removal/lucida.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/BiRefNet/resolve/main/background_removal/lucida.safetensors",
+      "size": 884878856,
+      "sha256": "a43e3dd84cbe84db76bd2015ef8f7034c9503c50d9b56fa2155803b69bd2f408"
+    },
+    "diffusion_models/rmbg3_int8_convrot.safetensors": {
+      "url": "https://huggingface.co/briaai/RMBG-3.0-Comfy/resolve/main/diffusion_models/rmbg3_int8_convrot.safetensors",
+      "size": 8408562474,
+      "sha256": "bc29b9a87ed378596c5ca5bc0c5bdfaa8aabc8415d33f3c767f9a3cbd9fd566d"
+    },
+    "checkpoints/sam3.1_multiplex_fp16.safetensors": {
+      "url": "https://huggingface.co/Comfy-Org/sam3.1/resolve/main/checkpoints/sam3.1_multiplex_fp16.safetensors",
+      "size": 1745546848,
+      "sha256": "9ba99c92703c2e8b4f47de2d34a539bb8e18923049e238b780d70dbe6368eb03"
     }
   },
   "models": [

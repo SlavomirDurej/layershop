@@ -750,7 +750,7 @@ fn a_change_lists_the_models_that_edit_or_inpaint_and_keeps_its_own_choice() {
     assert!(generate(&mut app).unwrap_err().contains("No AI model"));
     // The state names the tabs and tasks; the tabs of an earlier build, one per technique, load.
     assert_eq!(serde_json::to_value(Mode::ALL).unwrap(), json!(["create", "edit"]));
-    assert_eq!(serde_json::to_value((EditTask::ALL, [Method::Instruct, Method::Fill])).unwrap(), json!([["change", "restyle"], ["instruct", "fill"]]));
+    assert_eq!(serde_json::to_value((EditTask::ALL, [Method::Instruct, Method::Fill])).unwrap(), json!([["change", "restyle", "removeBg"], ["instruct", "fill"]]));
     for (saved, mode) in [("txt2img", Mode::Create), ("inpaint", Mode::Edit), ("img2img", Mode::Edit), ("imgEdit", Mode::Edit), ("edit", Mode::Edit)] {
         let old: AiGenUi = serde_json::from_value(json!({"mode": saved, "inpaintModel": "gone"})).unwrap();
         assert_eq!(old, AiGenUi { mode, ..Default::default() }, "{saved}");
@@ -862,6 +862,7 @@ fn the_list_says_what_each_model_is_used_for_and_can_be_narrowed_to_it() {
             ("keys", "API Keys"),
             ("enhance", "Prompt Enhancement"),
             ("fill", "Generative Fill"),
+            ("removeBg", "Remove BG"),
             ("server", "Engine"),
             ("folders", "Model Folders")
         ]

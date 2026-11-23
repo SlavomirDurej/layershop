@@ -429,6 +429,68 @@ selection changed; with a reference ("the scarf from image 2") a Draft takes 9 s
 the picture too, and with a hard-edged selection that shows as a seam along the selection's
 edge where the picture has detail. Feather the selection with those two models.
 
+## Removing the background (Edit › Remove BG)
+
+Runs on this computer, with nodes that ship with ComfyUI. Nothing is uploaded, and by default the
+result is a layer mask, so no pixel is deleted. One undo takes it away.
+
+Two kinds of model work together, because none does both jobs:
+
+| Model | Job | Takes | Size | Licence |
+|---|---|---|---|---|
+| BiRefNet General | Cuts the edge of photos | The picture alone | 444 MB | MIT |
+| Lucida | Cuts the edge of graphics, logos, text, glass | The picture alone | 885 MB | MIT (its README warns that some training data is research-only) |
+| RMBG 3.0 (optional) | Cuts the finest edges: single strands of hair, fur, soft detail | The picture alone | 8.41 GB, plus its 4.86 GB text encoder and 336 MB VAE if missing | CC BY-NC 4.0: non-commercial unless licensed from Bria |
+| SAM 3.1 (optional) | Finds which object to keep | Words or clicks | 1.75 GB | SAM License |
+
+**Keep** says what stays:
+
+- **Main subject**: the matting model decides. No SAM needed. ComfyUI's node squeezes what it is
+  shown into a 1024 px square, so when the subject fills at most 85% of the layer it is cut a
+  second time from a crop around it.
+- **Inside selection**: a rough selection or painted mask. The model is shown that part, and its
+  answer may reach a little past the outline, for hair. No SAM needed.
+- **Describe it**: SAM 3.1 finds a short noun phrase. An instruction is reduced to one ("keep the
+  couple, remove everything else" asks for "couple").
+- **Click on it**: click what to keep, Alt-click what to leave out, click a dot to take it away.
+  Clicks and a description are separate ways to ask, because ComfyUI's node adds together what
+  each finds, so a click could not take anything away from a description's answer.
+
+With SAM, the picture is cropped to the object before the matting model sees it, so a small
+subject is cut at the model's full 1024 px. SAM decides the shape. Near its outline the matte's
+softer edge is used where the two run together; where they part by more than a few strands of hair
+(the matte also took what stands on the object, or what is behind it), SAM's edge is kept, moved
+onto the picture's own edge with a guided filter. If the matting model covers less than a quarter
+of SAM's object, SAM's mask is used throughout and the result says `"matted": false`.
+
+Clicks on a part of the layer that shows nothing are ignored. If none is left, or the layer is
+empty, the panel says **Nothing to remove** and asks for the layer holding the object.
+
+**Type** chooses the matting model: Photo (BiRefNet), Photo, finest edges (RMBG 3.0), or Graphic,
+logo or glass (Lucida). RMBG 3.0 is never the default because of its licence. It is a four-step
+diffusion model on ComfyUI's native Fibo 2 nodes (`TextEncodeFibo2`, no custom nodes), run as
+ComfyUI's own template runs it: the fixed matting instruction, Euler, CFG 1. It renders about one
+megapixel in the picture's shape, with sides in multiples of 16 so the engine does not crop it. On
+an RTX 4090 a cut-out took about 8 seconds, against 3 for BiRefNet (2026-11-23).
+
+**Output** is a layer mask, a new layer (the original is hidden) or a selection. **Clean edge
+colours** takes the old background's colour out of soft edges; those are new pixels, so the result
+is a new layer.
+
+The models are installed from Preferences › Generative AI › Remove BG, pinned with checksums in
+the setup's manifest. They are not part of the wizard's presets. SAM 3.1 comes from Comfy-Org's
+ungated safetensors: Meta's own download needs manual approval and is a pickle, which the setup
+refuses. The page shows its licence before installing. An engine installed before this feature
+gets its model paths rewritten (and is restarted if idle) on the first cut-out.
+
+RMBG 3.0's CC BY-NC 4.0 licence is outside the Craft allowlist. It is in this fork at the fork
+owner's decision (2026-11-23), like Fibo 2, as an optional download from Bria's ungated
+`briaai/RMBG-3.0-Comfy`. Do not propose it upstream without a maintainer's approval.
+
+Not offered: **BEN2** and **FeyNoBg** are not loadable by ComfyUI's native node, and the node pack
+that runs them is GPL-3.0. **BiRefNet HR-matting** loads, but the native node runs it at 1024 px
+rather than the 2048 px it was trained at, so it needs a side-by-side test first.
+
 ## LoRAs
 
 A LoRA is a small file of changes to a model's weights that steers it to a style, a character or
@@ -1254,6 +1316,10 @@ as `ai.generate` names its params, so they can be passed straight back to it. In
   `cargo run -p photocraft-aigen --example generate -- http://127.0.0.1:8188`; add
   `inpaint image.png mask.png [strength]` after the output file to try an inpainting.
 - `crates/engine/src/ai_cmds.rs`: the commands. The app shell sets `Session::ai.transport`.
+- Background removal: `crates/aigen/src/bg_removal.rs` (the models and workflows),
+  `crates/engine/src/ai_bg_cmds.rs` (`ai.removeBackground`, `ai.removeBackgroundModels`,
+  `ai.removeBackgroundInstall`), `crates/ui-egui/src/ai_gen_ui/remove_bg.rs` (the tab, the canvas
+  dots and the Preferences page).
 - Style presets: `crates/aigen/src/style.rs` (the presets and their sentences),
   `crates/ui-egui/src/ai_gen_ui/styles.rs` (the Style button and picker), thumbnails in
   `assets/ai-styles` (512 px JPEGs). `GEMINI_API_KEY=… cargo run -p photocraft-aigen --example

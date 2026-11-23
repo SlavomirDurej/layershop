@@ -14,7 +14,7 @@ use crate::run::Job;
 use crate::{Error, Result};
 
 /// The folders of `models/` that hold each kind of file, as `GET /models/<folder>` names them.
-pub const FOLDERS: [&str; 6] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet"];
+pub const FOLDERS: [&str; 7] = ["diffusion_models", "text_encoders", "vae", "checkpoints", "loras", "controlnet", "background_removal"];
 
 /// A workflow under construction, in ComfyUI's API format: `{"<id>": {class_type, inputs}}`.
 #[derive(Default)]
