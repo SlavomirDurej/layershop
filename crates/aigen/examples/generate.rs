@@ -129,7 +129,7 @@ fn run() -> Result<(), String> {
             seed,
             // `PHOTOCRAFT_ALPHA=1` asks an edit for a transparent background.
             alpha: edit && std::env::var("PHOTOCRAFT_ALPHA").is_ok_and(|v| v == "1"),
-            source: Some(Source { image, mask, width, height, strength, edit, references: Vec::new(), shown: Vec::new() }),
+            source: Some(Source { image, mask, width, height, strength, edit, references: Vec::new(), shown: Vec::new(), outpaint: false }),
             loras: loras.clone(),
             animation: None,
         }

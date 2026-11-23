@@ -429,6 +429,24 @@ selection changed; with a reference ("the scarf from image 2") a Draft takes 9 s
 the picture too, and with a hard-edged selection that shows as a seam along the selection's
 edge where the picture has detail. Feather the selection with those two models.
 
+**Outpainting with Qwen Image 2.1** (a selection over empty pixels beside a picture, from the
+Edit tab or Edit › Fill's AI Gen, with any prompt or none) needs no special wording:
+
+- **The picture stays in place on the whole area**, on white, as image 1. The model lines its
+  result up with image 1 only when that is the size it renders (ComfyUI's node: "any other size
+  shifts the edit"). The picture cut to its bounds came back out of register with itself, by an
+  amount that changed with the render size.
+- **It is told to replace the empty border**, in a sentence put before the prompt. Shown margins
+  without that, it gave them back as they went: white, grey, blurred or transparent.
+- **It overlaps the picture.** The model repaints 64 rendered pixels into it, and the new layer's
+  mask goes past the selection and fades out over the first 32 (less on a small picture). The
+  rest of the picture is untouched.
+
+Tried on one 1283 x 1088 room on a 1490 x 1280 canvas (ComfyUI 0.45.0, RTX 4090, about 25 s):
+the jump across the seam fell from 37.6 to 0.6–2.7 (thousandths of full brightness, above what
+neighbouring pixels differ by), through Fill with an empty prompt and with "expand" on two seeds.
+The other edit models still get the picture alone.
+
 ## Removing the background (Edit › Remove BG)
 
 Runs on this computer, with nodes that ship with ComfyUI. Nothing is uploaded, and by default the
@@ -992,8 +1010,8 @@ hat put on a rock in 50 s; text to image at 1216 × 832 in 24 s. With a selectio
 know where the selection is, as no edit model does: "add a rowing boat in the grass" with the
 bottom-right corner selected drew the boat mid-picture, outside the selection, so nothing
 changed; "… in the bottom right of the picture" put it inside, with the rest untouched. In an
-outpainting it is shown the whole area, empty margins included, not the picture alone as Qwen
-Image 2.1 is: it lines its result up with what it is shown, and the picture alone would be
+outpainting it is shown the whole area, empty margins included, not the picture alone as most
+edit models are: it lines its result up with what it is shown, and the picture alone would be
 stretched over the whole. It paints the margins all the same: the meadow shrunk to the middle
 of a white canvas, margins selected, "extend the photo outwards" came back with sky, trees and
 meadow all round and no seam, in 54 s (one seed).

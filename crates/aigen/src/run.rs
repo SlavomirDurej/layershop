@@ -103,8 +103,11 @@ pub struct Source {
     /// size), while `image` is still what it paints over. An outpainting shows it the picture
     /// alone, without the empty margins it is to fill: an edit model keeps what it is shown
     /// there, so margins of white, or of the picture's colours blurred, come back as they went.
-    /// Empty: `image`.
+    /// Not a model that [`crate::Family::outpaints_in_place`]. Empty: `image`.
     pub shown: Vec<u8>,
+    /// Masked edit: `image` is a picture in place on empty margins, and the model is told to
+    /// replace them ([`crate::Family::outpaints_in_place`]).
+    pub outpaint: bool,
 }
 
 impl std::fmt::Debug for Source {
@@ -118,6 +121,7 @@ impl std::fmt::Debug for Source {
             .field("edit", &self.edit)
             .field("references", &self.references.len())
             .field("shown_len", &self.shown.len())
+            .field("outpaint", &self.outpaint)
             .finish()
     }
 }
@@ -356,6 +360,9 @@ fn generate_comfy(transport: &dyn Transport, settings: &Settings, model: &Model,
             let mask = taken(1, masked);
             let shown = taken(1 + usize::from(masked), shown);
             let references = names.get(1 + usize::from(masked) + usize::from(shown.is_some())..).unwrap_or_default();
+            if masked && source.outpaint {
+                render.prompt = comfy::outpaint_prompt(&render.prompt);
+            }
             comfy::edit_workflow(model, &render, &comfy::Edit { image, mask, shown, references })?
         }
         Some(source) => {
@@ -767,7 +774,7 @@ mod tests {
     }
 
     fn source() -> Source {
-        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7, edit: false, references: Vec::new(), shown: Vec::new() }
+        Source { image: b"IMAGEPNG".to_vec(), mask: b"MASKPNG".to_vec(), width: 768, height: 512, strength: 0.7, edit: false, references: Vec::new(), shown: Vec::new(), outpaint: false }
     }
 
     #[test]
@@ -877,6 +884,31 @@ mod tests {
         let unmasked = Source { mask: Vec::new(), ..edit };
         generate(&idle, &settings(), &Family::QwenImage21.preset(), "", &Job { source: Some(unmasked), ..job() }, &control(&|| false)).unwrap();
         assert_eq!(idle.urls().iter().filter(|u| u.ends_with("/upload/image")).count(), 2);
+    }
+
+    #[test]
+    fn an_outpainting_edit_is_told_to_replace_the_empty_margins() {
+        let queued_prompt = |outpaint: bool| {
+            let seen = std::sync::Arc::new(Mutex::new(String::new()));
+            let store = seen.clone();
+            let fake = Fake::new(move |r, n| match r.url.as_str() {
+                u if u.ends_with("/upload/image") => ok(&format!(r#"{{"name":"stored {n}.png","subfolder":""}}"#)),
+                u if u.ends_with("/prompt") => {
+                    let w = serde_json::from_slice::<serde_json::Value>(&r.body).unwrap()["prompt"].clone();
+                    let encode = w.as_object().unwrap().values().find(|n| n["class_type"] == "TextEncodeQwenImage21").unwrap().clone();
+                    *store.lock().unwrap() = encode["inputs"]["prompt"].as_str().unwrap().to_string();
+                    ok(r#"{"prompt_id":"abc"}"#)
+                }
+                u if u.ends_with("/history/abc") => ok(DONE),
+                _ => ok("PNGDATA"),
+            });
+            let edit = Source { edit: true, outpaint, ..source() };
+            generate(&fake, &settings(), &Family::QwenImage21.preset(), "", &Job { prompt: "a beach".into(), source: Some(edit), ..job() }, &control(&|| false)).unwrap();
+            seen.lock().unwrap().clone()
+        };
+        let told = queued_prompt(true);
+        assert!(told.starts_with("Outpaint") && told.ends_with("a beach"), "{told}");
+        assert_eq!(queued_prompt(false), "a beach");
     }
 
     #[test]

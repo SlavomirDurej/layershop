@@ -1255,7 +1255,7 @@ fn an_outpainting_edit_sends_the_picture_alone_to_be_shown() {
     s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
     s.execute("select.inverse", json!({})).unwrap();
     let layer = s.active().unwrap().active_layer.unwrap().0;
-    s.execute("ai.generate", json!({"prompt": "a beach", "mode": "imgEdit", "source": {"layer": layer}, "seed": 1})).unwrap();
+    s.execute("ai.generate", json!({"prompt": "a beach", "mode": "imgEdit", "model": "edit", "source": {"layer": layer}, "seed": 1})).unwrap();
     // The model paints over the whole area but is shown the red half of it, as image 1.
     let image = fake.uploaded("photocraft_inpaint_image.png");
     let shown = fake.uploaded("photocraft_edit_shown.png");
@@ -1271,9 +1271,73 @@ fn an_outpainting_edit_sends_the_picture_alone_to_be_shown() {
         nodes[n["inputs"][input][0].as_str().unwrap()]["inputs"]["image"].clone()
     };
     assert_eq!(
-        (loaded("TextEncodeQwenImage21", "images.image_1"), loaded("VAEEncode", "pixels")),
+        (loaded("TextEncodeQwenImageEditPlus", "image1"), loaded("VAEEncode", "pixels")),
         (json!("photocraft_edit_shown.png"), json!("photocraft_inpaint_image.png"))
     );
+    assert!(!queued.to_string().contains("Outpaint"), "only Qwen Image 2.1 is told to outpaint");
+}
+
+/// Qwen Image 2.1 lines its result up with image 1 only when image 1 is the size it renders: a
+/// cropped picture came back out of register with the picture it extends. Shown the whole area
+/// it keeps what fills the margins unless told to replace them, and it joins the picture without
+/// a seam only if it repaints a band of it, which the new layer's mask then fades across.
+#[test]
+fn a_qwen_outpainting_is_shown_the_whole_area_and_overlaps_the_picture() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    // A red picture down the middle of an empty layer; all but it selected.
+    s.execute("layer.new.layer", json!({})).unwrap();
+    s.execute("select.rect", json!({"x": 16, "y": 0, "width": 32, "height": 48})).unwrap();
+    s.execute("edit.fill", json!({"color": "#ff0000"})).unwrap();
+    s.execute("select.inverse", json!({})).unwrap();
+    let layer = s.active().unwrap().active_layer.unwrap().0;
+    s.execute("ai.generate", json!({"prompt": "a beach", "mode": "imgEdit", "model": "q21", "source": {"layer": layer}, "seed": 1})).unwrap();
+
+    // One picture, the size of the render: it is image 1 and what the model paints over.
+    let uploads: Vec<String> = fake.seen.lock().unwrap().iter().filter(|(u, _)| u.ends_with("/upload/image")).map(|(_, b)| String::from_utf8_lossy(b).into_owned()).collect();
+    assert_eq!(uploads.len(), 2, "the picture and its mask");
+    assert!(!uploads.iter().any(|b| b.contains("photocraft_edit_shown.png")));
+    let queued = fake.queued();
+    let nodes = queued["prompt"].as_object().unwrap();
+    let encode = nodes.values().find(|n| n["class_type"] == "TextEncodeQwenImage21").unwrap();
+    let vae = nodes.values().find(|n| n["class_type"] == "VAEEncode").unwrap();
+    assert_eq!(encode["inputs"]["images.image_1"], vae["inputs"]["pixels"]);
+    // It is told to replace the margins, and what was asked for still goes with that.
+    let prompt = encode["inputs"]["prompt"].as_str().unwrap();
+    assert!(prompt.starts_with("Outpaint") && prompt.ends_with("a beach"), "{prompt}");
+
+    // The picture in place on white.
+    let image = fake.uploaded("photocraft_inpaint_image.png");
+    let (w, h) = (image.width() as usize, image.height() as usize);
+    let c = image.layout().channels();
+    let rgb = |x: usize| &image.data()[(h / 2 * w + x) * c..(h / 2 * w + x) * c + 3];
+    assert_eq!((rgb(w / 8), rgb(w / 2)), (&[255, 255, 255][..], &[255, 0, 0][..]));
+
+    // The model repaints the margin and a band of the picture, and keeps the rest.
+    let mask = fake.uploaded("photocraft_inpaint_mask.png");
+    assert_eq!((mask.width() as usize, mask.height() as usize), (w, h));
+    let kept = |x: usize| mask.data()[(h / 2 * w + x) * 4 + 3];
+    let edge = w / 4;
+    assert_eq!((kept(w / 8), kept(edge + 16), kept(w / 2)), (0, 0, 255));
+
+    // The layer's mask goes past the selection into the picture and fades out there.
+    let d = s.active().unwrap();
+    let new = d.doc.layer(d.active_layer.unwrap()).unwrap().mask.as_ref().unwrap();
+    assert_eq!(new.value(8, 24), 1.0);
+    assert!(new.value(16, 24) > 0.5, "the band: {}", new.value(16, 24));
+    assert_eq!(new.value(32, 24), 0.0, "the rest of the picture is the picture's");
+}
+
+#[test]
+fn an_edit_over_a_picture_alone_is_not_an_outpainting() {
+    let fake = FakeComfy::new(32, 32, [0, 255, 0, 255]);
+    let mut s = edit_session(&fake);
+    s.execute("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
+    s.execute("ai.generate", json!({"prompt": "a beach", "mode": "imgEdit", "model": "q21", "seed": 1})).unwrap();
+    assert!(!fake.queued().to_string().contains("Outpaint"));
+    let d = s.active().unwrap();
+    let new = d.doc.layer(d.active_layer.unwrap()).unwrap().mask.as_ref().unwrap();
+    assert_eq!(new.surface.content_bounds(), Rect::new(16, 12, 32, 28), "the mask is the selection");
 }
 
 #[test]
@@ -1971,4 +2035,48 @@ fn the_document_source_leaves_hidden_layers_out() {
     s.execute("layer.setProps", json!({"layer": red, "visible": false})).unwrap();
     let p = picture(&s).pixels(rect, (8, 8)).unwrap()[0];
     assert!(p[0] > 0.95 && p[1] > 0.95 && p[2] > 0.95, "hidden red is left out: {p:?}");
+}
+
+#[test]
+fn an_outpainting_overlap_is_measured_from_the_empty_part_selected() {
+    // A picture at x 60..140 of 200 x 100, only the empty part on its left selected.
+    let (w, h) = (200usize, 100usize);
+    let pixels: Vec<[f32; 4]> = (0..w * h).map(|i| if (60..140).contains(&(i % w)) { [1.0, 0.0, 0.0, 1.0] } else { [0.0; 4] }).collect();
+    let selected: Vec<f32> = (0..w * h).map(|i| if i % w < 60 { 1.0 } else { 0.0 }).collect();
+    let o = outpaint_overlap(&pixels, &selected, (200, 100)).unwrap();
+    let at = |v: &[f32], x: usize| v[50 * w + x];
+    // The band is a quarter of the picture's 80 px: the layer fades across it...
+    assert_eq!(at(&o.layer, 30), 1.0);
+    assert!(at(&o.layer, 60) > 0.9 && at(&o.layer, 70) > 0.1 && at(&o.layer, 70) < 0.9, "{}", at(&o.layer, 70));
+    assert_eq!(at(&o.layer, 81), 0.0);
+    // ...the model repaints as far again, and the rest of the picture is kept.
+    assert!(at(&o.model, 80) > 0.9);
+    assert_eq!(at(&o.model, 102), 0.0);
+    // The empty part that isn't selected gets nothing.
+    assert_eq!((at(&o.layer, 170), at(&o.model, 170)), (0.0, 0.0));
+    assert!(o.outside[50 * w + 170] && !o.outside[50 * w + 30]);
+}
+
+#[test]
+fn an_outpainting_overlap_refuses_what_is_not_one() {
+    let (w, h) = (64usize, 64usize);
+    let size = (w as u32, h as u32);
+    let all = vec![1.0; w * h];
+    let picture = |x0: usize, x1: usize| -> Vec<[f32; 4]> { (0..w * h).map(|i| if (x0..x1).contains(&(i % w)) { [1.0; 4] } else { [0.0; 4] }).collect() };
+    // No picture, nothing empty, or a picture too thin to have a band.
+    assert!(outpaint_overlap(&vec![[0.0; 4]; w * h], &all, size).is_none());
+    assert!(outpaint_overlap(&vec![[1.0; 4]; w * h], &all, size).is_none());
+    assert!(outpaint_overlap(&picture(30, 33), &all, size).is_none());
+    // Empty but not selected.
+    assert!(outpaint_overlap(&picture(16, 48), &vec![0.0; w * h], size).is_none());
+    // Sizes that don't match the pixels, a zero size, and one that overflows.
+    assert!(outpaint_overlap(&picture(16, 48), &all[1..], size).is_none());
+    assert!(outpaint_overlap(&picture(16, 48), &all, (0, 64)).is_none());
+    assert!(outpaint_overlap(&picture(16, 48), &all, (u32::MAX, u32::MAX)).is_none());
+    // Not a number in the picture's alpha or the selection is no panic.
+    let mut odd = picture(16, 48);
+    odd[5] = [f32::NAN; 4];
+    let mut odd_selected = all.clone();
+    odd_selected[6] = f32::NAN;
+    assert!(outpaint_overlap(&odd, &odd_selected, size).is_some());
 }

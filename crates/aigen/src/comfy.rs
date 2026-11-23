@@ -183,6 +183,16 @@ fn prompt_for(model: &Model, job: &Job) -> String {
     format!("{}, {prompt}", MING_TRANSPARENT[0])
 }
 
+/// What an outpainting's model is told before the prompt
+/// ([`crate::Family::outpaints_in_place`]). Shown a picture on empty margins and told only what
+/// to add, Qwen Image 2.1 gave the margins back as they went, white, grey or blurred.
+const OUTPAINT_INSTRUCTION: &str = "Outpaint this picture. Replace the empty white border around it with a seamless continuation of the same scene, in the same perspective, light and style. Keep the picture itself unchanged. No frame, no border.";
+
+/// `prompt` as an outpainting's model is given it, after [`OUTPAINT_INSTRUCTION`].
+pub(crate) fn outpaint_prompt(prompt: &str) -> String {
+    format!("{OUTPAINT_INSTRUCTION} {}", prompt.trim())
+}
+
 /// An edit's instruction as `model` is given it: with a transparent background asked of Qwen
 /// Image 2.1, followed by the sentence that asks for one ([`QWEN21_TRANSPARENT_EDIT`]).
 fn edit_prompt(model: &Model, job: &Job) -> String {
@@ -1346,6 +1356,7 @@ mod tests {
             edit: true,
             references: Vec::new(),
             shown: Vec::new(),
+            outpaint: false,
         };
         let edit = Edit { image: "p.png", mask: None, references: &[], shown: None };
         let e = edit_workflow(&m, &Job { source: Some(source), ..stacked.clone() }, &edit).unwrap();

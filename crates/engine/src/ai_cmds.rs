@@ -72,6 +72,12 @@ pub const DEFAULT_CONTEXT: f64 = 0.25;
 /// selection's shorter edge: in that band the model keeps more and more of what is there, so
 /// what it paints is composed inside the selection and joins the picture without a seam.
 const MASK_FADE: f64 = 0.12;
+/// How far into the picture an outpainting overlaps it, in rendered pixels (two of Qwen Image
+/// 2.1's latent cells): the new layer fades in across this band, and the model repaints twice
+/// as far so the band is its own work joined to the picture. Without it the result met the
+/// picture at a hard line; 16, 32 and 64 were tried, and 32 is the narrowest that hid it on
+/// every side (a room at 1504 x 1280 and 1536 x 1312, three seeds).
+const OUTPAINT_OVERLAP: usize = 32;
 /// Longest prompt accepted (characters).
 pub(crate) const MAX_PROMPT: usize = 20_000;
 
@@ -1036,22 +1042,37 @@ impl Img2ImgPlan {
     /// What the model is sent: the source's pixels at `size`, with no mask (all of it is redrawn).
     fn source(&self, size: (u32, u32), strength: f64) -> Result<Source> {
         let image = self.picture.png(self.source_rect, size)?;
-        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new() })
+        Ok(Source { image, mask: Vec::new(), width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new(), outpaint: false })
     }
 
     /// What a local model editing inside `selection` is sent: the source's pixels at `size`, and
     /// the selection as the mask ([`edit_mask`]). Where the selection is over nothing the picture
     /// is carried out into it ([`opaque_png`]), and the model is shown the picture alone
     /// ([`shown_png`]), so it paints there instead of keeping white or a blur.
-    fn masked_source(&self, selection: &Surface, canvas: Rect, size: (u32, u32), strength: f64) -> Result<Source> {
+    ///
+    /// With `in_place` ([`photocraft_aigen::Family::outpaints_in_place`]) such an edit is sent
+    /// the picture where it is on white instead, with a mask that overlaps it
+    /// ([`outpaint_overlap`]); the second value is then the mask for the new layer.
+    fn masked_source(&self, selection: &Surface, canvas: Rect, size: (u32, u32), strength: f64, in_place: bool) -> Result<(Source, Option<Surface>)> {
         let pixels = self.picture.pixels(self.source_rect, size)?;
         let opacity: Vec<f32> = pixels.iter().map(|p| p[3]).collect();
-        let mask = edit_mask(selection, self.area, canvas, size, &opacity)?;
         let free = edge_held_coverage(selection, self.area, size);
+        if let Some(overlap) = outpaint_overlap(&pixels, &free, size).filter(|_| in_place) {
+            let mut coverage = edit_coverage(selection, self.area, canvas, size, &opacity)?;
+            for (c, m) in coverage.iter_mut().zip(&overlap.model) {
+                *c = c.max(*m);
+            }
+            let mask = mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the selection to edit in".into()))?;
+            let image = opaque_png(&pixels, size, &[])?;
+            let layer_mask = overlapped_selection(selection, self.area, size, &overlap);
+            let source = Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new(), outpaint: true };
+            return Ok((source, Some(layer_mask)));
+        }
+        let mask = edit_mask(selection, self.area, canvas, size, &opacity)?;
         let rgb = opaque_rgb(&pixels, size, &free)?;
         let shown = if mask.is_empty() { Vec::new() } else { shown_png(&pixels, &rgb, size, &free)? };
         let image = png(size.0, size.1, ChannelLayout::Rgb, rgb)?;
-        Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown })
+        Ok((Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown, outpaint: false }, None))
     }
 }
 
@@ -1192,7 +1213,7 @@ fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Re
         unfade_where_empty(&mut coverage, &whole, &opacity);
     }
     let mask = mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the area to inpaint".into()))?;
-    Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new() })
+    Ok(Source { image, mask, width: size.0, height: size.1, strength, edit: false, references: Vec::new(), shown: Vec::new(), outpaint: false })
 }
 
 /// The mask an edit by a local model is given, so it composes what it paints inside the
@@ -1201,16 +1222,126 @@ fn inpaint_source(layer: &Surface, selection: &Surface, selected: Rect, crop: Re
 /// edge and the selection goes on to it, nor where the picture (`opacity` at `size`) is empty.
 /// Empty when it is all of the crop: the edit is the picture's.
 fn edit_mask(selection: &Surface, crop: Rect, canvas: Rect, size: (u32, u32), opacity: &[f32]) -> Result<Vec<u8>> {
+    let coverage = edit_coverage(selection, crop, canvas, size, opacity)?;
+    if coverage.iter().all(|v| byte(*v) == 255) {
+        return Ok(Vec::new());
+    }
+    mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the selection to edit in".into()))
+}
+
+/// What [`edit_mask`] encodes: how much of each pixel at `size` the model paints (0..=1).
+fn edit_coverage(selection: &Surface, crop: Rect, canvas: Rect, size: (u32, u32), opacity: &[f32]) -> Result<Vec<f32>> {
     pixel_count(size)?;
     let whole = edge_held_coverage(selection, crop, size);
     let mut coverage = whole.clone();
     let open = [crop.x0 <= canvas.x0, crop.y0 <= canvas.y0, crop.x1 >= canvas.x1, crop.y1 >= canvas.y1];
     fade_selection(&mut coverage, selection.content_bounds().intersect(&crop), crop, size, open);
     unfade_where_empty(&mut coverage, &whole, opacity);
-    if coverage.iter().all(|v| byte(*v) == 255) {
-        return Ok(Vec::new());
+    Ok(coverage)
+}
+
+/// How an outpainting overlaps the picture it extends, at the size it renders (0..=1 each).
+struct OutpaintOverlap {
+    /// What the model repaints: the empty part selected, and twice the band into the picture.
+    model: Vec<f32>,
+    /// What the new layer shows: the same, fading out across the band.
+    layer: Vec<f32>,
+    /// Empty and not selected: nothing of the result shows there.
+    outside: Vec<bool>,
+}
+
+/// The overlap of an outpainting of `pixels` (at `size`) where `selected` (0..=1 each) is over
+/// nothing, measured from that empty part. `None` when no such part touches a picture. The band
+/// is [`OUTPAINT_OVERLAP`], or a quarter of the picture's shorter side when that is less, so a
+/// small picture keeps its middle.
+fn outpaint_overlap(pixels: &[[f32; 4]], selected: &[f32], size: (u32, u32)) -> Option<OutpaintOverlap> {
+    let (w, h) = (size.0 as usize, size.1 as usize);
+    if w == 0 || h == 0 || pixels.len() != w.checked_mul(h)? || selected.len() != pixels.len() {
+        return None;
     }
-    mask_png(coverage, size).map_err(|_| EngineError::Other("could not read the selection to edit in".into()))
+    let solid = |p: &[f32; 4]| p[3] >= 0.5;
+    let seeds: Vec<bool> = pixels.iter().zip(selected).map(|(p, s)| !solid(p) && *s >= 0.5).collect();
+    if !seeds.contains(&true) {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (i, _) in pixels.iter().enumerate().filter(|(_, p)| solid(p)) {
+        let (x, y) = (i % w, i / w);
+        (x0, y0, x1, y1) = (x0.min(x), y0.min(y), x1.max(x + 1), y1.max(y + 1));
+    }
+    let band = OUTPAINT_OVERLAP.min(x1.saturating_sub(x0).min(y1.saturating_sub(y0)) / 4);
+    if band == 0 {
+        return None;
+    }
+    let band = band as f32;
+    let distance = distance_to(&seeds, w, h, 2.0 * band + 1.0);
+    // Smoothly from 1 at `from` pixels in to 0 a band further.
+    let ramp = |d: f32, from: f32| {
+        let t = (1.0 - (d - 0.5 - from) / band).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let outside: Vec<bool> = pixels.iter().zip(selected).map(|(p, s)| !solid(p) && *s < 0.5).collect();
+    let shaped = |from: f32| -> Vec<f32> { distance.iter().zip(&outside).map(|(d, out)| if *out { 0.0 } else { ramp(*d, from) }).collect() };
+    Some(OutpaintOverlap { model: shaped(band), layer: shaped(0.0), outside })
+}
+
+/// How far each pixel of a `w` × `h` grid is from the nearest of `seeds`, up to `limit`
+/// (a two-pass chamfer: within 8% of the true distance, in time linear in the pixels).
+fn distance_to(seeds: &[bool], w: usize, h: usize, limit: f32) -> Vec<f32> {
+    use std::f32::consts::SQRT_2;
+    let mut d: Vec<f32> = seeds.iter().map(|s| if *s { 0.0 } else { limit }).collect();
+    let relax = |d: &mut [f32], x: usize, y: usize, steps: &[(isize, isize, f32); 4]| {
+        let Some(mut best) = d.get(y * w + x).copied() else { return };
+        for &(dx, dy, step) in steps {
+            let (nx, ny) = (x as isize + dx, y as isize + dy);
+            if nx >= 0 && ny >= 0 && (nx as usize) < w && (ny as usize) < h
+                && let Some(v) = d.get(ny as usize * w + nx as usize)
+            {
+                best = best.min(v + step);
+            }
+        }
+        if let Some(slot) = d.get_mut(y * w + x) {
+            *slot = best;
+        }
+    };
+    let before = [(-1, -1, SQRT_2), (0, -1, 1.0), (1, -1, SQRT_2), (-1, 0, 1.0)];
+    let after = [(1, 1, SQRT_2), (0, 1, 1.0), (-1, 1, SQRT_2), (1, 0, 1.0)];
+    for y in 0..h {
+        for x in 0..w {
+            relax(&mut d, x, y, &before);
+        }
+    }
+    for y in (0..h).rev() {
+        for x in (0..w).rev() {
+            relax(&mut d, x, y, &after);
+        }
+    }
+    d
+}
+
+/// `selection` with an outpainting's overlap (measured at `size`) added inside `area`: the mask
+/// of the new layer. Nothing is added where the overlap says the area is empty and unselected.
+fn overlapped_selection(selection: &Surface, area: Rect, size: (u32, u32), overlap: &OutpaintOverlap) -> Surface {
+    let (aw, ah) = (area.width().max(1) as usize, area.height().max(1) as usize);
+    let (w, h) = (size.0 as usize, size.1 as usize);
+    let layer = held_resample(&overlap.layer, (w, h), (aw as u32, ah as u32));
+    let channels = selection.format().channels().max(1);
+    let mut region = selection.read_region(area);
+    for (i, px) in region.chunks_exact_mut(channels).enumerate() {
+        let (x, y) = (i % aw, i / aw);
+        let nearest = (y * h / ah).min(h.saturating_sub(1)) * w + (x * w / aw).min(w.saturating_sub(1));
+        if overlap.outside.get(nearest).copied().unwrap_or(true) {
+            continue;
+        }
+        let add = layer.get(i).copied().unwrap_or(0.0);
+        for v in px {
+            *v = v.max(add);
+        }
+    }
+    let mut out = selection.clone();
+    out.write_region(area, &region);
+    out.prune();
+    out
 }
 
 /// [`coverage`], sampled bilinearly with the crop's edge pixels held beyond it: a selection
@@ -1220,6 +1351,11 @@ fn edge_held_coverage(selection: &Surface, crop: Rect, size: (u32, u32)) -> Vec<
     let channels = selection.format().channels().max(1);
     let src: Vec<f32> =
         selection.read_region(crop).chunks_exact(channels).map(|px| px.first().copied().filter(|v| v.is_finite()).unwrap_or(0.0).clamp(0.0, 1.0)).collect();
+    held_resample(&src, (cw, ch), size)
+}
+
+/// `src` (`cw` × `ch`) at `size`, sampled bilinearly with its edge pixels held beyond it.
+fn held_resample(src: &[f32], (cw, ch): (usize, usize), size: (u32, u32)) -> Vec<f32> {
     // Where output pixel `i` of `n` falls between source pixels of `m`: the two and the weight of the second.
     let axis = |i: u32, n: u32, m: usize| {
         let u = ((f64::from(i) + 0.5) * m as f64 / f64::from(n.max(1)) - 0.5).clamp(0.0, m.saturating_sub(1) as f64);
@@ -1655,6 +1791,8 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
         true,
         move |ctx| {
             let control = Control { cancelled: &|| ctx.cancelled(), progress: &|f, m| ctx.progress(f, m), sleep: &|d| std::thread::sleep(d) };
+            // An outpainting's layer is masked past the selection, into the picture it joins.
+            let mut overlap_mask = None;
             if let (Some(layer), Some(selection)) = (&source_layer, &job_selection) {
                 ctx.progress(0.0, "Reading the layer\u{2026}");
                 let size = photocraft_aigen::source_size(&model, area.width(), area.height());
@@ -1670,7 +1808,11 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                 ctx.progress(0.0, "Reading the picture\u{2026}");
                 let size = photocraft_aigen::source_size(&model, area.width(), area.height());
                 let mut source = match &edit_selection {
-                    Some(selection) => plan.masked_source(selection, canvas, size, strength)?,
+                    Some(selection) => {
+                        let (source, mask) = plan.masked_source(selection, canvas, size, strength, model.family.outpaints_in_place())?;
+                        overlap_mask = mask;
+                        source
+                    }
                     None => plan.source(size, strength)?,
                 };
                 ctx.check()?;
@@ -1735,9 +1877,9 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                     Err(e) => return Err(e),
                 }
             }
-            Ok((made, stopped))
+            Ok((made, stopped, overlap_mask))
         },
-        move |s, (made, stopped): (Vec<Made>, Option<String>)| {
+        move |s, (made, stopped, overlap_mask): (Vec<Made>, Option<String>, Option<Surface>)| {
             let mut render = (0, 0);
             let mut frames_made = 0;
             let (mut timeline_fps, mut animation_fps) = (None, None);
@@ -1753,7 +1895,7 @@ fn generate(s: &mut Session, p: &Value) -> Result<Value> {
                     // Like Generative Fill: the selection becomes the new layer's mask, so a lasso or
                     // feathered selection shapes the result and stays editable.
                     if masked && let Some(sel) = &selection {
-                        l.mask = Some(LayerMask { surface: sel.clone(), ..LayerMask::reveal_all() });
+                        l.mask = Some(LayerMask { surface: overlap_mask.clone().unwrap_or_else(|| sel.clone()), ..LayerMask::reveal_all() });
                     }
                     let id = match fps {
                         // An animation: a video layer, on the timeline (made for it if there is none).

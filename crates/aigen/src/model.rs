@@ -297,6 +297,14 @@ impl Family {
         self == Family::QwenEdit
     }
 
+    /// Outpaints from the picture in place on the whole area, told to replace the empty margins,
+    /// rather than shown the picture alone. Qwen Image 2.1 lines its result up with image 1 only
+    /// when that is the size it renders (ComfyUI's node: "any other size shifts the edit"), so a
+    /// picture cut to its bounds came back out of register with what it extends.
+    pub fn outpaints_in_place(self) -> bool {
+        self == Family::QwenImage21
+    }
+
     /// Edits a picture following an instruction (the panel's Edit tab): the edit models, and
     /// the models that generate and edit with the same weights (Qwen Image 2.1, Ming Image,
     /// FLUX.2, FIBO 2, MiniMax H3 Image). They are shown the picture whole, as a reference, and
