@@ -238,6 +238,12 @@ pub struct AiGenUi {
     /// The style picker's tab: 0 All, then the groups in order.
     #[serde(skip)]
     style_tab: usize,
+    /// Whether the style picker is open.
+    #[serde(skip)]
+    style_open: bool,
+    /// Where the user moved or resized the style picker to, this session; `None` hangs it from the Style button.
+    #[serde(skip)]
+    style_rect: Option<egui::Rect>,
     /// How many images Generate makes, 1 to [`photocraft_engine::ai_cmds::MAX_BATCH`].
     pub batch: u32,
     /// Animate (GIF): make an animated GIF, on the timeline, with a model that can
@@ -290,6 +296,8 @@ impl Default for AiGenUi {
             style: String::new(),
             enhanced_style: String::new(),
             style_tab: 0,
+            style_open: false,
+            style_rect: None,
             batch: 1,
             animate: false,
             frames: 9,

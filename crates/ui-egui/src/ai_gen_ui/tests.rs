@@ -1568,6 +1568,67 @@ mod clicks {
         assert_eq!(h.state().ui.ai_gen.style, "");
     }
 
+    fn drag(h: &mut Harness<'_, Box<PhotocraftApp>>, from: Pos2, by: egui::Vec2) {
+        h.hover_at(from);
+        h.run_steps(1);
+        h.event(egui::Event::PointerButton { pos: from, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
+        h.run_steps(1);
+        for i in 1..=6 {
+            h.hover_at(from + by * (i as f32 / 6.0));
+            h.run_steps(1);
+        }
+        h.event(egui::Event::PointerButton { pos: from + by, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE });
+        h.run_steps(3);
+    }
+
+    #[test]
+    fn the_style_picker_moves_by_its_header_and_its_grid_reflows_when_it_is_resized() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let mut h = showing(app);
+        let at = h.get_by_label("Style").rect().center();
+        click(&mut h, at);
+        let window = |h: &Harness<'_, Box<PhotocraftApp>>| h.get_by_role_and_label(egui::accesskit::Role::Dialog, "Style Presets").rect();
+        let before = window(&h);
+        let style = h.get_by_label("Style").rect();
+        assert!(before.bottom() <= style.top() + 1.0, "it opens above the button: {before:?} over {style:?}");
+        // The title is on the header's move band.
+        let title = h.query_all_by_label("Style Presets").map(|n| n.rect()).find(|r| r.height() < before.height() / 2.0).expect("the title");
+        drag(&mut h, title.center(), vec2(-200.0, -150.0));
+        let moved = window(&h);
+        assert!(moved.left() < before.left() - 100.0 && moved.top() < before.top() - 100.0, "{before:?} moved to {moved:?}");
+        assert!(h.query_by_label("No preset").is_some(), "moving keeps it open");
+        // Four tiles to a row at first: Studio Photo beside No preset.
+        let row = |h: &Harness<'_, Box<PhotocraftApp>>| (h.get_by_label("No preset").rect().top(), h.get_by_label("Studio Photo").rect().top());
+        let (first, studio) = row(&h);
+        assert!((first - studio).abs() < 1.0, "one row: {first} vs {studio}");
+        // Its right edge's grip narrows it: fewer tiles to a row.
+        drag(&mut h, egui::pos2(moved.right() - 1.0, moved.center().y), vec2(-200.0, 0.0));
+        let narrowed = window(&h);
+        assert!(narrowed.width() < moved.width() - 100.0, "{moved:?} resized to {narrowed:?}");
+        let (first, studio) = row(&h);
+        assert!(studio > first + 50.0, "Studio Photo wraps to the next row: {first} vs {studio}");
+    }
+
+    #[test]
+    fn the_style_pickers_scroll_bar_scrolls_the_tiles_by_its_thumb() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let mut h = showing(app);
+        let at = h.get_by_label("Style").rect().center();
+        click(&mut h, at);
+        let bar = h.get_by_role_and_label(egui::accesskit::Role::ScrollBar, "Style presets scroll bar").rect();
+        let window = h.get_by_role_and_label(egui::accesskit::Role::Dialog, "Style Presets").rect();
+        assert!(window.contains_rect(bar) && bar.right() > window.center().x, "the bar is at the window's right: {bar:?} in {window:?}");
+        let before = h.get_by_label("No preset").rect().top();
+        // The thumb starts at the top of the track.
+        drag(&mut h, egui::pos2(bar.center().x, bar.top() + 8.0), vec2(0.0, 80.0));
+        let after = h.get_by_label("No preset").rect().top();
+        assert!(after < before - 40.0, "the tiles scroll up as the thumb goes down: {before} to {after}");
+    }
+
     /// Each button of a Model Folders row does its own thing: none of them opens the list, which
     /// only the chevron and the rest of the header do.
     #[test]

@@ -1,12 +1,26 @@
 //! Style presets in the shell: the Style button beside Generate and the picker it opens, a grid
-//! of thumbnails under a tab list of the presets' groups (All, Photography, …). The thumbnails
+//! of thumbnails under a tab list of the presets' groups (All, Photography, …). The picker is a
+//! craft layer: dragging its header moves it, its edges resize it (it stays as left for the session), the grid
+//! reflows to the width and scrolls under a framework scroll bar in the canvas's docked look. The thumbnails
 //! show one subject throughout, so the treatments compare; hovering one shows it larger with a
 //! few words about the look. "No preset" leaves the prompt as it is.
 //!
 //! The presets are `photocraft_aigen::STYLES`; the panel keeps the chosen one's id
 //! ([`super::AiGenUi::style`]) and `ai.generate`'s `style` adds its sentence to the prompt.
 
-use egui::{RichText, vec2};
+use std::cell::Cell;
+
+use craft::behavior::overlay::{Align, Side};
+use craft::behavior::scroll::ScrollSpan;
+use craft::behavior::{Axis, Metrics, PartKey, Sense};
+use craft::ui::contract::overlay::{Anchor, OverlayFit, Place, PlacementChange};
+use craft::ui::contract::{
+    Access, Bind, BindMut, BodyCx, Common, Component, Container, ContainerProps, Cx, DragBand, Edit as _, EditResponse, HeaderRegion, Mount, NoValue, Outcome,
+    Overlay, POPUP_PAD, PaintUi, PartsCx, Pointer as _, Props, Role, Show as _, ShowContainer as _, Trigger,
+};
+use craft::ui::runtime::access::{Name, Numeric};
+use craft::ui::style::{ComponentStyle, ScrollBarKind, ScrollBarLook, StyleCx, SurfaceKind};
+use egui::{RichText, pos2, vec2};
 use photocraft_aigen::{STYLES, Style, StyleGroup};
 use photocraft_codecs::{ChannelLayout, SampleType};
 
@@ -45,12 +59,15 @@ const THUMBS: [(&str, &[u8]); 24] = [
     ("abstract", include_bytes!("../../../../assets/ai-styles/abstract.jpg")),
 ];
 
-/// A tile's picture, its gap, how many tiles a row has, and how tall the grid may grow before
-/// it scrolls.
+/// A tile's picture, the gap between tiles, and how many tiles a row has until the user resizes the picker.
 const TILE: f32 = 128.0;
 const GAP: f32 = 10.0;
 const COLUMNS: usize = 4;
-const GRID_HEIGHT: f32 = 2.0 * (TILE + 30.0) + 60.0;
+/// The least size the picker window opens at, and the least it may be resized to (one column, one row).
+const HEIGHT: f32 = 260.0;
+/// The height of tiles the window opens at: two rows and the top of the third, so it shows it scrolls.
+const GRID_HEIGHT: f32 = 2.0 * (TILE + 22.0 + GAP) + 60.0;
+const MIN_WIDTH: f32 = TILE + 40.0;
 /// The larger preview on hover.
 const PREVIEW: f32 = 256.0;
 
@@ -147,78 +164,357 @@ pub(super) fn button(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool, 
         None => tr("Choose a style preset: a look added to the prompt (photography, illustration, painting, 3D, graphic)").to_string(),
     };
     let resp = resp.inner.on_hover_text(tip);
-    egui::Popup::from_toggle_button_response(&resp)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .align(egui::RectAlign::TOP_END)
-        .align_alternatives(&[egui::RectAlign::BOTTOM_END, egui::RectAlign::TOP_START, egui::RectAlign::BOTTOM_START])
-        .show(|ui| {
-            if let Some(picked) = picker(app, ui) {
-                app.ui.ai_gen.style = picked.map(|s| s.id.to_string()).unwrap_or_default();
-                ui.close();
-            }
-        });
+    if resp.clicked() {
+        app.ui.ai_gen.style_open = !app.ui.ai_gen.style_open;
+    }
+    picker(app, ui, &resp);
 }
 
-/// The picker: the groups as tabs, then the tiles of the tab in front ("No preset" first).
-/// Returns the tile clicked: `Some(None)` for No preset.
-fn picker(app: &mut PhotocraftApp, ui: &mut egui::Ui) -> Option<Option<&'static Style>> {
-    let t = Tokens::get(ui.ctx());
-    let width = COLUMNS as f32 * TILE + (COLUMNS as f32 - 1.0) * GAP;
-    ui.set_width(width);
-    ui.label(RichText::new(tr("Style Presets")).font(crate::theme::medium(13.0)).color(t.text));
-    ui.add_space(4.0);
-    let mut tab = app.ui.ai_gen.style_tab.min(StyleGroup::ALL.len());
-    tabs(ui, &mut tab);
-    app.ui.ai_gen.style_tab = tab;
-    ui.add_space(8.0);
-    let group = tab.checked_sub(1).and_then(|i| StyleGroup::ALL.get(i).copied());
-    let shown: Vec<&'static Style> = STYLES.iter().filter(|s| group.is_none_or(|g| s.group == g)).collect();
+/// The picker, while it is open: a window that hangs from the Style button, moved by its header (the title and the
+/// tabs) and resized by its edges, with the tiles of the tab in front ("No preset" first) scrolling under the header.
+/// Choosing a tile closes it.
+fn picker(app: &mut PhotocraftApp, ui: &mut egui::Ui, opener: &egui::Response) {
     let current = chosen(app).map(|s| s.id);
+    let tab = Cell::new(app.ui.ai_gen.style_tab.min(StyleGroup::ALL.len()));
+    let placed = Cell::new(app.ui.ai_gen.style_rect);
     let mut picked = None;
-    egui::ScrollArea::vertical().id_salt("ai-style-grid").max_height(GRID_HEIGHT).auto_shrink([false, true]).show(ui, |ui| {
-        ui.spacing_mut().item_spacing = vec2(GAP, GAP);
-        let tiles: Vec<Option<&'static Style>> = std::iter::once(None).chain(shown.iter().map(|s| Some(*s))).collect();
-        for row in tiles.chunks(COLUMNS) {
-            ui.horizontal_top(|ui| {
-                for style in row {
-                    let on = style.map(|s| s.id) == current;
-                    if tile(ui, *style, on).clicked() {
-                        picked = Some(*style);
-                    }
-                }
-            });
-        }
+    PresetsWindow::new(Bind::bound(&mut app.ui.ai_gen.style_open), &tab, &placed, opener).show(ui, |ui, _| {
+        picked = grid(ui, tab.get(), current);
     });
+    app.ui.ai_gen.style_tab = tab.get();
+    app.ui.ai_gen.style_rect = placed.get();
+    if let Some(style) = picked {
+        app.ui.ai_gen.style = style.map(|s| s.id.to_string()).unwrap_or_default();
+        app.ui.ai_gen.style_open = false;
+    }
+}
+
+/// The tiles of tab `tab` in as many columns as the window's width holds, scrolling under a [`GridBar`] at the right
+/// edge while they are taller than the window. Returns the tile clicked: `Some(None)` for No preset.
+///
+/// The layer measures its body against the whole screen's width, so a measuring pass lays the tiles out in the
+/// columns the last real pass found room for ([`COLUMNS`] at first): the window opens at that width and keeps it
+/// until the user resizes it, and the real pass reflows to the width the window has. The bar's width is kept beside
+/// the tiles whether it shows or not, so the columns don't change from tab to tab.
+fn grid(ui: &mut egui::Ui, tab: usize, current: Option<&str>) -> Option<Option<&'static Style>> {
+    let group = tab.checked_sub(1).and_then(|i| StyleGroup::ALL.get(i).copied());
+    let tiles: Vec<Option<&'static Style>> = std::iter::once(None).chain(STYLES.iter().filter(|s| group.is_none_or(|g| s.group == g)).map(Some)).collect();
+    let key = egui::Id::unique("ai-style-grid-columns");
+    let bar = StyleCx::with_root(ui.ctx(), |cx| cx.scroll_bar_of(ScrollBarKind::Docked)).thickness;
+    let rows_height = |columns: usize| tiles.len().div_ceil(columns) as f32 * (TILE + 22.0 + GAP) - GAP;
+    if ui.is_sizing_pass() {
+        // The size the window opens at: the columns' width and the bar's, and at most GRID_HEIGHT of rows.
+        let columns = ui.ctx().data(|d| d.get_temp::<usize>(key)).unwrap_or(COLUMNS);
+        ui.allocate_space(vec2(columns as f32 * (TILE + GAP) - GAP + bar, rows_height(columns).min(GRID_HEIGHT)));
+        return None;
+    }
+    let area = ui.available_rect_before_wrap();
+    let columns = (((area.width() - bar + GAP) / (TILE + GAP)).floor() as usize).max(1);
+    ui.ctx().data_mut(|d| d.insert_temp(key, columns));
+    let content = rows_height(columns);
+    // The window shows the body down to its clip, which may end before the room the body is offered.
+    let shown = area.height().min(ui.clip_rect().bottom() - area.top());
+    let height = if shown.is_finite() && shown > 0.0 { shown } else { content.min(GRID_HEIGHT) };
+    let area = egui::Rect::from_min_size(area.min, vec2(area.width(), height));
+    let track = egui::Rect::from_min_max(pos2(area.right() - bar, area.top()), area.max);
+    let view = egui::Rect::from_min_max(area.min, pos2(track.left(), area.bottom()));
+    // Each tab keeps its own place in the list. The scroll area moves it by the wheel and to a tile focused by key;
+    // the bar by its thumb and its track.
+    let offset_key = egui::Id::unique("ai-style-grid-offset").with(tab);
+    let room = (content - height).max(0.0);
+    let mut offset = ui.ctx().data(|d| d.get_temp::<f32>(offset_key)).unwrap_or(0.0).clamp(0.0, room);
+    let before = offset;
+    if room > 0.0 {
+        GridBar::new(Bind::bound(&mut offset), content, height).show_at(ui, track);
+    }
+    let mut picked = None;
+    let scrolled = ui.scope_builder(egui::UiBuilder::new().max_rect(view), |ui| {
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt(("ai-style-grid", tab))
+            .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            .auto_shrink([false, false])
+            .max_height(height);
+        if offset != before {
+            scroll = scroll.vertical_scroll_offset(offset);
+        }
+        scroll.show(ui, |ui| {
+            ui.spacing_mut().item_spacing = vec2(GAP, GAP);
+            for row in tiles.chunks(columns) {
+                ui.horizontal_top(|ui| {
+                    for style in row {
+                        let on = style.map(|s| s.id) == current;
+                        if tile(ui, *style, on).clicked() {
+                            picked = Some(*style);
+                        }
+                    }
+                });
+            }
+        })
+    });
+    let offset = scrolled.inner.state.clamped_offset().y;
+    ui.ctx().data_mut(|d| d.insert_temp(offset_key, offset));
+    ui.advance_cursor_after_rect(area);
     picked
 }
 
-/// The tab list: All, then each group; the one in front underlined in the accent.
-fn tabs(ui: &mut egui::Ui, tab: &mut usize) {
-    let t = Tokens::get(ui.ctx());
-    let names: Vec<&str> = std::iter::once(tr("All")).chain(StyleGroup::ALL.iter().map(|g| tr(g.label()))).collect();
-    let top = ui.cursor().top();
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 14.0;
-        for (i, name) in names.iter().enumerate() {
-            let on = *tab == i;
-            let color = if on { t.text } else { t.text_dim };
-            let galley = ui.painter().layout_no_wrap((*name).to_string(), crate::theme::medium(11.5), color);
-            let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x, 22.0), egui::Sense::click());
-            resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, on, *name));
-            let color = if !on && resp.hovered() { t.text } else { color };
-            ui.painter().galley(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0 - 1.0), galley, color);
-            if on {
-                let line = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.right_bottom());
-                ui.painter().rect_filled(line, 1.0, t.accent);
-            }
-            if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
-                *tab = i;
+/// The grid's bar's track; its thumb is `BAR.at(THUMB)`.
+const BAR: PartKey = PartKey::new("bar");
+
+/// The style of the grid's bar: the canvas's look (docked), at its full thickness on its own track in every state.
+#[derive(Clone, Debug, PartialEq, ComponentStyle)]
+#[non_exhaustive]
+struct GridBarStyle {
+    #[style(metrics)]
+    metrics: Metrics,
+    look: ScrollBarLook,
+}
+
+/// The vertical scroll bar beside the tiles, bound to how far down the list is scrolled (points from its top): the
+/// thumb drags, and a press on the track pages towards it. The wheel and the keys scroll the list itself.
+#[derive(Component)]
+#[component(unregistered)]
+struct GridBar<'a> {
+    #[common]
+    common: Common,
+    offset: Bind<'a, f32>,
+    /// The height of every row, and of the part of them in view.
+    content: f32,
+    view: f32,
+}
+
+impl<'a> GridBar<'a> {
+    fn new(offset: Bind<'a, f32>, content: f32, view: f32) -> Self {
+        GridBar { common: Common::new(), offset, content, view }
+    }
+
+    /// The rows, and the part in view at `offset`.
+    fn span(&self, offset: f32) -> ScrollSpan {
+        let start = f64::from(offset);
+        ScrollSpan::new(0.0..f64::from(self.content.max(self.view)), start..start + f64::from(self.view))
+    }
+
+    /// The furthest the rows scroll.
+    fn room(&self) -> f32 {
+        (self.content - self.view).max(0.0)
+    }
+}
+
+impl Component for GridBar<'_> {
+    const ROLE: Role = Role::GROUP;
+    const STOPS: bool = false;
+    type Style = GridBarStyle;
+    type Output = EditResponse<f32>;
+
+    fn style(cx: &StyleCx<'_>, _: GridBarStyleKey) -> GridBarStyle {
+        GridBarStyle { metrics: Metrics::new(), look: cx.scroll_bar_of(ScrollBarKind::Docked) }
+    }
+
+    fn sense(&self) -> Sense {
+        Sense::empty()
+    }
+
+    fn bind(&mut self) -> Option<BindMut<'_, f32>> {
+        Some(self.offset.reborrow())
+    }
+
+    fn parts(&mut self, rect: egui::Rect, cx: &mut PartsCx<'_, Self>) {
+        let Some(offset) = cx.value().copied() else { return };
+        cx.scroll(BAR, rect, Axis::Y, self.span(offset));
+    }
+
+    fn update(&mut self, cx: &mut Cx<'_, Self>) {
+        if let Some(range) = cx.scroll_moved(BAR) {
+            let to = (range.start as f32).clamp(0.0, self.room());
+            if cx.value().copied() != Some(to) {
+                cx.set(to);
             }
         }
-    });
-    let y = ui.cursor().top().max(top + 22.0);
+    }
+
+    fn paint(&mut self, ui: &mut PaintUi<'_>, cx: &Cx<'_, Self>) {
+        let Some(offset) = cx.value().copied() else { return };
+        ui.draw().scroll_bar(&cx.style.look, cx.rect, Axis::Y, false, &self.span(offset), &cx.scroll_bar_state(BAR));
+    }
+
+    fn access(&self, access: &mut Access, cx: &Cx<'_, Self>) {
+        let Some(offset) = cx.value().copied() else { return };
+        let node = access.node(BAR, Role::SCROLL_BAR);
+        node.name = Name::Text(tr("Style presets scroll bar").to_owned());
+        node.numeric = Some(Numeric::new(f64::from(offset), 0.0..=f64::from(self.room())));
+    }
+
+    fn finish(self, cx: Cx<'_, Self>) -> EditResponse<f32> {
+        cx.edit_response()
+    }
+}
+
+/// The style of the picker window: its surface and padding come from the container.
+#[derive(Clone, Debug, Default, PartialEq, ComponentStyle)]
+#[non_exhaustive]
+struct PresetsWindowStyle {
+    #[style(metrics)]
+    metrics: Metrics,
+}
+
+/// What the picker window reports: its response.
+#[derive(Debug)]
+struct PresetsWindowOutput {
+    response: egui::Response,
+}
+
+impl Outcome for PresetsWindowOutput {
+    type Value = NoValue;
+
+    fn response(&self) -> &egui::Response {
+        &self.response
+    }
+
+    fn unshown(response: egui::Response) -> Option<Self> {
+        Some(PresetsWindowOutput { response })
+    }
+}
+
+/// The picker's layer: a popup surface that hangs from the Style button until the user moves it by its header, with
+/// grips on its edges. Its header is the title and the tab list; the tiles scroll under it, beside their own bar.
+#[derive(Component, Props)]
+#[component(container, unregistered)]
+struct PresetsWindow<'a> {
+    #[common]
+    common: Common,
+    #[container]
+    props: ContainerProps,
+    open: Bind<'a, bool>,
+    tab: &'a Cell<usize>,
+    placed: &'a Cell<Option<egui::Rect>>,
+}
+
+impl<'a> PresetsWindow<'a> {
+    /// Open while `open` holds, at `placed` once the user moved or resized it (hanging from `opener` until then),
+    /// showing tab `tab`.
+    fn new(open: Bind<'a, bool>, tab: &'a Cell<usize>, placed: &'a Cell<Option<egui::Rect>>, opener: &egui::Response) -> Self {
+        // Above the button, its right edges aligned, as the button sits low in the panel; the layer turns below
+        // where there is no room above.
+        let mut overlay = Overlay::popover()
+            .place(Place::anchored(Anchor::Response, Side::Above, Align::End))
+            .opened_by(opener, Trigger::Manual)
+            .movable(true)
+            .resizable(true)
+            .fit(OverlayFit::Resizable)
+            .size(vec2(MIN_WIDTH, HEIGHT))
+            .min_size(vec2(MIN_WIDTH, HEIGHT))
+            // The tiles scroll under their own bar, in the canvas's look, rather than the body's.
+            .body_scroll(false);
+        if let Some(rect) = placed.get() {
+            overlay = overlay.placed(rect);
+        }
+        let props = ContainerProps::new()
+            .surface(SurfaceKind::Popup)
+            .pad(POPUP_PAD)
+            .mount(Mount::Layer(overlay))
+            .header(HeaderRegion::new().band(DragBand::Move));
+        PresetsWindow { common: Common::new(), props, open, tab, placed }.label(tr("Style Presets"))
+    }
+}
+
+impl Component for PresetsWindow<'_> {
+    const ROLE: Role = Role::DIALOG;
+    const PARTS: bool = false;
+    const STOPS: bool = false;
+    type Style = PresetsWindowStyle;
+    type Output = PresetsWindowOutput;
+
+    fn style(_: &StyleCx<'_>, _: PresetsWindowStyleKey) -> PresetsWindowStyle {
+        PresetsWindowStyle::default()
+    }
+
+    fn sense(&self) -> Sense {
+        Sense::empty()
+    }
+
+    fn finish(self, cx: Cx<'_, Self>) -> PresetsWindowOutput {
+        PresetsWindowOutput { response: cx.response.clone() }
+    }
+}
+
+impl Container for PresetsWindow<'_> {
+    fn open(&mut self) -> Option<BindMut<'_, bool>> {
+        Some(self.open.reborrow())
+    }
+
+    /// The user moved or resized it: it stays where they leave it, as large as they leave it.
+    fn placement_changed(&mut self, change: &PlacementChange) {
+        self.placed.set(Some(change.rect));
+    }
+
+    /// The title and the tab list: the band that moves the window lies under them, so the tabs keep their clicks.
+    fn header(&mut self, ui: &mut egui::Ui, _: &mut BodyCx<'_>) {
+        let t = Tokens::get(ui.ctx());
+        // The title, painted: it takes no press, so a drag on it reaches the move band under it, and it measures as
+        // tall as it shows (a label measures differently in a measuring pass).
+        let title = ui.painter().layout_no_wrap(tr("Style Presets").to_string(), crate::theme::medium(13.0), t.text);
+        let (rect, resp) = ui.allocate_exact_size(title.size(), egui::Sense::hover());
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, tr("Style Presets")));
+        ui.painter().galley(rect.min, title, t.text);
+        ui.add_space(4.0);
+        // A measuring pass wraps the tabs at the width the window had in the last real pass, as the grid lays out
+        // its columns; the real pass wraps them at the width it has.
+        let key = egui::Id::unique("ai-style-header-width");
+        let width = if ui.is_sizing_pass() {
+            ui.ctx().data(|d| d.get_temp::<f32>(key)).unwrap_or(f32::INFINITY)
+        } else {
+            let width = ui.available_width();
+            ui.ctx().data_mut(|d| d.insert_temp(key, width));
+            width
+        };
+        let mut tab = self.tab.get();
+        tabs(ui, &mut tab, width);
+        self.tab.set(tab);
+        ui.add_space(8.0);
+    }
+}
+
+/// The height of a tab, and the space between two lines of tabs.
+const TAB_HEIGHT: f32 = 22.0;
+const TAB_LINE_GAP: f32 = 6.0;
+const TAB_GAP: f32 = 14.0;
+
+/// The tab list, in as many lines as `width` needs: All, then each group; the one in front underlined in the accent,
+/// a rule under them. The lines are laid out here rather than by egui's wrapping, which wraps differently in a
+/// measuring pass, so the header measures as tall as it is.
+fn tabs(ui: &mut egui::Ui, tab: &mut usize, width: f32) {
+    let t = Tokens::get(ui.ctx());
+    let names: Vec<&str> = std::iter::once(tr("All")).chain(StyleGroup::ALL.iter().map(|g| tr(g.label()))).collect();
+    let galleys: Vec<_> = names.iter().map(|name| ui.painter().layout_no_wrap((*name).to_string(), crate::theme::medium(11.5), t.text)).collect();
+    // Each tab's offset from the list's top left: a tab that would cross `width` starts the next line.
+    let (mut x, mut y, mut used) = (0.0_f32, 0.0_f32, 0.0_f32);
+    let mut at = Vec::with_capacity(galleys.len());
+    for galley in &galleys {
+        let w = galley.size().x;
+        if x > 0.0 && x + w > width {
+            (x, y) = (0.0, y + TAB_HEIGHT + TAB_LINE_GAP);
+        }
+        at.push(vec2(x, y));
+        used = used.max(x + w);
+        x += w + TAB_GAP;
+    }
+    let (list, _) = ui.allocate_exact_size(vec2(used.min(width), y + TAB_HEIGHT), egui::Sense::hover());
+    for (i, ((name, galley), offset)) in names.iter().zip(galleys).zip(at).enumerate() {
+        let on = *tab == i;
+        let rect = egui::Rect::from_min_size(list.min + offset, vec2(galley.size().x, TAB_HEIGHT));
+        let resp = ui.interact(rect, ui.scope_id().with(("ai-style-tab", i)), egui::Sense::click());
+        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, on, *name));
+        let color = if on || resp.hovered() { t.text } else { t.text_dim };
+        ui.painter().galley_with_override_text_color(egui::pos2(rect.left(), rect.center().y - galley.size().y / 2.0 - 1.0), galley, color);
+        if on {
+            let line = egui::Rect::from_min_max(egui::pos2(rect.left(), rect.bottom() - 2.0), rect.right_bottom());
+            ui.painter().rect_filled(line, 1.0, t.accent);
+        }
+        if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
+            *tab = i;
+        }
+    }
     let r = ui.max_rect();
-    ui.painter().line_segment([egui::pos2(r.left(), y), egui::pos2(r.right(), y)], egui::Stroke::new(1.0, t.separator));
+    ui.painter().line_segment([egui::pos2(r.left(), list.bottom()), egui::pos2(r.right(), list.bottom())], egui::Stroke::new(1.0, t.separator));
 }
 
 /// One tile: the thumbnail with its name under it; the chosen one framed in the accent with a
