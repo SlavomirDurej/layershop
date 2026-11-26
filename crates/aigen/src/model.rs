@@ -858,8 +858,8 @@ impl Model {
         if self.provider.is_local() { self.family.max_references() } else { DEFAULT_REFERENCES }
     }
 
-    /// The cloud models offered by "Add Model". GPT Image 2 stays offered beside 2.5: some
-    /// prefer the look of its pictures.
+    /// The cloud models offered by "Add Model". GPT Image 2.5 and 2 stay offered beside 2.6, the
+    /// default: some prefer the look of their pictures.
     pub fn cloud_presets() -> Vec<Model> {
         vec![
             Model::cloud(Provider::Openai, "GPT Image 2.6 Sunburst", "gpt-image-2.6-sunburst", true),
@@ -877,7 +877,8 @@ impl Model {
     }
 
     /// The models a new installation lists, best and newest first: the cloud models (in the
-    /// order of Artificial Analysis' text-to-image board of 2026-10-13), then the local ones.
+    /// order of Artificial Analysis' text-to-image board of 2026-10-13, with GPT Image 2.6 in
+    /// place of 2.5 since 2026-11-26), then the local ones.
     /// Each has the settings it was judged at: one prompt rendered by every model at
     /// 1920 x 1080 on 2026-10-13. The local entries name the files that comparison ran; Scan
     /// Server points an entry at the file the user's server has of the same model
@@ -886,8 +887,10 @@ impl Model {
         let cloud = |name: &str| Model::cloud_presets().into_iter().find(|m| m.name == name);
         let local = |family: Family, name: &str| Model { name: name.into(), ..family.preset() };
         let models = [
-            cloud("GPT Image 2.5 Sunburst"),
-            cloud("GPT Image 2.5 Flare"),
+            // In place of 2.5 since 2026-11-26: newer, and they also make animated GIFs (Animate
+            // (GIF)). 2.5 stays under Add Model.
+            cloud("GPT Image 2.6 Sunburst"),
+            cloud("GPT Image 2.6 Flare"),
             cloud("Grok Imagine Image 2.0"),
             cloud("Nano Banana 2"),
             cloud("FLUX 3 Image"),
@@ -1253,8 +1256,8 @@ mod tests {
         assert_eq!(
             ids,
             [
-                "gpt-image-2-5-sunburst",
-                "gpt-image-2-5-flare",
+                "gpt-image-2-6-sunburst",
+                "gpt-image-2-6-flare",
                 "grok-imagine-image-2-0",
                 "nano-banana-2",
                 "flux-3-image",
@@ -1281,14 +1284,14 @@ mod tests {
         assert!(s.models.windows(2).all(|w| (w[0].provider.is_local(), w[0].rank()) < (w[1].provider.is_local(), w[1].rank())));
         // Every one generates from a prompt and is listed; the first is what an empty id means.
         assert!(s.models.iter().all(|m| m.enabled && m.can_generate() && !m.name.is_empty()));
-        assert_eq!(s.model("").map(|m| m.api_model.as_str()), Some("gpt-image-2.5-sunburst"));
+        assert_eq!(s.model("").map(|m| m.api_model.as_str()), Some("gpt-image-2.6-sunburst"));
         // An edit without a model is Qwen Image 2.1's, though the cloud models are listed first;
         // without it, the first that edits (a cloud model; FLUX.3 Klein doesn't).
         assert_eq!(s.edit_model("").map(|m| m.id.as_str()), Some("qwen-image-2-1"));
         assert_eq!(s.edit_model("ming-image-0-1-design").map(|m| m.id.as_str()), Some("ming-image-0-1-design"));
         let mut without = s.clone();
         without.models.iter_mut().filter(|m| m.family == Family::QwenImage21).for_each(|m| m.enabled = false);
-        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("gpt-image-2-5-sunburst"));
+        assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("gpt-image-2-6-sunburst"));
         without.show_cloud = false;
         assert_eq!(without.edit_model("").map(|m| m.id.as_str()), Some("fibo-2-dev"));
         assert_eq!(s.edit_model("fibo-2-dev").map(|m| m.id.as_str()), Some("fibo-2-dev"));

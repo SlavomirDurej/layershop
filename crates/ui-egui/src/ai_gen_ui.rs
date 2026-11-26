@@ -2046,7 +2046,7 @@ fn price_note(app: &PhotocraftApp, model: &Model) -> (String, String) {
     let mut tip = tr("From OpenAI's published image prices for this quality. The prompt adds a fraction of a cent.").to_string();
     if estimate.is_some_and(|e| e.approximate) {
         tip.push(' ');
-        tip.push_str(tr("≈: OpenAI publishes prices for three sizes of GPT Image 2 only, so other sizes and GPT Image 2.5 are estimated from those."));
+        tip.push_str(tr("≈: OpenAI publishes prices for three sizes of GPT Image 2 only, so other sizes and GPT Image 2.5 and 2.6 are estimated from those."));
     }
     tip.push(' ');
     tip.push_str(tr("\"last\" is what the previous image was billed, from the tokens OpenAI reported."));
@@ -4136,7 +4136,7 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
             ui.label(RichText::new(provider.label()).color(t.text));
             ui.end_row();
             let example = match provider {
-                Provider::Openai => "gpt-image-2.5-sunburst",
+                Provider::Openai => "gpt-image-2.6-sunburst",
                 Provider::Xai => "grok-imagine-image-2.0",
                 Provider::Meta => "muse-image-1.0",
                 Provider::Bfl => "flux-3-image",

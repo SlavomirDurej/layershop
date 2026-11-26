@@ -775,8 +775,8 @@ ones follow as that comparison left them (our own judgement: the board ranks one
 
 | Model | Runs | Settings |
 |---|---|---|
-| GPT Image 2.5 Sunburst | OpenAI | quality auto, 1 MP |
-| GPT Image 2.5 Flare | OpenAI | quality auto, 1 MP |
+| GPT Image 2.6 Sunburst | OpenAI | quality auto, 1 MP |
+| GPT Image 2.6 Flare | OpenAI | quality auto, 1 MP |
 | Grok Imagine Image 2.0 | xAI | quality auto, 1K |
 | Nano Banana 2 (`gemini-3.1-flash-image-preview`) | Google Gemini | 1K |
 | FLUX 3 Image | Black Forest Labs | 1K |
@@ -1101,9 +1101,10 @@ Each provider has one key, on the **API Keys** page (`XAI_API_KEY`, `META_API_KE
 These were added from the providers' documentation on 2026-10-13 and then run against the live
 APIs from the app (text to image, one model each). They are among the recommended models.
 
-**Add Model** offers all of these. GPT Image 2.6 is offered but not among the recommended models a
-new installation lists (it came after the comparison). GPT Image 2 stays on offer beside 2.5 for those who prefer the
-look of its pictures. Nano Banana 2.1 (released 2026-10-06) is offered but not among the
+**Add Model** offers all of these. Since 2026-11-26 a new installation lists GPT Image 2.6
+Sunburst and Flare among the recommended models in place of 2.5 (2.6 also makes animated GIFs);
+**Restore Defaults** adds them to an existing list. GPT Image 2.5 and 2 stay on offer for those who
+prefer the look of their pictures. Nano Banana 2.1 (released 2026-10-06) is offered but not among the
 recommended models: it has not been through the comparison, and Google documents it for the
 Interactions API only. PhotoCraft calls every Gemini model through `generateContent`, which
 Google says stays supported; if 2.1 answers that it is not available there, the error says so

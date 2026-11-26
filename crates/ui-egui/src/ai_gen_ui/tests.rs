@@ -1880,7 +1880,7 @@ fn only_models_that_can_run_are_offered() {
     // An OpenAI key: its models are offered, and only those.
     app.session.ai.set_key(Provider::Openai, "sk-test");
     let cloud = offered(&app);
-    assert_eq!(cloud, ["GPT Image 2.5 Sunburst", "GPT Image 2.5 Flare"]);
+    assert_eq!(cloud, ["GPT Image 2.6 Sunburst", "GPT Image 2.6 Flare"]);
     // A ComfyUI that answers, asked again when the app gets the focus back: the local models
     // whose file it has are offered, after the cloud ones; the others are not.
     app.session.ai.transport = Some(Arc::new(OneModel));
@@ -1893,7 +1893,7 @@ fn only_models_that_can_run_are_offered() {
         ctx.run_ui(input, |ui| panel(&mut app, ui)).textures_delta.clear();
     }
     assert_eq!(local_state(&app), Local::Ready);
-    assert_eq!(offered(&app), ["GPT Image 2.5 Sunburst", "GPT Image 2.5 Flare", "Z-Image Turbo"]);
+    assert_eq!(offered(&app), ["GPT Image 2.6 Sunburst", "GPT Image 2.6 Flare", "Z-Image Turbo"]);
     // A server that stops answering leaves what it said: its files are still there.
     app.session.ai.transport = Some(Arc::new(Nobody));
     app.ui.ai_gen.server_asked = f64::NEG_INFINITY;

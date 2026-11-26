@@ -604,7 +604,7 @@ fn a_local_generation_that_worked_ends_the_offer() {
     let (mut app, _dir) = app(demo::Scale::Small);
     assert!(!set_up(&app));
     // A cloud model's image says nothing about local AI.
-    crate::ai_gen_ui::finished(&mut app, &json!({"model": "gpt-image-2-5-sunburst", "seed": 1}));
+    crate::ai_gen_ui::finished(&mut app, &json!({"model": "gpt-image-2-6-sunburst", "seed": 1}));
     assert!(!set_up(&app));
     crate::ai_gen_ui::finished(&mut app, &json!({"model": "qwen-image-2-1", "seed": 1}));
     assert!(set_up(&app), "the user's own ComfyUI rendered: there is nothing to set up");
