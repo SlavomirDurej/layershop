@@ -1,7 +1,8 @@
 //! Style presets in the shell: the Style button beside Generate and the picker it opens, a grid
 //! of thumbnails under a tab list of the presets' groups (All, Photography, …). The picker is a
-//! craft layer: dragging its header moves it, its edges resize it (it stays as left for the session), the grid
-//! reflows to the width and scrolls under a framework scroll bar in the canvas's docked look. The thumbnails
+//! craft layer: dragging its header (a grip of dots marks it) moves it, its edges resize it (it stays as left for the
+//! session), the grid reflows to the width and scrolls under a scroll bar drawn as the canvas's; the wheel over the
+//! grid scrolls it, not the canvas under the window. The thumbnails
 //! show one subject throughout, so the treatments compare; hovering one shows it larger with a
 //! few words about the look. "No preset" leaves the prompt as it is.
 //!
@@ -18,8 +19,9 @@ use craft::ui::contract::{
     Access, Bind, BindMut, BodyCx, Common, Component, Container, ContainerProps, Cx, DragBand, Edit as _, EditResponse, HeaderRegion, Mount, NoValue, Outcome,
     Overlay, POPUP_PAD, PaintUi, PartsCx, Pointer as _, Props, Role, Show as _, ShowContainer as _, Trigger,
 };
+use craft::ui::primitives::{PaintShape, ScrollBar};
 use craft::ui::runtime::access::{Name, Numeric};
-use craft::ui::style::{ComponentStyle, ScrollBarKind, ScrollBarLook, StyleCx, SurfaceKind};
+use craft::ui::style::{ComponentStyle, ScrollBarKind, ScrollBarLook, Stateful, StyleCx, SurfaceKind};
 use egui::{RichText, pos2, vec2};
 use photocraft_aigen::{STYLES, Style, StyleGroup};
 use photocraft_codecs::{ChannelLayout, SampleType};
@@ -216,22 +218,22 @@ fn grid(ui: &mut egui::Ui, tab: usize, current: Option<&str>) -> Option<Option<&
     let shown = area.height().min(ui.clip_rect().bottom() - area.top());
     let height = if shown.is_finite() && shown > 0.0 { shown } else { content.min(GRID_HEIGHT) };
     let area = egui::Rect::from_min_size(area.min, vec2(area.width(), height));
-    let track = egui::Rect::from_min_max(pos2(area.right() - bar, area.top()), area.max);
-    let view = egui::Rect::from_min_max(area.min, pos2(track.left(), area.bottom()));
-    // Each tab keeps its own place in the list. The scroll area moves it by the wheel and to a tile focused by key;
-    // the bar by its thumb and its track.
+    let view = egui::Rect::from_min_max(area.min, pos2(area.right() - bar, area.bottom()));
+    // Each tab keeps its own place in the list. The bar moves it by its thumb, its track and the wheel; the scroll area
+    // to a tile focused by key.
     let offset_key = egui::Id::unique("ai-style-grid-offset").with(tab);
     let room = (content - height).max(0.0);
     let mut offset = ui.ctx().data(|d| d.get_temp::<f32>(offset_key)).unwrap_or(0.0).clamp(0.0, room);
     let before = offset;
-    if room > 0.0 {
-        GridBar::new(Bind::bound(&mut offset), content, height).show_at(ui, track);
-    }
+    // Over the whole grid, so the wheel scrolls the tiles and never reaches the canvas under the window.
+    GridBar::new(Bind::bound(&mut offset), content, height).show_at(ui, area);
     let mut picked = None;
     let scrolled = ui.scope_builder(egui::UiBuilder::new().max_rect(view), |ui| {
         let mut scroll = egui::ScrollArea::vertical()
             .id_salt(("ai-style-grid", tab))
             .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+            // The bar takes the wheel; the area keeps scrolling a tile focused by key into view.
+            .scroll_source(egui::scroll_area::ScrollSource::NONE)
             .auto_shrink([false, false])
             .max_height(height);
         if offset != before {
@@ -260,7 +262,8 @@ fn grid(ui: &mut egui::Ui, tab: usize, current: Option<&str>) -> Option<Option<&
 /// The grid's bar's track; its thumb is `BAR.at(THUMB)`.
 const BAR: PartKey = PartKey::new("bar");
 
-/// The style of the grid's bar: the canvas's look (docked), at its full thickness on its own track in every state.
+/// The style of the grid's bar: the canvas's (the docked look as document chrome draws it), a sunken track with the
+/// thumb inset an eighth of its width from each side.
 #[derive(Clone, Debug, PartialEq, ComponentStyle)]
 #[non_exhaustive]
 struct GridBarStyle {
@@ -269,8 +272,9 @@ struct GridBarStyle {
     look: ScrollBarLook,
 }
 
-/// The vertical scroll bar beside the tiles, bound to how far down the list is scrolled (points from its top): the
-/// thumb drags, and a press on the track pages towards it. The wheel and the keys scroll the list itself.
+/// The tiles' scroll: shown over the whole grid, it takes the wheel there and draws the vertical bar along the right
+/// edge while the tiles are taller than the grid. Bound to how far down the list is scrolled (points from its top):
+/// the thumb drags, a press on the track pages towards it, and the wheel scrolls.
 #[derive(Component)]
 #[component(unregistered)]
 struct GridBar<'a> {
@@ -297,20 +301,30 @@ impl<'a> GridBar<'a> {
     fn room(&self) -> f32 {
         (self.content - self.view).max(0.0)
     }
+
+    /// The bar's track in the grid `rect`: its right edge, `thickness` wide.
+    fn track(rect: egui::Rect, thickness: f32) -> egui::Rect {
+        egui::Rect::from_min_max(pos2(rect.right() - thickness, rect.top()), rect.max)
+    }
 }
 
 impl Component for GridBar<'_> {
     const ROLE: Role = Role::GROUP;
     const STOPS: bool = false;
+    /// The offset is where the list is scrolled to, not a value the user edits: the wheel moves it without focus.
+    const BINDS_VIEW: bool = true;
     type Style = GridBarStyle;
     type Output = EditResponse<f32>;
 
     fn style(cx: &StyleCx<'_>, _: GridBarStyleKey) -> GridBarStyle {
-        GridBarStyle { metrics: Metrics::new(), look: cx.scroll_bar_of(ScrollBarKind::Docked) }
+        let mut look = cx.scroll_bar_of(ScrollBarKind::Docked);
+        look.track = Stateful::new(cx.color(cx.tokens.color.surface.sunken));
+        GridBarStyle { metrics: Metrics::new(), look }
     }
 
+    /// The whole wheel, zoom included, so none of it passes to the canvas under the window.
     fn sense(&self) -> Sense {
-        Sense::empty()
+        Sense::WHEEL
     }
 
     fn bind(&mut self) -> Option<BindMut<'_, f32>> {
@@ -319,25 +333,44 @@ impl Component for GridBar<'_> {
 
     fn parts(&mut self, rect: egui::Rect, cx: &mut PartsCx<'_, Self>) {
         let Some(offset) = cx.value().copied() else { return };
-        cx.scroll(BAR, rect, Axis::Y, self.span(offset));
+        if self.room() > 0.0 {
+            cx.scroll(BAR, Self::track(rect, cx.style.look.thickness), Axis::Y, self.span(offset));
+        }
     }
 
     fn update(&mut self, cx: &mut Cx<'_, Self>) {
+        let Some(mut to) = cx.value().copied() else { return };
         if let Some(range) = cx.scroll_moved(BAR) {
-            let to = (range.start as f32).clamp(0.0, self.room());
-            if cx.value().copied() != Some(to) {
-                cx.set(to);
-            }
+            to = range.start as f32;
+        }
+        if let Some(wheel) = cx.take_wheel() {
+            to -= wheel.scroll.y;
+        }
+        let to = to.clamp(0.0, self.room());
+        if cx.value().copied() != Some(to) {
+            cx.set(to);
         }
     }
 
     fn paint(&mut self, ui: &mut PaintUi<'_>, cx: &Cx<'_, Self>) {
         let Some(offset) = cx.value().copied() else { return };
-        ui.draw().scroll_bar(&cx.style.look, cx.rect, Axis::Y, false, &self.span(offset), &cx.scroll_bar_state(BAR));
+        if self.room() <= 0.0 {
+            return;
+        }
+        let look = &cx.style.look;
+        let track = Self::track(cx.rect, look.thickness);
+        let state = cx.scroll_bar_state(BAR);
+        let draw = ui.draw();
+        draw.fill(&PaintShape::Rect(track, egui::CornerRadius::ZERO), state.resolve(&look.track));
+        let thumb = ScrollBar::thumb(look.min_thumb, track, Axis::Y, false, &self.span(offset)).shrink2(vec2(track.width() / 8.0, 0.0));
+        draw.fill(&PaintShape::Rect(thumb, egui::CornerRadius::ZERO), state.resolve(&look.thumb));
     }
 
     fn access(&self, access: &mut Access, cx: &Cx<'_, Self>) {
         let Some(offset) = cx.value().copied() else { return };
+        if self.room() <= 0.0 {
+            return;
+        }
         let node = access.node(BAR, Role::SCROLL_BAR);
         node.name = Name::Text(tr("Style presets scroll bar").to_owned());
         node.numeric = Some(Numeric::new(f64::from(offset), 0.0..=f64::from(self.room())));
@@ -455,6 +488,7 @@ impl Container for PresetsWindow<'_> {
         let (rect, resp) = ui.allocate_exact_size(title.size(), egui::Sense::hover());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, tr("Style Presets")));
         ui.painter().galley(rect.min, title, t.text);
+        grip(ui, rect);
         ui.add_space(4.0);
         // A measuring pass wraps the tabs at the width the window had in the last real pass, as the grid lays out
         // its columns; the real pass wraps them at the width it has.
@@ -470,6 +504,28 @@ impl Container for PresetsWindow<'_> {
         tabs(ui, &mut tab, width);
         self.tab.set(tab);
         ui.add_space(8.0);
+    }
+}
+
+/// The header's grip: two rows of dots at the right end of the title's line, `title` the title's rect, saying the
+/// header moves the window. It brightens while the pointer is on the line. Painted only: the move band under it takes
+/// the drag.
+fn grip(ui: &egui::Ui, title: egui::Rect) {
+    const COLUMNS: usize = 6;
+    const PITCH: f32 = 4.0;
+    let right = ui.max_rect().right();
+    if !right.is_finite() || ui.is_sizing_pass() {
+        return;
+    }
+    let t = Tokens::get(ui.ctx());
+    let line = egui::Rect::from_x_y_ranges(ui.max_rect().x_range(), title.y_range());
+    let color = if ui.rect_contains_pointer(line) { t.text_dim } else { t.text_faint };
+    let top = title.center().y - PITCH / 2.0;
+    for row in 0..2 {
+        for column in 0..COLUMNS {
+            let at = pos2(right - 2.0 - column as f32 * PITCH, top + row as f32 * PITCH);
+            ui.painter().circle_filled(at, 1.1, color);
+        }
     }
 }
 

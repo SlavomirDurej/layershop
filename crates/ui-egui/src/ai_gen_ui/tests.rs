@@ -1629,6 +1629,43 @@ mod clicks {
         assert!(after < before - 40.0, "the tiles scroll up as the thumb goes down: {before} to {after}");
     }
 
+    #[test]
+    fn the_wheel_over_the_style_picker_scrolls_its_tiles_and_not_the_canvas() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        // Larger than the canvas shows, so a wheel that reached it would scroll it.
+        app.run("file.new", json!({"width": 4000, "height": 3000})).unwrap();
+        let mut h = showing(app);
+        let at = h.get_by_label("Style").rect().center();
+        click(&mut h, at);
+        let canvas = h.state().last_canvas_rect;
+        let window = h.get_by_role_and_label(egui::accesskit::Role::Dialog, "Style Presets").rect();
+        let title = h.query_all_by_label("Style Presets").map(|n| n.rect()).find(|r| r.height() < window.height() / 2.0).expect("the title");
+        drag(&mut h, title.center(), canvas.center() - window.center());
+        let at = h.get_by_label("Natural Photo").rect().center();
+        assert!(canvas.contains(at), "the picker lies over the canvas: {at:?} in {canvas:?}");
+        let view = |h: &Harness<'_, Box<PhotocraftApp>>| {
+            let v = &h.state().ui.views[0];
+            (v.center, v.zoom)
+        };
+        let (shown, before) = (view(&h), h.get_by_label("No preset").rect().top());
+        h.hover_at(at);
+        h.run_steps(1);
+        for _ in 0..3 {
+            h.event(egui::Event::MouseWheel {
+                source: egui::MouseWheelSource::Unknown,
+                unit: egui::MouseWheelUnit::Line,
+                delta: vec2(0.0, -1.0),
+                phase: egui::TouchPhase::Move,
+                modifiers: Modifiers::NONE,
+            });
+            h.run_steps(2);
+        }
+        let after = h.get_by_label("No preset").rect().top();
+        assert!(after < before - 20.0, "the tiles scroll up: {before} to {after}");
+        assert_eq!(view(&h), shown, "the canvas under the picker stays where it was");
+    }
+
     /// Each button of a Model Folders row does its own thing: none of them opens the list, which
     /// only the chevron and the rest of the header do.
     #[test]
