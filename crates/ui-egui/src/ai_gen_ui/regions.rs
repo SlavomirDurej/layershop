@@ -18,7 +18,7 @@ use serde_json::{Value, json};
 
 use super::{CreateTask, Mode, tr};
 use crate::PhotocraftApp;
-use crate::canvas::{ToolEvent, ViewXform};
+use super::{CanvasEvent as ToolEvent, ViewXform};
 use crate::state::Tool;
 use crate::theme::Tokens;
 
@@ -281,13 +281,13 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
     // The heading: the count, help, then copy, clear and add on the right.
     ui.horizontal(|ui| {
         ui.label(RichText::new(format!("{} ({})", tr("Regions"), regions.len())).font(crate::theme::medium(12.0)).color(t.text));
-        crate::icons::button(ui, "info", 20.0, false, "").on_hover_ui(|ui| {
+        crate::ai_widgets::icon_button(ui, "info", 20.0, false, "").on_hover_ui(|ui| {
             ui.set_max_width(300.0);
             ui.label(RichText::new(tr(HELP)).size(11.5));
         });
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_enabled_ui(!busy, |ui| {
-                if crate::icons::button(ui, "plus", 22.0, false, tr("Add region")).clicked() {
+                if crate::ai_widgets::icon_button(ui, "plus", 22.0, false, tr("Add region")).clicked() {
                     let canvas = app.session.active().map(|d| d.doc.bounds()).unwrap_or_default();
                     let third = |v: u32| i32::try_from(v / 3).unwrap_or(1).max(1);
                     let (w, h) = (third(canvas.width()), third(canvas.height()));
@@ -302,17 +302,17 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
                     );
                     arm(app);
                 }
-                let clear = ui.add_enabled_ui(!regions.is_empty(), |ui| crate::icons::button(ui, "trash", 22.0, false, tr("Clear all regions"))).inner;
+                let clear = ui.add_enabled_ui(!regions.is_empty(), |ui| crate::ai_widgets::icon_button(ui, "trash", 22.0, false, tr("Clear all regions"))).inner;
                 if clear.clicked() {
                     set_all(app, Vec::new());
                     app.ui.ai_gen.region = None;
                 }
-                if crate::icons::button(ui, "copy", 22.0, false, tr("Click to copy JSON output")).clicked() {
+                if crate::ai_widgets::icon_button(ui, "copy", 22.0, false, tr("Click to copy JSON output")).clicked() {
                     copy_prompt(app, ui.ctx(), model);
                 }
                 let hidden = app.ui.ai_gen.regions.hidden;
                 let (icon, tip) = if hidden { ("eye-off", "Show regions on the canvas") } else { ("eye", "Hide regions on the canvas") };
-                if crate::icons::button(ui, icon, 22.0, hidden, tr(tip)).clicked() {
+                if crate::ai_widgets::icon_button(ui, icon, 22.0, hidden, tr(tip)).clicked() {
                     let st = &mut app.ui.ai_gen.regions;
                     st.hidden = !hidden;
                     st.typing = None;
@@ -355,7 +355,7 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             let chip = Rect::from_min_size(rect.left_center() + vec2(4.0, -9.0), vec2(18.0, 18.0));
             ui.painter().rect_filled(chip, 3.0, color32(r.color).gamma_multiply(fade));
             ui.painter().text(chip.center(), egui::Align2::CENTER_CENTER, format!("{}", i + 1), crate::theme::medium(11.0), Color32::from_gray(20));
-            crate::icons::paint(
+            crate::ai_widgets::paint_icon(
                 ui,
                 Rect::from_min_size(chip.right_top() + vec2(5.0, 1.0), vec2(16.0, 16.0)),
                 kind_icon(r.kind),
@@ -393,8 +393,8 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, mo
             let _ = resp.on_hover_text(tr(tip));
             ui.add_enabled_ui(!busy, |ui| {
                 let open = app.ui.ai_gen.regions.editor == Some(r.id);
-                edit = crate::icons::button(ui, "pencil", 22.0, open, tr("Edit region")).clicked();
-                delete = crate::icons::button(ui, "trash", 22.0, false, tr("Remove region")).clicked();
+                edit = crate::ai_widgets::icon_button(ui, "pencil", 22.0, open, tr("Edit region")).clicked();
+                delete = crate::ai_widgets::icon_button(ui, "trash", 22.0, false, tr("Remove region")).clicked();
             });
             rect
         });
@@ -564,7 +564,7 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, 
                         ui.horizontal(|ui| {
                             let mut fill = r.fill;
                             let (rect, _) = ui.allocate_exact_size(vec2(label_w, 22.0), egui::Sense::hover());
-                            let check = ui.put(rect, |ui: &mut egui::Ui| crate::widgets::checkbox(ui, &mut fill, tr("Fill")));
+                            let check = ui.put(rect, |ui: &mut egui::Ui| crate::ai_widgets::checkbox(ui, &mut fill, tr("Fill")));
                             if check.changed() {
                                 set(app, r.id, json!({"fill": fill}), None);
                             }
@@ -575,7 +575,7 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, 
                                     ui.add_sized(vec2(34.0, 18.0), egui::Label::new(pct));
                                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                                         let mut v = r.fill_opacity.clamp(0.0, 1.0) * 100.0;
-                                        let resp = crate::widgets::slider(ui, &mut v, 0.0..=60.0, None).on_hover_text(tr("Fill opacity"));
+                                        let resp = crate::ai_widgets::slider(ui, &mut v, 0.0..=60.0, None).on_hover_text(tr("Fill opacity"));
                                         if resp.changed() {
                                             set(
                                                 app,
@@ -761,6 +761,12 @@ pub fn pointer(app: &mut PhotocraftApp, ev: ToolEvent) -> bool {
         }
     }
     true
+}
+
+/// The pointer's gesture was cancelled (another window took it, Escape): the box being drawn,
+/// moved or resized is dropped, and the boxes stay as they were.
+pub(crate) fn cancel_drag(app: &mut PhotocraftApp) {
+    app.ui.ai_gen.regions.drag = None;
 }
 
 /// A double-click on the canvas: on a box being edited, type its description.

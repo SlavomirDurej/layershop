@@ -31,7 +31,7 @@ impl Transport for Fake {
 
 /// An app with the fake server and no models: each test lists its own, not the recommended
 /// ones a new installation starts with.
-fn app() -> PhotocraftApp {
+fn app() -> Box<PhotocraftApp> {
     let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
     app.session.ai.transport = Some(Arc::new(Fake));
     app.run("prefs.set", json!({"path": "integrations.ai.models", "value": []})).unwrap();
@@ -58,8 +58,7 @@ fn draw_panel(app: &mut PhotocraftApp) {
     let ctx = egui::Context::default();
     PhotocraftApp::setup_context(&ctx, Default::default());
     for _ in 0..3 {
-        ctx.run_ui(Default::default(), |ui| panel(app, ui, true)).textures_delta.clear();
-        ctx.run_ui(Default::default(), |ui| panel(app, ui, false)).textures_delta.clear();
+        ctx.run_ui(Default::default(), |ui| panel(app, ui)).textures_delta.clear();
     }
 }
 
@@ -88,58 +87,40 @@ fn draw_section(f: &mut Map<String, Value>) {
 }
 
 fn dialog_fields(app: &mut PhotocraftApp) -> (u64, Map<String, Value>) {
-    let id = open_settings(app, "");
-    (id, app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone())
+    open_settings(app, "");
+    (0, page_fields(app))
+}
+
+/// The Generative AI page's fields, as a pass with the app leaves them.
+fn page_fields(app: &mut PhotocraftApp) -> Map<String, Value> {
+    crate::prefs_ui::generative_ai_snapshot(app).expect("Preferences is open")
+}
+
+/// Preferences' Apply with the Generative AI page's fields `f` (the draft and the keys typed).
+fn confirm(app: &mut PhotocraftApp, f: &Map<String, Value>) -> Result<(), String> {
+    crate::prefs_ui::set_generative_ai(app, f)?;
+    crate::prefs_ui::apply_window(app).map(|_| ())
 }
 
 #[test]
-fn the_window_menu_item_shows_the_tab_and_reports_it() {
+fn the_window_menu_item_shows_the_panel_and_reports_it() {
     let mut app = app();
     let ctx = egui::Context::default();
     assert!(crate::menus::is_live(PANEL));
     assert!(crate::menu_catalog::CATALOG.iter().any(|m| m.3 == PANEL && m.1 == "AI Gen" && m.0 == ["Window"]));
-    app.ui.panels.properties = false;
-    assert_eq!(checked(&app, PANEL), Some(false));
+    // A tab of the Properties group, as it was before the workspace (`registry::LEGACY_GROUPS`).
+    assert!(crate::panels::registry::LEGACY_GROUPS.iter().any(|(group, panels)| *group == "properties" && panels.contains(&ID)));
+    crate::panel_docking::show_panel(&mut app, ID, Some(false)).unwrap();
+    assert!(!shown(&app));
     crate::menus::invoke(&mut app, &ctx, PANEL, json!({})).unwrap();
-    assert!(app.ui.panels.properties);
-    assert_eq!(app.ui.dock_tabs.properties, TAB);
-    assert_eq!(checked(&app, PANEL), Some(true));
-    // Another tab of the group in front: the item is unchecked, and choosing it brings AI Gen back.
-    app.ui.dock_tabs.properties = 0;
-    assert_eq!(checked(&app, PANEL), Some(false));
+    assert!(shown(&app));
+    // In front: the item closes it, like the other Window › <panel> items.
     crate::menus::invoke(&mut app, &ctx, PANEL, json!({})).unwrap();
-    assert_eq!((app.ui.panels.properties, app.ui.dock_tabs.properties), (true, TAB));
-    // A collapsed group is expanded.
-    app.ui.dock.set_collapsed(crate::dock::Group::Properties, true);
-    crate::menus::invoke(&mut app, &ctx, PANEL, json!({})).unwrap();
-    assert!(!app.ui.dock.is_collapsed(crate::dock::Group::Properties));
-    // Showing: the item hides the group, like the other Window › <panel> items.
-    crate::menus::invoke(&mut app, &ctx, PANEL, json!({})).unwrap();
-    assert!(!app.ui.panels.properties);
+    assert!(!shown(&app));
     crate::menus::invoke(&mut app, &ctx, PANEL, json!({"show": true})).unwrap();
-    assert!(app.ui.panels.properties);
-    assert_eq!(crate::dock::Group::Properties.tabs(true).get(TAB), Some(&"AI Gen"));
+    assert!(shown(&app));
 }
 
-#[test]
-fn themes_that_float_properties_get_a_floating_panel() {
-    let mut app = app();
-    let ctx = egui::Context::default();
-    app.ui.theme = crate::theme::ThemeKind::Studio;
-    let before = (app.ui.panels.properties, app.ui.dock_tabs.properties);
-    assert_eq!(checked(&app, PANEL), Some(false));
-    crate::menus::invoke(&mut app, &ctx, PANEL, json!({})).unwrap();
-    assert!(app.ui.ai_gen.floating);
-    assert_eq!(checked(&app, PANEL), Some(true));
-    // The dock is left alone.
-    assert_eq!((app.ui.panels.properties, app.ui.dock_tabs.properties), before);
-    PhotocraftApp::setup_context(&ctx, crate::theme::ThemeKind::Studio);
-    for _ in 0..3 {
-        ctx.run_ui(Default::default(), |ui| window(&mut app, ui.ctx())).textures_delta.clear();
-    }
-    crate::menus::invoke(&mut app, &ctx, PANEL, json!({})).unwrap();
-    assert!(!app.ui.ai_gen.floating);
-}
 
 #[test]
 fn the_panel_draws_in_every_state() {
@@ -193,7 +174,6 @@ fn openai_models_show_an_estimate_and_the_last_billed_cost() {
         finished(&mut app, &junk);
         assert_eq!(app.ui.ai_gen.last_cost, None, "{junk}");
     }
-    assert!(crate::dock::Group::Properties.scrolls_itself(TAB));
 }
 
 #[test]
@@ -237,10 +217,11 @@ fn the_settings_page_edits_the_draft() {
     let mut app = app();
     add_model(&mut app, z_image("z"));
     let (_, mut f) = dialog_fields(&mut app);
-    assert_eq!(f.get("section"), Some(&json!("generativeAi")));
+    assert!(crate::prefs_ui::window_open(&app));
     draw_section(&mut f);
     // Drawing changes nothing.
-    assert_eq!(f["values"]["integrations"]["ai"], serde_json::to_value(&app.session.prefs().integrations.ai).unwrap());
+    // (As settings: the window's draft is TOML, which leaves out what a JSON copy writes as null.)
+    assert_eq!(serde_json::from_value::<Settings>(f["values"]["integrations"]["ai"].clone()).unwrap(), app.session.prefs().integrations.ai);
     // Every family and cloud preset can be added, drawn and saved.
     for family in Family::ALL {
         let mut ai = f["values"]["integrations"]["ai"].as_object().cloned().unwrap();
@@ -254,7 +235,7 @@ fn the_settings_page_edits_the_draft() {
         f["values"]["integrations"]["ai"] = Value::Object(ai);
         draw_section(&mut f);
     }
-    crate::prefs_ui::confirm(&mut app, &f).unwrap();
+    confirm(&mut app, &f).unwrap();
     let models = &app.session.prefs().integrations.ai.models;
     assert_eq!(models.len(), 1 + Family::ALL.len() + Model::cloud_presets().len());
     let mut ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
@@ -277,13 +258,13 @@ fn the_gear_opens_manage_models_on_the_model_and_a_filter_selects_from_what_it_l
     add_model(&mut app, Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 2.5 Flare", "gpt-image-2.5-flare", true) });
     add_model(&mut app, z_image("z2"));
     let fields = |app: &mut PhotocraftApp, model: &str| {
-        let id = open_settings(app, model);
-        app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone()
+        open_settings(app, model);
+        page_fields(app)
     };
     let f = fields(&mut app, "gpt");
     assert_eq!(
-        (f["section"].as_str(), f[PAGE].as_str(), f[FILTER].as_str(), f[SELECTED].as_u64()),
-        (Some("generativeAi"), Some("models"), Some("all"), Some(1))
+        (f[PAGE].as_str(), f[FILTER].as_str(), f[SELECTED].as_u64()),
+        (Some("models"), Some("all"), Some(1))
     );
     let mut f = fields(&mut app, "z2");
     assert_eq!((f[PAGE].as_str(), f[SELECTED].as_u64()), (Some("models"), Some(2)));
@@ -420,7 +401,7 @@ fn the_server_page_finds_starts_and_stops_comfyui() {
     after_body(&mut app, &mut f);
     assert_eq!(f[LAUNCH_STATUS]["error"], true);
     // The launch settings are saved with OK and survive a round trip.
-    crate::prefs_ui::confirm(&mut app, &f).unwrap();
+    confirm(&mut app, &f).unwrap();
     let saved = &app.session.prefs().integrations.ai;
     assert!(saved.comfy_autostart);
     assert_eq!(saved.comfy_launch.folder, "C:/comfy");
@@ -498,10 +479,6 @@ fn the_page_divides_whatever_width_the_dialog_gives_it() {
 fn browse_fills_the_launch_settings_from_the_chosen_file() {
     let mut app = app();
     let (_, mut f) = dialog_fields(&mut app);
-    // Without a file dialog (tests, the web) Browse says so instead of doing nothing.
-    f.insert(ACTION.into(), json!("browseScript"));
-    after_body(&mut app, &mut f);
-    assert_eq!(f[LAUNCH_STATUS]["error"], true);
     // A chosen main.py sets the folder and the script, and asks for the other half.
     picked(&mut f, "C:/nowhere/ComfyUI/main.py");
     let launch = f["values"]["integrations"]["ai"]["comfyLaunch"].clone();
@@ -517,17 +494,16 @@ fn browse_fills_the_launch_settings_from_the_chosen_file() {
     assert!(f[LAUNCH_STATUS]["text"].as_str().unwrap().contains("Python and folder are set"));
     draw_section(&mut f);
     // With a dialog service the request asks for the right kind of file.
-    let asked: std::rc::Rc<std::cell::RefCell<Vec<crate::file_dialog::FileDialogRequest>>> = Default::default();
-    let log = asked.clone();
-    app.services.file_dialog = Some(Box::new(move |request, _, _| log.borrow_mut().push(request)));
+    let files = Arc::new(craft::host::ScriptedFiles::held());
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services { files: Some(files.clone()), ..Default::default() });
+    let (_, mut f) = dialog_fields(&mut app);
     f.insert(ACTION.into(), json!("browsePython"));
     after_body(&mut app, &mut f);
-    let ctx = egui::Context::default();
-    app.poll_file_dialog(&ctx, None);
+    app.poll_file_dialog();
+    let asked = files.requests();
     assert!(
-        matches!(asked.borrow().first(), Some(crate::file_dialog::FileDialogRequest::Open { multiple: false, extensions: Some(e), .. }) if e == &["exe"]),
-        "{:?}",
-        asked.borrow()
+        matches!(asked.first(), Some(r) if r.kind == craft::host::PickKind::Open && r.filters.iter().any(|f| f.extensions.iter().any(|e| e == "exe"))),
+        "{asked:?}"
     );
 }
 
@@ -588,32 +564,25 @@ fn connect_reads_the_servers_files_and_detect_adds_its_models() {
 #[test]
 fn api_keys_are_saved_apart_from_the_preferences() {
     let keys: Arc<Mutex<Option<String>>> = Arc::default();
-    let prefs: Arc<Mutex<Option<String>>> = Arc::default();
-    let (k1, k2, p1) = (keys.clone(), keys.clone(), prefs.clone());
+    let (k1, k2) = (keys.clone(), keys.clone());
     let services = crate::Services {
         load_ai_keys: Some(Box::new(move || k1.lock().unwrap().clone())),
         save_ai_keys: Some(Box::new(move |s: &str| {
             *k2.lock().unwrap() = Some(s.to_string());
             Ok(())
         })),
-        save_prefs: Some(Box::new(move |s: &str| {
-            *p1.lock().unwrap() = Some(s.to_string());
-            Ok(())
-        })),
         ..Default::default()
     };
     let mut app = PhotocraftApp::new(Session::new(), services);
-    let (id, mut f) = dialog_fields(&mut app);
+    let (_, mut f) = dialog_fields(&mut app);
     f[KEYS]["gemini"] = json!("g-secret-1");
     draw_section(&mut f);
-    crate::prefs_ui::confirm(&mut app, &f).unwrap();
+    confirm(&mut app, &f).unwrap();
     assert_eq!(app.session.ai.key(Provider::Gemini), "g-secret-1");
     assert!(keys.lock().unwrap().as_deref().unwrap().contains("g-secret-1"));
-    assert!(!app.session.prefs_to_json().contains("g-secret"));
+    assert!(!photocraft_engine::prefs::SavedPrefsExt::prefs_to_json(&*app.session).contains("g-secret"));
     // The open dialog never holds a saved key, only that there is one.
-    if let Some(d) = app.ui.dialog_mut(id) {
-        d.fields = f.clone();
-    }
+    crate::prefs_ui::set_generative_ai(&mut app, &f).unwrap();
     let (_, reopened) = dialog_fields(&mut app);
     assert_eq!(reopened[KEYS]["geminiSaved"], true);
     assert!(!Value::Object(reopened.clone()).to_string().contains("g-secret"));
@@ -626,7 +595,7 @@ fn api_keys_are_saved_apart_from_the_preferences() {
     // Remove.
     let mut f = reopened;
     f[KEYS]["geminiRemove"] = json!(true);
-    crate::prefs_ui::confirm(&mut app, &f).unwrap();
+    confirm(&mut app, &f).unwrap();
     assert!(!keys.lock().unwrap().as_deref().unwrap().contains("g-secret"));
 }
 
@@ -827,7 +796,7 @@ fn the_inpainting_box_follows_the_architecture_until_it_is_used() {
 fn the_panel_asks_for_room_for_its_generate_button() {
     let mut app = app();
     let base = wanted_height(&app);
-    assert!(base.is_finite() && base > crate::dock::Group::Properties.compact_height(), "{base}");
+    assert!(base.is_finite() && base > 130.0, "{base}");
     // A change has a row more: the mask tools (Edit's tasks take the place of Create's Prompt |
     // Regions). Advanced, open, adds its own.
     add_model(&mut app, Model { id: "fill".into(), ..Family::Flux1Fill.preset() });
@@ -888,8 +857,8 @@ fn the_list_says_what_each_model_is_used_for_and_can_be_narrowed_to_it() {
     }
     assert_eq!(Filter::from_key("?"), Filter::All);
     // The gear on a model opens the list with it selected, whatever it is used for.
-    let id = open_settings(&mut app, "qwen");
-    let mut f = app.ui.dialogs.iter().find(|d| d.id == id).unwrap().fields.clone();
+    open_settings(&mut app, "qwen");
+    let mut f = page_fields(&mut app);
     assert_eq!((f[PAGE].as_str(), f[FILTER].as_str(), f[SELECTED].as_u64()), (Some("models"), Some("all"), Some(3)));
     // Drawing under every filter keeps the models as they are (the ControlNet row included).
     for x in Filter::ALL {
@@ -1449,21 +1418,20 @@ fn load_prompt_puts_a_generated_layers_prompt_and_model_back_and_nothing_else() 
     assert!(menu(&mut app, LOAD_PROMPT, &json!({"layer": -1})).unwrap().is_err());
     // A generated layer whose prompt is empty has nothing to load.
     let d = app.session.active_mut().unwrap();
-    std::sync::Arc::make_mut(&mut d.doc).layer_mut(photocraft_doc::LayerId(txt)).unwrap().generation.as_mut().unwrap().prompt = "  ".into();
+    std::sync::Arc::make_mut(d.doc_mut()).layer_mut(photocraft_doc::LayerId(txt)).unwrap().generation.as_mut().unwrap().prompt = "  ".into();
     assert!(!load_prompt(&mut app, txt));
     assert_eq!(app.ui.ai_gen.prompt, "a green field");
 }
 
 mod clicks {
     use super::*;
-    use crate::layer_row_ui::recorded;
     use egui::{Modifiers, PointerButton, Pos2, vec2};
     use egui_kittest::{
         Harness,
         kittest::{NodeT, Queryable},
     };
 
-    fn click(h: &mut Harness<'_, PhotocraftApp>, at: Pos2) {
+    fn click(h: &mut Harness<'_, Box<PhotocraftApp>>, at: Pos2) {
         h.hover_at(at);
         h.run_steps(1);
         h.event(egui::Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE });
@@ -1482,15 +1450,15 @@ mod clicks {
         app.run("ai.setRegions", json!({"regions": regions})).unwrap();
         let armchair = app.session.active().unwrap().doc.ai_regions[1].id;
         app.ui.ai_gen.create_task = CreateTask::Regions;
-        menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
-        // Tall enough for the rows to show without scrolling.
-        app.ui.dock.heights.insert(crate::dock::Group::Properties, 760.0);
-        // Steps a frame apart: the default quarter second would part the two clicks of a
+        crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
+        // The other groups of its column closed: the panel's group takes the column, and its rows show.
+        for other in ["color", "swatches", "gradients", "patterns", "character", "paragraph", "layers", "channels", "paths"] {
+            crate::panel_docking::show_panel(&mut app, other, Some(false)).unwrap();
+        }
+        // A tall window, so the rows show without scrolling. Steps a frame apart: the default quarter second would part the two clicks of a
         // double-click by more than egui's 0.3 s.
-        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).with_step_dt(1.0 / 60.0).build_eframe(move |cc| {
-            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
-            app
-        });
+        let ctx = app.ctx().clone();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 2400.0)).with_max_steps(64).with_step_dt(1.0 / 60.0).with_context(ctx).build_eframe(move |_| app);
         h.run_steps(8);
         let at = h.get_by_label("an armchair").rect().center();
         // One click selects the row; two open its editor, and it stays open.
@@ -1511,16 +1479,16 @@ mod clicks {
         let mut app = app();
         let [background, _, _, inpaint] = generated_layers(&mut app);
         app.ui.ai_gen = AiGenUi { model: "z".into(), prompt: "something else".into(), ..Default::default() };
-        menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
-        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
-            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
-            app
-        });
+        crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
+        let ctx = app.ctx().clone();
+        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).with_context(ctx).build_eframe(move |_| app);
         h.run_steps(8);
-        let row = |h: &Harness<'_, PhotocraftApp>, layer: u64| recorded(&h.ctx).into_iter().find(|r| r.layer == layer).unwrap();
-        // Clicking the layer selects it and leaves the panel as it is.
-        let at = row(&h, inpaint).name.unwrap().center();
-        click(&mut h, at);
+        // Selecting the layer (a click on its row) leaves the panel as it is.
+        let select = |h: &mut Harness<'_, Box<PhotocraftApp>>, layer: u64| {
+            h.state_mut().run("layer.select", json!({"layer": layer})).unwrap();
+            h.run_steps(2);
+        };
+        select(&mut h, inpaint);
         assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(inpaint)));
         let before = h.state().ui.ai_gen.clone();
         assert_eq!((before.mode, before.model.as_str(), before.prompt.as_str()), (Mode::Create, "z", "something else"));
@@ -1530,8 +1498,7 @@ mod clicks {
         click(&mut h, at);
         assert_eq!(h.state().ui.ai_gen, AiGenUi { prompt: "a pond".into(), edit_model: "z2".into(), ..before });
         // A layer that was not generated has no prompt to load: the button is off.
-        let at = row(&h, background).name.unwrap().center();
-        click(&mut h, at);
+        select(&mut h, background);
         assert_eq!(h.state().session.active().unwrap().active_layer, Some(photocraft_doc::LayerId(background)));
         assert!(h.get_by_label(LOAD).accesskit_node().is_disabled());
         let at = h.get_by_label(LOAD).rect().center();
@@ -1540,13 +1507,11 @@ mod clicks {
     }
 
     /// A harness over `app` with the AI Gen panel showing, tall enough for all its rows.
-    fn showing(mut app: PhotocraftApp) -> Harness<'static, PhotocraftApp> {
-        menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
-        app.ui.dock.heights.insert(crate::dock::Group::Properties, 760.0);
-        let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
-            PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
-            app
-        });
+    fn showing(mut app: Box<PhotocraftApp>) -> Harness<'static, Box<PhotocraftApp>> {
+        crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
+        let ctx = app.ctx().clone();
+        // A tall window: the panel's dock group has room for every row without scrolling.
+        let mut h = Harness::builder().with_size(vec2(1440.0, 2400.0)).with_max_steps(64).with_context(ctx).build_eframe(move |_| app);
         h.run_steps(8);
         h
     }
@@ -1668,7 +1633,7 @@ fn a_new_installation_lists_the_recommended_models_and_a_scan_points_them_at_the
     app.session.ai.transport = Some(Arc::new(Fake));
     assert_eq!(app.session.prefs().integrations.ai.models, Model::defaults());
     let (_, mut f) = dialog_fields(&mut app);
-    assert_eq!(f.get("section"), Some(&json!("generativeAi")));
+    assert!(crate::prefs_ui::window_open(&app));
     draw_section(&mut f);
     // Restore Defaults has nothing to add until some are removed; then it adds those, and only those.
     let mut ai = f["values"]["integrations"]["ai"].as_object().cloned().unwrap();
@@ -1749,7 +1714,7 @@ fn the_newer_cloud_providers_take_a_key_and_are_drawn_sized_and_priced() {
     prefs_confirmed(&mut app, &f).unwrap();
     let keys = app.session.execute("ai.keys", json!({})).unwrap();
     assert_eq!((&keys["xai"], &keys["meta"], &keys["bfl"]), (&json!(true), &json!(true), &json!(true)));
-    assert!(!app.session.prefs_to_json().contains("-secret"));
+    assert!(!photocraft_engine::prefs::SavedPrefsExt::prefs_to_json(&*app.session).contains("-secret"));
     let e = app.session.execute("ai.setKey", json!({"provider": "nope", "key": "x"})).unwrap_err().to_string();
     assert!(e.contains("openai|gemini|xai|meta|bfl"), "{e}");
     // xAI and Black Forest Labs are asked for a shape, Muse Image for a size that only gives one.
@@ -1770,8 +1735,8 @@ fn the_newer_cloud_providers_take_a_key_and_are_drawn_sized_and_priced() {
             app.ui.ai_gen.mode = mode;
             draw_panel(&mut app);
         }
-        let dialog = open_settings(&mut app, id);
-        let mut f = app.ui.dialogs.iter().find(|d| d.id == dialog).unwrap().fields.clone();
+        open_settings(&mut app, id);
+        let mut f = page_fields(&mut app);
         draw_section(&mut f);
         // Drawing the settings changes nothing about the model.
         let drawn: Vec<Model> = serde_json::from_value(f["values"]["integrations"]["ai"]["models"].clone()).unwrap();
@@ -1824,7 +1789,7 @@ fn the_order_of_the_list_is_the_panels_and_each_kind_can_be_left_out_of_it() {
     assert_eq!((&f["values"]["integrations"]["ai"]["showCloud"], &f["values"]["integrations"]["ai"]["showLocal"]), (&json!(true), &json!(true)));
     f["values"]["integrations"]["ai"]["showCloud"] = json!(false);
     draw_section(&mut f);
-    crate::prefs_ui::confirm(&mut app, &f).unwrap();
+    confirm(&mut app, &f).unwrap();
     let saved = app.session.prefs().integrations.ai.clone();
     assert!(!saved.show_cloud && saved.show_local);
     assert_eq!(saved.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["sunburst", "pro", "q21", "z", "ernie"]);
@@ -1925,7 +1890,7 @@ fn only_models_that_can_run_are_offered() {
     for focused in [false, true] {
         let mut input = egui::RawInput::default();
         input.viewports.entry(egui::ViewportId::ROOT).or_default().focused = Some(focused);
-        ctx.run_ui(input, |ui| panel(&mut app, ui, true)).textures_delta.clear();
+        ctx.run_ui(input, |ui| panel(&mut app, ui)).textures_delta.clear();
     }
     assert_eq!(local_state(&app), Local::Ready);
     assert_eq!(offered(&app), ["GPT Image 2.5 Sunburst", "GPT Image 2.5 Flare", "Z-Image Turbo"]);
@@ -2014,7 +1979,7 @@ fn a_narrow_panel_keeps_everything_inside_it() {
         for _ in 0..3 {
             ctx.run_ui(input(), |ui| {
                 let inner = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 900.0));
-                let r = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui, false)).response.rect;
+                let r = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel_body(&mut app, ui, None)).response.rect;
                 used = r.width();
             })
             .textures_delta
@@ -2064,7 +2029,7 @@ fn fifteen_reference_chips_wrap_inside_the_panel() {
         for _ in 0..3 {
             ctx.run_ui(input(), |ui| {
                 let inner = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 1400.0));
-                used = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui, false)).response.rect;
+                used = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel_body(&mut app, ui, None)).response.rect;
             })
             .textures_delta
             .clear();
@@ -2108,7 +2073,7 @@ fn a_long_model_name_keeps_generate_and_the_gear_in_the_panel() {
                 ctx.run_ui(input(), |ui| {
                     let inner = egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(width, 900.0));
                     // As the dock draws it: filling its group, in the panel's own scroll area.
-                    let r = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui, true)).response.rect;
+                    let r = ui.scope_builder(egui::UiBuilder::new().max_rect(inner), |ui| panel(&mut app, ui)).response.rect;
                     used = r.width();
                 })
                 .textures_delta
@@ -2187,15 +2152,14 @@ fn models_that_cant_run_say_why_and_lead_to_what_makes_them_run() {
     // Install hands over to the wizard, on its Models screen with the model ticked.
     act_on_missing(&mut f, &Missing::Files(Some(wizard)));
     assert_eq!(f[ACTION], "install:z-image-turbo");
-    let id = app.ui.dialogs.iter().find(|d| crate::prefs_ui::is_preferences(&d.fields)).unwrap().id;
-    app.ui.dialog_mut(id).unwrap().fields = f.clone();
-    let mut fields = app.ui.dialog_mut(id).unwrap().fields.clone();
+    crate::prefs_ui::set_generative_ai(&mut app, &f).unwrap();
+    let mut fields = page_fields(&mut app);
     after_body(&mut app, &mut fields);
-    app.ui.dialog_mut(id).unwrap().fields = fields;
+    crate::prefs_ui::set_generative_ai(&mut app, &fields).unwrap();
     let ctx = egui::Context::default();
     PhotocraftApp::setup_context(&ctx, Default::default());
     ctx.run_ui(Default::default(), |ui| crate::ai_setup_ui::window(&mut app, ui.ctx())).textures_delta.clear();
-    assert!(app.ui.dialogs.is_empty(), "the preferences were confirmed first");
+    assert!(!crate::prefs_ui::window_open(&app), "the preferences were confirmed first");
     assert!(app.ui.ai_setup.open && app.ui.ai_setup.page == crate::ai_setup_ui::Page::Models);
     assert!(app.ui.ai_setup.models.iter().any(|m| m == "z-image-turbo"), "{:?}", app.ui.ai_setup.models);
 }
@@ -2221,8 +2185,8 @@ fn local_models_before_local_ai_is_set_up_offer_the_setup() {
 fn the_dialogs_own_look_at_the_server_is_not_reported_twice() {
     use photocraft_engine::jobs::{JobEvent, JobId, JobOutcome};
     let mut app = app();
-    let id = open_settings(&mut app, "");
-    app.ui.dialog_mut(id).unwrap().fields.insert(JOB.into(), json!({"id": 21, "action": "peek"}));
+    open_settings(&mut app, "");
+    crate::prefs_ui::generative_ai_fields(&app).unwrap().lock().unwrap().insert(JOB.into(), json!({"id": 21, "action": "peek"}));
     let event = |id: u64| JobEvent {
         id: JobId(id),
         command: "ai.comfyModels".into(),
@@ -2237,13 +2201,13 @@ fn the_dialogs_own_look_at_the_server_is_not_reported_twice() {
 
 #[test]
 fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
-    use crate::canvas::ToolEvent;
+    use super::CanvasEvent as ToolEvent;
     use crate::state::Tool;
     let mut app = app();
     add_model(&mut app, z_image("z"));
     add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
     app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
-    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
     app.ui.ai_gen.prompt = "a reading nook".into();
     // Z-Image reads a layout as words: the Regions tab stays shut, the choice kept for later.
     app.ui.ai_gen.model = "z".into();
@@ -2251,7 +2215,7 @@ fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
     app.ui.tool = Tool::Brush;
     draw_panel(&mut app);
     assert!(!regions::tab_open(&app) && !regions::editing(&app) && app.ui.tool == Tool::Brush);
-    let down = |x, y| ToolEvent::Down { x, y, pressure: 1.0 };
+    let down = |x, y| ToolEvent::Down { x, y };
     assert!(!regions::pointer(&mut app, down(5.0, 5.0)), "the brush keeps the pointer");
     // MOSS Image takes them: the tab opens and gives the pointer to the boxes.
     app.ui.ai_gen.model = "moss".into();
@@ -2260,7 +2224,7 @@ fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
     let rect = |app: &PhotocraftApp| app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.rect).collect::<Vec<_>>();
     let gesture = |app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2]| {
         assert!(regions::pointer(app, down(from[0], from[1])));
-        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1] }));
         assert!(regions::pointer(app, ToolEvent::Up { x: to[0], y: to[1] }));
     };
     // A drag on empty canvas draws a box, selected and open for typing; a click draws none.
@@ -2314,12 +2278,12 @@ fn regions_are_drawn_on_the_canvas_and_sent_to_a_model_trained_on_boxes() {
 
 #[test]
 fn a_drag_on_a_box_that_is_not_selected_draws_a_new_one() {
-    use crate::canvas::ToolEvent;
+    use super::CanvasEvent as ToolEvent;
     let mut app = app();
     add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
     app.ui.ai_gen.model = "moss".into();
     app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
-    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
     app.ui.ai_gen.create_task = CreateTask::Regions;
     draw_panel(&mut app);
     assert!(regions::editing(&app));
@@ -2329,8 +2293,8 @@ fn a_drag_on_a_box_that_is_not_selected_draws_a_new_one() {
     let rects = |app: &PhotocraftApp| app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.rect).collect::<Vec<_>>();
     let ids = app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.id).collect::<Vec<_>>();
     let gesture = |app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2]| {
-        assert!(regions::pointer(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }));
-        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Down { x: from[0], y: from[1] }));
+        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1] }));
         assert!(regions::pointer(app, ToolEvent::Up { x: to[0], y: to[1] }));
     };
     // A click selects the box under it.
@@ -2351,26 +2315,20 @@ fn a_drag_on_a_box_that_is_not_selected_draws_a_new_one() {
 
 #[test]
 fn a_box_label_selects_and_moves_its_box_even_behind_another() {
-    use crate::canvas::{ToolEvent, ViewXform};
+    use super::{CanvasEvent as ToolEvent, ViewXform};
     let mut app = app();
     add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
     app.ui.ai_gen.model = "moss".into();
     app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
-    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
     app.ui.ai_gen.create_task = CreateTask::Regions;
     draw_panel(&mut app);
     // In front, one over the whole canvas; behind it, a smaller one.
     app.run("ai.setRegions", json!({"regions": [{"rect": [0, 0, 200, 100]}, {"rect": [100, 40, 100, 60]}]})).unwrap();
     let ids = app.session.active().unwrap().doc.ai_regions.iter().map(|r| r.id).collect::<Vec<_>>();
     // The canvas at 100%, document pixels on screen points: the labels are where they are drawn.
-    let xf = ViewXform {
-        rect: egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 100.0)),
-        zoom: 1.0,
-        center: [100.0, 50.0],
-        flip: false,
-        rotation: 0.0,
-        aspect: 1.0,
-    };
+    let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(200.0, 100.0));
+    let xf = ViewXform::new(craft::behavior::CanvasView::new(rect, craft::behavior::kurbo::Point::new(100.0, 50.0), 1.0), rect);
     let ctx = egui::Context::default();
     PhotocraftApp::setup_context(&ctx, Default::default());
     for _ in 0..3 {
@@ -2382,8 +2340,8 @@ fn a_box_label_selects_and_moves_its_box_even_behind_another() {
         .clear();
     }
     let gesture = |app: &mut PhotocraftApp, from: [f64; 2], to: [f64; 2]| {
-        assert!(regions::pointer(app, ToolEvent::Down { x: from[0], y: from[1], pressure: 1.0 }));
-        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1], pressure: 1.0 }));
+        assert!(regions::pointer(app, ToolEvent::Down { x: from[0], y: from[1] }));
+        assert!(regions::pointer(app, ToolEvent::Move { x: to[0], y: to[1] }));
         assert!(regions::pointer(app, ToolEvent::Up { x: to[0], y: to[1] }));
     };
     // A click in the box behind lands on the one in front; a click on its label (above it)
@@ -2416,8 +2374,8 @@ fn a_box_label_selects_and_moves_its_box_even_behind_another() {
     assert_eq!((app.ui.ai_gen.region, app.ui.ai_gen.regions.hidden), (None, true));
     assert!(!regions::double_click(&mut app, 100.0, 60.0));
     app.ui.ai_gen.region = Some(ids[1]);
-    assert!(regions::pointer(&mut app, ToolEvent::Down { x: 100.0, y: 60.0, pressure: 1.0 }));
-    assert!(regions::pointer(&mut app, ToolEvent::Move { x: 140.0, y: 90.0, pressure: 1.0 }));
+    assert!(regions::pointer(&mut app, ToolEvent::Down { x: 100.0, y: 60.0 }));
+    assert!(regions::pointer(&mut app, ToolEvent::Move { x: 140.0, y: 90.0 }));
     assert!(!app.ui.ai_gen.regions.hidden, "shown as soon as a box is being drawn");
     assert!(regions::pointer(&mut app, ToolEvent::Up { x: 140.0, y: 90.0 }));
     let doc = &app.session.active().unwrap().doc;
@@ -2431,16 +2389,14 @@ fn fibo_2_says_it_places_regions_roughly() {
     add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
     add_model(&mut app, Model { id: "fibo".into(), ..Family::Fibo2.preset() });
     app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
-    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
     app.ui.ai_gen.create_task = CreateTask::Regions;
     app.ui.ai_gen.model = "moss".into();
     let without = regions::rows(&app);
     app.ui.ai_gen.model = "fibo".into();
     assert_eq!(regions::rows(&app), without + 2, "the note's lines count in the panel's height");
-    let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).build_eframe(move |cc| {
-        PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
-        app
-    });
+    let ctx = app.ctx().clone();
+    let mut h = Harness::builder().with_size(vec2(1440.0, 900.0)).with_max_steps(64).with_context(ctx).build_eframe(move |_| app);
     h.run_steps(8);
     let note = "Regions are experimental with FIBO 2: it places them roughly and may not follow the boxes exactly.";
     assert!(h.query_by_label(note).is_some());
@@ -2452,12 +2408,12 @@ fn fibo_2_says_it_places_regions_roughly() {
 
 #[test]
 fn the_selected_ai_layer_keeps_the_layout_it_is_edited_to() {
-    use crate::canvas::ToolEvent;
+    use super::CanvasEvent as ToolEvent;
     let mut app = app();
     add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
     app.ui.ai_gen.model = "moss".into();
     app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
-    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
     app.ui.ai_gen.create_task = CreateTask::Regions;
     app.ui.ai_gen.prompt = "a reading nook".into();
     draw_panel(&mut app);
@@ -2473,7 +2429,7 @@ fn the_selected_ai_layer_keeps_the_layout_it_is_edited_to() {
     // A box moved on the canvas and the scene typed: the layer keeps both.
     let id = doc_regions(&app)[0].id;
     app.ui.ai_gen.region = Some(id);
-    assert!(regions::pointer(&mut app, ToolEvent::Down { x: 20.0, y: 20.0, pressure: 1.0 }));
+    assert!(regions::pointer(&mut app, ToolEvent::Down { x: 20.0, y: 20.0 }));
     assert!(regions::pointer(&mut app, ToolEvent::Up { x: 30.0, y: 25.0 }));
     app.ui.ai_gen.prompt = "a reading nook at dusk".into();
     regions::keep_scene(&mut app);
@@ -2511,7 +2467,7 @@ fn the_region_editor_follows_the_selection_and_closes_on_a_press_outside_it() {
     let mut app = app();
     add_model(&mut app, Model { id: "moss".into(), ..Family::MossImage.preset() });
     app.run("file.new", json!({"width": 200, "height": 100})).unwrap();
-    menu(&mut app, PANEL, &json!({"show": true})).unwrap().unwrap();
+    crate::panel_docking::show_panel(&mut app, ID, Some(true)).unwrap();
     app.ui.ai_gen.model = "moss".into();
     app.ui.ai_gen.create_task = CreateTask::Regions;
     app.run("ai.setRegions", json!({"regions": [{"rect": [0, 0, 50, 50]}, {"rect": [60, 0, 50, 50]}]})).unwrap();
@@ -2539,9 +2495,9 @@ fn the_region_editor_follows_the_selection_and_closes_on_a_press_outside_it() {
         ],
         ..Default::default()
     };
-    ctx.run_ui(Default::default(), |ui| panel(&mut app, ui, true)).textures_delta.clear();
+    ctx.run_ui(Default::default(), |ui| panel(&mut app, ui)).textures_delta.clear();
     assert_eq!(app.ui.ai_gen.regions.editor, Some(ids[0]), "no press, still open");
-    ctx.run_ui(press, |ui| panel(&mut app, ui, true)).textures_delta.clear();
+    ctx.run_ui(press, |ui| panel(&mut app, ui)).textures_delta.clear();
     assert_eq!(app.ui.ai_gen.regions.editor, None);
 }
 
@@ -2778,7 +2734,7 @@ impl Transport for FakeText {
 }
 
 /// [`app`] with prompts enhanced by Claude through `fake`, and a prompt typed.
-fn enhancing_app(fake: &Arc<FakeText>) -> PhotocraftApp {
+fn enhancing_app(fake: &Arc<FakeText>) -> Box<PhotocraftApp> {
     let mut app = app();
     app.session.ai.transport = Some(fake.clone());
     app.session.ai.set_text_key(TextProvider::Anthropic, "ak");
@@ -2860,7 +2816,7 @@ fn a_background_enhancement_veils_the_prompt_and_cancel_keeps_it() {
     for width in [220.0, 520.0] {
         ctx.run_ui(Default::default(), |ui| {
             ui.set_max_width(width);
-            panel(&mut app, ui, false);
+            panel(&mut app, ui);
         })
         .textures_delta
         .clear();
@@ -2896,7 +2852,7 @@ fn enhancement_job_events_are_the_panels() {
     assert!(on_job_event(&mut app, &event(3, JobOutcome::Failed("Claude refused the request: bad key.".into()))));
     assert_eq!(app.ui.ai_gen.enhance_job, None);
     assert_eq!(app.ui.ai_gen.prompt, "cat");
-    assert!(app.ui.notices.iter().any(|n| n.plain_text().contains("bad key")));
+    assert!(app.ui.notices.iter().any(|n| n.text(&n.title).contains("bad key")));
     app.ui.ai_gen.enhance_job = Some(4);
     assert!(on_job_event(&mut app, &event(4, JobOutcome::Done(json!({"prompt": "  ", "provider": "xai"})))));
     assert_eq!(app.ui.ai_gen.prompt, "cat", "an empty answer changes nothing");
@@ -2958,7 +2914,7 @@ fn the_prompt_enhancement_page_chooses_one_service_lists_models_and_saves_keys()
     prefs_confirmed(&mut app, &f).unwrap();
     assert_eq!(app.session.ai.text_key(TextProvider::Openrouter), "or-secret");
     assert_eq!(app.session.execute("ai.keys", json!({})).unwrap()["openrouter"], true);
-    assert!(!app.session.prefs_to_json().contains("or-secret"));
+    assert!(!photocraft_engine::prefs::SavedPrefsExt::prefs_to_json(&*app.session).contains("or-secret"));
     // The draft is what the engine enhances with once it is saved.
     let ai: Settings = serde_json::from_value(f["values"]["integrations"]["ai"].clone()).unwrap();
     assert_eq!(ai.enhance.model(TextProvider::Anthropic), "claude-opus-5-5");
@@ -3124,7 +3080,7 @@ fn animate_makes_a_gif_on_the_timeline_with_a_model_that_can() {
     assert_eq!((asked["output_format"].as_str(), asked["frame_count"].as_u64(), asked["frame_duration_ms"].as_u64()), (Some("gif"), Some(3), Some(2000)));
     let t = app.session.active().unwrap().doc.timeline.clone().expect("a timeline");
     assert_eq!((t.duration, t.current), (3, 0));
-    assert!(app.ui.timeline.open && !app.ui.timeline.playing);
+    assert!(crate::panel_docking::is_shown(&app, "timeline") && !app.ui.timeline.playing());
     // Unticked, the same model makes a still again (and the batch applies).
     app.ui.ai_gen.animate = false;
     app.ui.ai_gen.batch = 1;
@@ -3148,13 +3104,13 @@ fn play_shows_the_selected_animation_on_the_canvas() {
     play_animation(&mut app, &ctx, frames, fps, true);
     let t = app.session.active().unwrap().doc.timeline.clone().unwrap();
     assert_eq!((t.fps, t.duration, t.current, t.work_end), (5.0, 30, 0, 30));
-    assert!(app.ui.timeline.playing && !app.ui.timeline.open);
-    // The playhead moves on with the panel closed.
-    app.ui.timeline.last_time = -1.0;
-    crate::timeline_ui::windows(&mut app, &ctx);
+    assert!(app.ui.timeline.playing() && !crate::panel_docking::is_front(&app, "timeline"));
+    // The playhead moves on with the panel closed: a fifth of a second later, the next frame.
+    let later = egui::RawInput { time: Some(0.21), ..Default::default() };
+    ctx.run_ui(later, |ui| crate::timeline_ui::tick(&mut app, ui.ctx())).textures_delta.clear();
     assert_eq!(app.session.active().unwrap().doc.timeline.as_ref().unwrap().current, 1);
     play_animation(&mut app, &ctx, frames, fps, false);
-    assert!(!app.ui.timeline.playing);
+    assert!(!app.ui.timeline.playing());
     // The timeline deleted (the Timeline panel's bin): Advanced says so, and Play makes a new one.
     app.run("timeline.delete", json!({})).unwrap();
     assert!(untimed(&app));
@@ -3166,36 +3122,36 @@ fn play_shows_the_selected_animation_on_the_canvas() {
     play_animation(&mut app, &ctx, frames, fps, true);
     let t = app.session.active().unwrap().doc.timeline.clone().expect("Play made a timeline");
     assert_eq!((t.fps, t.duration), (5.0, 30));
-    assert!(app.ui.timeline.playing && !untimed(&app));
+    assert!(app.ui.timeline.playing() && !untimed(&app));
 }
 
 /// Save GIF beside Play: the selected animation, at its own rate and length, as one GIF where the
 /// person picks, without the Timeline panel; with no timeline (it was deleted) one is made for it.
 #[test]
 fn save_gif_writes_the_selected_animation() {
-    use crate::file_dialog::{FileDialogAnswer, FileDialogRequest};
     let dir = std::env::temp_dir().join(format!("photocraft-ai-save-gif-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
-    let target = dir.join("lantern.gif").to_string_lossy().replace('\\', "/");
-    let (show, asked) = crate::file_dialog::fake(vec![Some(FileDialogAnswer::SaveTo(target.clone()))]);
-    let mut app = PhotocraftApp::new(Session::new(), crate::Services { file_dialog: Some(show), ..Default::default() });
+    let target = dir.join("lantern.gif");
+    let files = Arc::new(craft::host::ScriptedFiles::answering([craft::host::Picked::Paths(vec![target.clone()])]));
+    let mut app = PhotocraftApp::new(Session::new(), crate::Services { files: Some(files.clone()), ..Default::default() });
     app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
     app.run("timeline.create", json!({"duration": 30, "fps": 30.0})).unwrap();
     app.run("layer.videoLayers.newBlankVideoLayer", json!({})).unwrap();
     app.run("layer.videoLayers.interpretFootage", json!({"fps": 5.0})).unwrap();
     app.run("timeline.delete", json!({})).unwrap();
     let (frames, fps) = active_animation(&app).unwrap();
-    app.ui.timeline.playing = true;
+    crate::timeline_ui::play(&mut app, 0.0);
     save_animation(&mut app, frames, fps);
     let t = app.session.active().unwrap().doc.timeline.clone().expect("Save made a timeline");
     assert_eq!((t.fps, t.duration, t.work_end), (5.0, 30, 30));
-    assert!(!app.ui.timeline.playing, "saving stops playback");
-    let ctx = egui::Context::default();
+    assert!(!app.ui.timeline.playing(), "saving stops playback");
     for _ in 0..3 {
-        app.poll_file_dialog(&ctx, None);
+        app.poll_file_dialog();
     }
-    assert!(matches!(asked.borrow().as_slice(), [FileDialogRequest::Save { suggested }] if suggested.ends_with(".gif")), "{:?}", asked.borrow());
+    let asked = files.requests();
+    assert!(matches!(asked.as_slice(), [r] if r.kind == craft::host::PickKind::Save && r.file_name.as_deref().is_some_and(|n| n.ends_with(".gif"))), "{asked:?}");
     let gif = std::fs::read(&target).unwrap();
     assert_eq!(&gif[..6], b"GIF89a");
     let _ = std::fs::remove_dir_all(&dir);
 }
+

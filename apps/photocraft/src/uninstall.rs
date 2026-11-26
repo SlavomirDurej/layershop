@@ -241,11 +241,12 @@ pub fn remove(found: &Survey, choice: Choice) -> Vec<String> {
 /// files the setup installed, wherever they are; the settings saved after (unless they are being
 /// removed too).
 fn remove_through_the_app(settings: &Path, found: &Survey, choice: Choice) -> Vec<String> {
+    use photocraft_engine::prefs::SavedPrefsExt as _;
     let mut s = photocraft_engine::Session::new();
-    let prefs = settings.join("preferences.json");
-    if let Ok(text) = std::fs::read_to_string(&prefs) {
-        let _ = s.load_prefs_json(&text);
-    }
+    // The user's preferences (`config.toml`, or an older `preferences.json`), through the store the
+    // app saves them with.
+    let (mut store, _) = craft::settings::SettingsStore::open_with(photocraft_engine::prefs::store_options(Some(settings)));
+    s.set_saved_prefs(store.get().clone());
     s.ai.transport = Some(Arc::new(photocraft_aigen::UreqTransport::new()));
     s.ai_setup.env = Some(photocraft_engine::ai_setup_cmds::SetupEnv {
         fetch: Arc::new(photocraft_aisetup::fetch::UreqFetch::default()),
@@ -259,8 +260,9 @@ fn remove_through_the_app(settings: &Path, found: &Survey, choice: Choice) -> Ve
     let mut failed = Vec::new();
     match s.execute("ai.setup.remove", json!({"engine": choice.engine, "models": models})) {
         Ok(_) if !choice.settings => {
-            if let Err(e) = photocraft_format::atomic_write(&prefs, s.prefs_to_json().as_bytes()) {
-                failed.push(format!("{}: {e}", prefs.display()));
+            store.set(s.saved_prefs());
+            if let Err(e) = store.flush() {
+                failed.push(format!("{}: {e}", store.path().unwrap_or(settings).display()));
             }
         }
         Ok(_) => {}
@@ -367,7 +369,7 @@ fn ask_in_a_window(found: Survey) -> eframe::Result {
         &format!("{name} uninstall"),
         options,
         Box::new(move |cc| {
-            photocraft_ui_egui::PhotocraftApp::setup_context(&cc.egui_ctx, photocraft_ui_egui::theme::ThemeKind::ALL[0]);
+            photocraft_ui_egui::PhotocraftApp::setup_context(&cc.egui_ctx, Default::default());
             Ok(Box::new(Dialog::new(found)))
         }),
     );
@@ -413,7 +415,7 @@ impl Dialog {
 
     /// What removing came to, in the middle of the window: a mark, a title, a line, Close.
     fn draw_done(&mut self, ui: &mut egui::Ui, failed: &[String]) -> bool {
-        use photocraft_ui_egui::widgets;
+        use photocraft_ui_egui::ai_widgets as widgets;
         let t = photocraft_ui_egui::theme::Tokens::get(ui.ctx());
         let (title, text) = if failed.is_empty() {
             (
@@ -440,9 +442,9 @@ impl Dialog {
             let (mark, _) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
             if failed.is_empty() {
                 ui.painter().circle_filled(mark.center(), 22.0, t.accent);
-                photocraft_ui_egui::icons::paint(ui, mark, "check", 26.0, t.primary_text);
+                photocraft_ui_egui::ai_widgets::paint_icon(ui, mark, "check", 26.0, t.primary_text);
             } else {
-                photocraft_ui_egui::icons::paint(ui, mark, "triangle-alert", 34.0, t.warning);
+                photocraft_ui_egui::ai_widgets::paint_icon(ui, mark, "triangle-alert", 34.0, t.warning);
             }
             ui.add_space(12.0);
             ui.label(egui::RichText::new(title).size(18.0).strong().color(t.text));
@@ -459,7 +461,7 @@ impl Dialog {
 
     /// The window's content; returns whether it should close.
     pub fn draw(&mut self, ui: &mut egui::Ui) -> bool {
-        use photocraft_ui_egui::widgets;
+        use photocraft_ui_egui::ai_widgets as widgets;
         let t = photocraft_ui_egui::theme::Tokens::get(ui.ctx());
         let name = photocraft_ui_egui::brand::NAME;
         if let Some(failed) = self.done.clone() {
@@ -679,6 +681,7 @@ mod tests {
             p.integrations.ai.comfy_launch.python = root.join("python_embeded/python.exe").to_string_lossy().into_owned();
             p.integrations.ai.comfy_launch.folder = root.to_string_lossy().into_owned();
         });
+        use photocraft_engine::prefs::SavedPrefsExt as _;
         std::fs::write(roaming.join("LayerShop/preferences.json"), session.prefs_to_json()).unwrap();
         let found = survey(Some(&local), Some(&roaming), "LayerShop");
         assert!(found.home.is_none());
@@ -692,7 +695,7 @@ mod tests {
         }));
         // The settings that stay no longer start an engine that is gone.
         let mut after = photocraft_engine::Session::new();
-        after.load_prefs_json(&std::fs::read_to_string(roaming.join("LayerShop/preferences.json")).unwrap()).unwrap();
+        after.set_saved_prefs(photocraft_engine::prefs::read_saved(Some(&roaming.join("LayerShop"))));
         let ai = &after.prefs().integrations.ai;
         assert!(!ai.comfy_autostart && ai.comfy_launch.python.is_empty(), "{:?}", ai.comfy_launch);
     }
@@ -724,7 +727,7 @@ mod tests {
         write(&roaming.join("LayerShop/preferences.json"), 20);
         let mut dialog = Dialog::new(survey(Some(&local), Some(&roaming), "LayerShop"));
         let ctx = egui::Context::default();
-        photocraft_ui_egui::PhotocraftApp::setup_context(&ctx, photocraft_ui_egui::theme::ThemeKind::ALL[0]);
+        photocraft_ui_egui::PhotocraftApp::setup_context(&ctx, Default::default());
         for _ in 0..2 {
             ctx.run_ui(Default::default(), |ui| {
                 dialog.draw(ui);

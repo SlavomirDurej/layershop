@@ -297,9 +297,7 @@ fn enhancement(app: &mut PhotocraftApp, page: &str) -> bool {
     if let Ok(value) = serde_json::to_value(models) {
         let _ = app.session.execute("prefs.set", json!({"path": "integrations.ai.models", "value": value}));
     }
-    let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
-    // The panel as someone using it has it: its dock group dragged taller.
-    app.ui.dock.heights.insert(crate::dock::Group::Properties, 430.0);
+    let _ = crate::panel_docking::show_panel(app, crate::ai_gen_ui::ID, Some(true));
     app.ui.ai_gen.prompt = "a cat on a sofa".into();
     // `animate`: GPT Image 2.6 (the first OpenAI preset) with Animate (GIF) ticked.
     if page == "animate" {
@@ -309,10 +307,10 @@ fn enhancement(app: &mut PhotocraftApp, page: &str) -> bool {
         return true;
     }
     if let Some(tab) = page.strip_prefix("enhance-").filter(|t| matches!(*t, "prefs" | "settings" | "local")) {
-        let id = crate::ai_gen_ui::open_prompt_enhancement(app);
-        if let Some(d) = app.ui.dialog_mut(id) {
-            d.fields.insert("__aiEnhanceTab".into(), json!(if tab == "prefs" { "cloud" } else { tab }));
-        }
+        crate::ai_gen_ui::open_generative_ai(app, |f| {
+            f.insert("__aiPage".into(), json!("enhance"));
+            f.insert("__aiEnhanceTab".into(), json!(if tab == "prefs" { "cloud" } else { tab }));
+        });
         return true;
     }
     // Waiting: in the background, as in the app. Done: inline, so it is there at once.
@@ -623,8 +621,7 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
     // AI Gen › Edit › Remove BG (`-describe`, `-click`), and its Preferences page (`-prefs`).
     if let Some(what) = page.strip_prefix("remove-bg") {
         app.session.ai.transport = Some(Arc::new(Down));
-        let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
-        app.ui.dock.heights.insert(crate::dock::Group::Properties, 430.0);
+        let _ = crate::panel_docking::show_panel(app, crate::ai_gen_ui::ID, Some(true));
         return crate::ai_gen_ui::remove_bg::demo(app, what);
     }
     if page == "aigen-empty" {
@@ -632,7 +629,7 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         app.session.ai.transport = Some(Arc::new(Down));
         app.ui.ai_setup.probe = Some(probe(dir));
         super::refresh_status(app);
-        let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+        let _ = crate::panel_docking::show_panel(app, crate::ai_gen_ui::ID, Some(true));
         return true;
     }
     // A PC without a graphics card the engine can use (a virtual machine): the first screen
@@ -710,24 +707,23 @@ pub fn show(app: &mut PhotocraftApp, dir: &Path, page: &str) -> bool {
         // folder opened to its files), and Engine.
         if let Some(which) = screen.strip_prefix("-prefs").and_then(|s| s.strip_suffix("-own")) {
             super::refresh_status(app);
-            let id = crate::prefs_ui::open_preferences(app, "generativeAi");
             let mine = app.ui.ai_setup.extra_models_dirs.clone();
-            if let Some(d) = app.ui.dialog_mut(id) {
+            crate::ai_gen_ui::open_generative_ai(app, |f| {
                 let page = match which {
                     "-engine" => "server",
                     "-keys" => "keys",
                     "-models" | "-reset" => "models",
                     _ => "folders",
                 };
-                d.fields.insert("__aiPage".into(), json!(page));
-                d.fields.insert("__aiFolderOpened".into(), json!(mine));
+                f.insert("__aiPage".into(), json!(page));
+                f.insert("__aiFolderOpened".into(), json!(mine));
                 if which == "-remove" {
-                    d.fields.insert("__aiFolderConfirm".into(), json!(mine.first()));
+                    f.insert("__aiFolderConfirm".into(), json!(mine.first()));
                 }
                 if which == "-reset" {
-                    d.fields.insert("__aiReset".into(), json!(0));
+                    f.insert("__aiReset".into(), json!(0));
                 }
-            }
+            });
             return true;
         }
         super::open(app);

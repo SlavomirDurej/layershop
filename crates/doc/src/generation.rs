@@ -6,7 +6,7 @@
 use serde::{Deserialize, Serialize};
 
 /// What a generation worked from (`ai.generate`'s `mode`).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(rename_all = "camelCase")]
 pub enum GenerationMode {
     /// The prompt alone.
@@ -34,7 +34,7 @@ impl GenerationMode {
 
 /// How much of a model's sampling schedule a generation ran (`ai.generate`'s `quality`): fewer
 /// steps to try an idea quickly, more for difficult detail.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(rename_all = "camelCase")]
 pub enum GenerationQuality {
     Draft,
@@ -73,7 +73,7 @@ impl GenerationQuality {
 }
 
 /// A picture a generation started from or referred to.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(rename_all = "camelCase")]
 pub enum GenerationSource {
     /// A layer of the same document, by id.
@@ -88,7 +88,7 @@ pub enum GenerationSource {
 
 /// A picture an edit's instruction could refer to, and the name the prompt called it by
 /// (`@Luna`); empty when it had none and was referred to by number.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationReference {
     #[serde(flatten)]
@@ -106,7 +106,7 @@ impl From<GenerationSource> for GenerationReference {
 /// A picture the document keeps for edits to refer to by name (the AI Gen panel's references,
 /// `@Luna` in a prompt; [`crate::Document::ai_references`]). Saved with the document, so a
 /// character or a prop is still there the next time it is opened.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, craft_ui_macros::PlainData)]
 pub struct AiReference {
     /// The name a prompt calls it by (letters, digits, `_` and `-`); empty: by number.
     pub name: String,
@@ -114,7 +114,7 @@ pub struct AiReference {
 }
 
 /// Where an [`AiReference`]'s picture is.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, craft_ui_macros::PlainData)]
 pub enum AiPicture {
     /// A layer of this document, by id, read as it is when an edit runs.
     Layer(u64),
@@ -126,7 +126,7 @@ pub enum AiPicture {
 }
 
 /// The generation a layer came from ([`crate::Layer::generation`]).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(default, rename_all = "camelCase")]
 pub struct Generation {
     pub mode: GenerationMode,
@@ -166,7 +166,7 @@ pub struct Generation {
 }
 
 /// A LoRA a generation was rendered with ([`Generation::loras`]).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(default, rename_all = "camelCase")]
 pub struct GenerationLora {
     /// The file, as ComfyUI names it under `models/loras`.
@@ -177,7 +177,7 @@ pub struct GenerationLora {
 }
 
 /// What an [`AiRegion`] holds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(rename_all = "camelCase")]
 pub enum AiRegionKind {
     #[default]
@@ -208,7 +208,7 @@ impl AiRegionKind {
 /// A box a text-to-image is told to place something in (the AI Gen panel's Create › Regions,
 /// [`crate::Document::ai_regions`]), for models trained on boxes. Kept with the document, so a
 /// layout can be refined over many generations.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, craft_ui_macros::PlainData)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AiRegion {
     /// Stable within the document (the commands address a region by it).

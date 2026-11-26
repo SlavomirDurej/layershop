@@ -13,10 +13,10 @@ use serde_json::{Map, Value, json};
 
 use super::{ACTION, OPEN_URL, PAGE as PAGE_FIELD, EditTask, Mode, edit_label, tr};
 use crate::PhotocraftApp;
-use crate::canvas::{ToolEvent, ViewXform};
+use super::{CanvasEvent as ToolEvent, ViewXform};
 use crate::state::Tool;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// The engine's command.
 pub(super) const CMD: &str = "ai.removeBackground";
@@ -193,7 +193,7 @@ fn on_canvas(app: &PhotocraftApp) -> bool {
 }
 
 /// Does the pointer place dots now (the canvas was armed, and no other tool picked since)?
-fn placing(app: &PhotocraftApp) -> bool {
+pub(crate) fn placing(app: &PhotocraftApp) -> bool {
     on_canvas(app) && app.ui.ai_gen.remove_bg.armed.is_some_and(|t| t == app.ui.tool)
 }
 
@@ -358,12 +358,10 @@ fn blocked(app: &PhotocraftApp) -> Option<String> {
 }
 
 /// Open Preferences on Generative AI › Remove BG.
-pub fn open_settings(app: &mut PhotocraftApp) -> u64 {
-    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
-    if let Some(d) = app.ui.dialog_mut(id) {
-        d.fields.insert(PAGE_FIELD.into(), json!(PAGE));
-    }
-    id
+pub fn open_settings(app: &mut PhotocraftApp) {
+    super::open_generative_ai(app, |f| {
+        f.insert(PAGE_FIELD.into(), json!(PAGE));
+    });
 }
 
 /// Start the cut-out.
@@ -371,10 +369,8 @@ fn start(app: &mut PhotocraftApp) {
     let st = &app.ui.ai_gen.remove_bg;
     let clicks: Vec<[f64; 2]> = if st.keep == Keep::Points { st.dots.iter().filter(|d| d.keep).map(|d| [d.x, d.y]).collect() } else { Vec::new() };
     if photocraft_engine::ai_bg_cmds::nothing_to_remove(&app.session, &clicks) {
-        let mut fields = Map::new();
-        fields.insert("message".into(), json!(tr(photocraft_engine::ai_bg_cmds::NOTHING_HINT)));
-        fields.insert("__title".into(), json!(photocraft_engine::ai_bg_cmds::NOTHING_TITLE));
-        app.ui.open_dialog(crate::state::DialogKind::Error, fields);
+        let alert = craft::ui::dialog::Alert::new(tr(photocraft_engine::ai_bg_cmds::NOTHING_TITLE).to_owned(), tr(photocraft_engine::ai_bg_cmds::NOTHING_HINT).to_owned());
+        crate::dialogs::alerts::show(app, alert);
         return;
     }
     let p = params(&app.ui.ai_gen.remove_bg);
@@ -417,7 +413,7 @@ fn model_row(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let inner = rect.shrink2(vec2(8.0, 0.0));
         ui.painter().with_clip_rect(inner).text(inner.left_center(), egui::Align2::LEFT_CENTER, &names, egui::TextStyle::Body.resolve(ui.style()), t.text);
         response.on_hover_text(tr("Keep and Type choose the model"));
-        settings = crate::icons::button(ui, "settings", 24.0, false, tr("Background removal models…")).clicked();
+        settings = crate::ai_widgets::icon_button(ui, "settings", 24.0, false, tr("Background removal models…")).clicked();
     });
     if settings {
         open_settings(app);
@@ -522,7 +518,7 @@ pub(super) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, job: Option<&phot
                     }
                     ui.label(RichText::new(format!("{dots} {}", tr(if dots == 1 { "click" } else { "clicks" }))).color(t.text_faint).size(11.5));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        clear = ui.add_enabled_ui(dots > 0, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Take away every click"))).inner.clicked();
+                        clear = ui.add_enabled_ui(dots > 0, |ui| crate::ai_widgets::icon_button(ui, "trash", 24.0, false, tr("Take away every click"))).inner.clicked();
                     });
                 });
             });
@@ -681,7 +677,7 @@ fn model_card(ui: &mut egui::Ui, f: &mut Map<String, Value>, m: &BgModel, width:
                 if installed {
                     ui.label(RichText::new(tr("Installed")).color(t.success).size(12.0));
                     let (tick, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
-                    crate::icons::paint(ui, tick, "check", 14.0, t.success);
+                    crate::ai_widgets::paint_icon(ui, tick, "check", 14.0, t.success);
                 } else if downloading.as_deref() == Some(m.id) {
                     if ui.add(egui::Button::new(tr("Stop")).small()).on_hover_text(tr("Stop the download: what arrived is kept, and Install goes on from there")).clicked() {
                         *action = Some(STOP_INSTALL.to_string());

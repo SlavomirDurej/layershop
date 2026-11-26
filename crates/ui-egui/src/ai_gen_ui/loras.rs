@@ -20,7 +20,7 @@ use serde_json::{Map, Value, json};
 use super::{edit_label, field_width, open_settings, text_of, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// The strengths the panel's slider and the field beside it run over: [`LORA_STRENGTHS`].
 const SLIDER: std::ops::RangeInclusive<f32> = *LORA_STRENGTHS.start() as f32..=*LORA_STRENGTHS.end() as f32;
@@ -107,7 +107,7 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Mode
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let full = list.len() >= MAX_LORAS;
                 let tip = if full { tr("Five LoRAs at most: remove one to add another") } else { tr("Add a LoRA: one of those this model's settings offer") };
-                let plus = ui.add_enabled_ui(!full, |ui| crate::icons::button(ui, "plus", 24.0, false, tip)).inner;
+                let plus = ui.add_enabled_ui(!full, |ui| crate::ai_widgets::icon_button(ui, "plus", 24.0, false, tip)).inner;
                 // A menu opened again starts unfiltered.
                 if !egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&plus)) {
                     let id = ui.make_persistent_id("ai-lora-search");
@@ -173,7 +173,7 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Mode
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 let (icon, tip) = if lora.on { ("eye", "Leave this LoRA out, keeping it in the list") } else { ("eye-off", "Use this LoRA") };
-                if crate::icons::button(ui, icon, 22.0, false, tr(tip)).clicked() {
+                if crate::ai_widgets::icon_button(ui, icon, 22.0, false, tr(tip)).clicked() {
                     lora.on = !lora.on;
                 }
                 let name = name_of(current, &lora.file);
@@ -194,7 +194,7 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Mode
                 if v.is_finite() && (f64::from(v) - lora.strength).abs() > 1e-4 {
                     lora.strength = (f64::from(v) * 100.0).round() / 100.0;
                 }
-                if crate::icons::button(ui, "trash", 22.0, false, tr("Remove this LoRA")).clicked() {
+                if crate::ai_widgets::icon_button(ui, "trash", 22.0, false, tr("Remove this LoRA")).clicked() {
                     removed = Some(i);
                 }
             });
@@ -246,13 +246,13 @@ pub(super) fn library(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Opti
                 widgets::dropdown_search(ui, &format!("ai-lora-{id}-{i}"), tr("LoRA file"), &mut lora.file, &options, file_width);
             }
             ui.add_space(4.0);
-            if ui.add_enabled_ui(i > 0, |ui| crate::icons::button(ui, "chevron-up", 24.0, false, tr("Move up"))).inner.clicked() {
+            if ui.add_enabled_ui(i > 0, |ui| crate::ai_widgets::icon_button(ui, "chevron-up", 24.0, false, tr("Move up"))).inner.clicked() {
                 moved = Some((i, i - 1));
             }
-            if ui.add_enabled_ui(i + 1 < count, |ui| crate::icons::button(ui, "chevron-down", 24.0, false, tr("Move down"))).inner.clicked() {
+            if ui.add_enabled_ui(i + 1 < count, |ui| crate::ai_widgets::icon_button(ui, "chevron-down", 24.0, false, tr("Move down"))).inner.clicked() {
                 moved = Some((i, i + 1));
             }
-            if crate::icons::button(ui, "trash", 24.0, false, tr("Remove this LoRA from the model")).clicked() {
+            if crate::ai_widgets::icon_button(ui, "trash", 24.0, false, tr("Remove this LoRA from the model")).clicked() {
                 removed = Some(i);
             }
         });

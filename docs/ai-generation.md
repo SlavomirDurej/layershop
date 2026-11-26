@@ -1125,7 +1125,7 @@ sizes and no figures for GPT Image 2.5 (only an interactive calculator), so thos
 The **Model ID** is editable, so a newer model of the same API works without an update.
 
 **API keys** are stored in `ai-keys.json` in the settings directory, apart from
-`preferences.json`: preferences can be read by agents (`prefs.get`), keys cannot (`ai.keys`
+the preferences (`config.toml`): preferences can be read by agents (`prefs.get`), keys cannot (`ai.keys`
 reports only whether one is set). Without a stored key the provider's environment variable is used
 (`OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY`, `META_API_KEY`, `BFL_API_KEY`, and for
 prompt enhancement `OPENROUTER_API_KEY`, `ANTHROPIC_API_KEY`). A key is sent only to its provider. The file is plain text;

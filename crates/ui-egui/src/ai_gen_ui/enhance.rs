@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 use super::{ACTION, GOTO, KEY_FOCUS, KEY_FOCUS_ONCE, KEYS, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// The engine command that enhances.
 pub const ENHANCE: &str = "ai.enhancePrompt";
@@ -250,7 +250,7 @@ pub(super) fn button(app: &PhotocraftApp, ui: &mut egui::Ui, words: bool, busy: 
             let color = if on { t.text } else { t.text_faint };
             let icon_rect = if words { egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0)) } else { egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)) };
             // The sparkles in the accent: the one button here that adds, rather than sets.
-            crate::icons::paint(ui, icon_rect, icon, 14.0, if on { t.accent } else { color });
+            crate::ai_widgets::paint_icon(ui, icon_rect, icon, 14.0, if on { t.accent } else { color });
             if words {
                 ui.painter().text(icon_rect.right_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), color);
             }
@@ -583,7 +583,7 @@ fn local_tab(ui: &mut egui::Ui, s: &mut EnhanceSettings, f: &mut Map<String, Val
                     if installed {
                         ui.label(RichText::new(tr("Installed")).color(t.success).size(12.0));
                         let (tick, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
-                        crate::icons::paint(ui, tick, "check", 14.0, t.success);
+                        crate::ai_widgets::paint_icon(ui, tick, "check", 14.0, t.success);
                     } else if downloading.as_deref() == Some(m.id) {
                         if ui.add(egui::Button::new(tr("Stop")).small()).on_hover_text(tr("Stop the download: what arrived is kept, and Install goes on from there")).clicked() {
                             action = Some(STOP_INSTALL.to_string());
@@ -691,7 +691,7 @@ fn cloud_tab(ui: &mut egui::Ui, s: &mut EnhanceSettings, f: &mut Map<String, Val
                     } else {
                         let tip = if has_key { tr("List the service's models again") } else { tr("Add a key first: the service lists its models to those with one") };
                         let free = listing.is_none() && has_key;
-                        if ui.add_enabled_ui(free, |ui| crate::icons::button(ui, "rotate-cw", REFRESH_WIDTH, false, tip)).inner.clicked() {
+                        if ui.add_enabled_ui(free, |ui| crate::ai_widgets::icon_button(ui, "rotate-cw", REFRESH_WIDTH, false, tip)).inner.clicked() {
                             list_now = Some(p);
                         }
                     }
@@ -768,7 +768,7 @@ fn key_button(ui: &mut egui::Ui, p: TextProvider, has_key: bool, typed: bool) ->
     } else {
         t.text_faint.gamma_multiply(0.8)
     };
-    crate::icons::paint(ui, icon, "key-round", 18.0, key);
+    crate::ai_widgets::paint_icon(ui, icon, "key-round", 18.0, key);
     // The badge, at the key's lower right on a disc of the row's colour so it reads apart.
     let at = egui::pos2(rect.right() - 9.0, rect.bottom() - 8.0);
     ui.painter().circle_filled(at, 7.5, if hovered { t.hover } else { t.card });
@@ -809,7 +809,9 @@ fn model_picker(ui: &mut egui::Ui, s: &mut EnhanceSettings, f: &mut Map<String, 
     let mut chosen: Option<Option<String>> = None;
     let mut ask = false;
     let id = format!("ai-enhance-model-{}", p.key());
-    let combo = craft_ui::ComboBox::from_id_salt(&id)
+    // egui's combo box until this list moves onto the framework's ComboBox (`ai_widgets`).
+    #[allow(clippy::disallowed_types)]
+    let combo = egui::ComboBox::from_id_salt(&id)
         .selected_text(shown)
         .width(width)
         .height(360.0)

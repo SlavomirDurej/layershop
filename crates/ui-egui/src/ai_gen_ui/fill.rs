@@ -15,7 +15,7 @@ use serde_json::{Map, Value, json};
 use super::{FILTER, Filter, GENERATE, GOTO, SELECTED, Standing, model_of, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// The page's key among the section's pages.
 pub(super) const PAGE: &str = "fill";
@@ -108,12 +108,10 @@ pub fn run(app: &mut PhotocraftApp, typed: &str) -> Result<Value, String> {
 }
 
 /// Open Preferences on Generative AI › Generative Fill.
-pub fn open_settings(app: &mut PhotocraftApp) -> u64 {
-    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
-    if let Some(d) = app.ui.dialog_mut(id) {
-        d.fields.insert(super::PAGE.into(), json!(PAGE));
-    }
-    id
+pub fn open_settings(app: &mut PhotocraftApp) {
+    super::open_generative_ai(app, |f| {
+        f.insert(super::PAGE.into(), json!(PAGE));
+    });
 }
 
 // ---------- Preferences › Generative AI › Generative Fill ----------

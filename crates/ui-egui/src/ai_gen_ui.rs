@@ -27,8 +27,10 @@ use serde_json::{Map, Value, json};
 
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
+/// The panel's id in the panel registry and the workspace.
+pub const ID: &str = "aiGen";
 /// Window › AI Gen.
 pub const PANEL: &str = "window.panel.aiGen";
 /// Put the prompt a generated layer was made with into the prompt box: `{"layer": id?}` (the
@@ -36,8 +38,6 @@ pub const PANEL: &str = "window.panel.aiGen";
 pub const LOAD_PROMPT: &str = "window.panel.aiGen.loadPrompt";
 /// How many images Generate makes: `{"count": 1..10}`, the batch menu beside it.
 pub const BATCH_MENU: &str = "window.panel.aiGen.batch";
-/// The tab's position in the Properties dock group (Properties | Adjustments | AI Gen).
-pub const TAB: usize = 2;
 /// The engine command the panel runs.
 const GENERATE: &str = "ai.generate";
 
@@ -159,7 +159,7 @@ pub struct AiGenUi {
     /// Create › Regions: the region selected in the list and on the canvas.
     pub region: Option<u32>,
     #[serde(skip)]
-    regions: regions::RegionsUi,
+    pub(crate) regions: regions::RegionsUi,
     /// Change: how a model that both edits and inpaints is asked.
     pub method: Method,
     /// The model chosen for Create and for Restyle, which list the models that generate (empty:
@@ -390,25 +390,15 @@ fn tr(s: &str) -> &str {
     crate::i18n::t(s)
 }
 
-/// Menu ids handled here (live menu items).
+/// Menu ids handled here (live menu items): the panel's own commands. Window › AI Gen itself
+/// ([`PANEL`]) is the panel registry's (`panels::registry`, the `aiGen` panel).
 pub fn handles(id: &str) -> bool {
-    id == PANEL
+    matches!(id, LOAD_PROMPT | BATCH_MENU) || id == enhance::ENHANCE_MENU || id == enhance::RESTORE_MENU || id == styles::STYLE_MENU
 }
 
-/// The theme docks the Properties group (Pro); the others float the panel over the canvas.
-fn docked(app: &PhotocraftApp) -> bool {
-    Tokens::for_kind(app.ui.theme).pro
-}
-
+/// Whether the panel shows: in front in its group, or open in a flyout.
 fn shown(app: &PhotocraftApp) -> bool {
-    if !docked(app) {
-        return app.ui.ai_gen.floating;
-    }
-    app.ui.panels.dock && app.ui.panels.properties && app.ui.dock_tabs.properties == TAB && !app.ui.dock.is_collapsed(crate::dock::Group::Properties)
-}
-
-pub fn checked(app: &PhotocraftApp, id: &str) -> Option<bool> {
-    (id == PANEL).then(|| shown(app))
+    crate::panel_docking::is_front(app, ID)
 }
 
 /// Window › AI Gen: show the panel (its dock group, expanded, on its tab), or hide the group when
@@ -442,52 +432,7 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<
         };
         return Some(layer.map(|layer| json!({"loaded": load_prompt(app, layer)})));
     }
-    if id != PANEL {
-        return None;
-    }
-    let show = params.get("show").and_then(Value::as_bool).unwrap_or_else(|| !shown(app));
-    if !docked(app) {
-        app.ui.ai_gen.floating = show;
-        return Some(Ok(json!({"open": show})));
-    }
-    if show {
-        app.ui.panels.dock = true;
-        app.ui.panels.properties = true;
-        app.ui.dock_tabs.properties = TAB;
-        app.ui.dock.set_collapsed(crate::dock::Group::Properties, false);
-    } else if app.ui.dock_tabs.properties == TAB {
-        app.ui.panels.properties = false;
-    }
-    Some(Ok(json!({"open": show})))
-}
-
-/// The floating AI Gen panel of the themes that don't dock Properties.
-pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
-    if !app.ui.ai_gen.floating || docked(app) {
-        return;
-    }
-    let t = Tokens::get(ctx);
-    let canvas = app.last_canvas_rect;
-    let width = 300.0;
-    let mut close = false;
-    egui::Window::new(tr("AI Gen"))
-        .id(egui::Id::unique("ai-gen"))
-        .title_bar(false)
-        .resizable(false)
-        .movable(!app.session.prefs().workspace_locked)
-        .min_width(width)
-        .max_width(width)
-        .frame(crate::analysis_ui::float_frame(&t))
-        .default_pos(egui::pos2((canvas.right() - width - 16.0).max(canvas.left() + 8.0), canvas.top() + 60.0))
-        .show(ctx, |ui| {
-            ui.set_width(width);
-            ui.set_max_width(width);
-            close = crate::analysis_ui::title_row(ui, "AI Gen");
-            panel(app, ui, false);
-        });
-    if close {
-        app.ui.ai_gen.floating = false;
-    }
+    None
 }
 
 /// Is `model` offered for a change (`changing`: the models that edit or inpaint), or for Create
@@ -602,8 +547,8 @@ pub fn on_job_event(app: &mut PhotocraftApp, e: &photocraft_engine::jobs::JobEve
     }
     // A Connect or Scan the Preferences dialog follows: the dialog says how it ended, on the page
     // (where a server that isn't running is not an error when nobody asked to connect).
-    let followed = |d: &crate::state::Dialog| d.fields.get(JOB).and_then(|j| j.get("id")).and_then(Value::as_u64) == Some(e.id.0);
-    if app.ui.dialogs.iter().any(|d| crate::prefs_ui::is_preferences(&d.fields) && followed(d)) {
+    let followed = |f: &Map<String, Value>| f.get(JOB).and_then(|j| j.get("id")).and_then(Value::as_u64) == Some(e.id.0);
+    if crate::prefs_ui::generative_ai_fields(app).is_some_and(|f| followed(&f.lock().unwrap_or_else(std::sync::PoisonError::into_inner))) {
         return true;
     }
     if app.ui.ai_gen.server_job != Some(e.id.0) {
@@ -747,35 +692,40 @@ fn running(app: &PhotocraftApp) -> Option<JobInfo> {
 }
 
 /// Open Preferences on Generative AI › Manage Models with `model` selected for editing.
-pub fn open_settings(app: &mut PhotocraftApp, model: &str) -> u64 {
+pub fn open_settings(app: &mut PhotocraftApp, model: &str) {
     let models = &app.session.prefs().integrations.ai.models;
     let index = models.iter().position(|m| m.id == model).unwrap_or(0);
-    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
-    if let Some(d) = app.ui.dialog_mut(id) {
-        d.fields.insert(SELECTED.into(), json!(index));
-        d.fields.insert(PAGE.into(), json!("models"));
-        d.fields.insert(FILTER.into(), json!(Filter::All.key()));
+    open_generative_ai(app, |f| {
+        f.insert(SELECTED.into(), json!(index));
+        f.insert(PAGE.into(), json!("models"));
+        f.insert(FILTER.into(), json!(Filter::All.key()));
+    });
+}
+
+/// Open Preferences on Generative AI, and `set` the page's own fields (the tab, the selection).
+pub(crate) fn open_generative_ai(app: &mut PhotocraftApp, set: impl FnOnce(&mut Map<String, Value>)) {
+    crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
+    if let Some(fields) = crate::prefs_ui::generative_ai_fields(app) {
+        let mut fields = fields.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // Which keys are saved, as of now (never the keys).
+        prefs_opened(app, &mut fields);
+        set(&mut fields);
     }
-    id
 }
 
 /// Open Preferences on Generative AI › API Keys: where the Local AI wizard's "Cloud models
 /// only" leads.
-pub fn open_api_keys(app: &mut PhotocraftApp) -> u64 {
-    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
-    if let Some(d) = app.ui.dialog_mut(id) {
-        d.fields.insert(PAGE.into(), json!("keys"));
-    }
-    id
+pub fn open_api_keys(app: &mut PhotocraftApp) {
+    open_generative_ai(app, |f| {
+        f.insert(PAGE.into(), json!("keys"));
+    });
 }
 
 /// Open Preferences on Generative AI › Prompt Enhancement.
-pub fn open_prompt_enhancement(app: &mut PhotocraftApp) -> u64 {
-    let id = crate::prefs_ui::open_preferences(app, photocraft_engine::prefs::GENERATIVE_AI.0);
-    if let Some(d) = app.ui.dialog_mut(id) {
-        d.fields.insert(PAGE.into(), json!("enhance"));
-    }
-    id
+pub fn open_prompt_enhancement(app: &mut PhotocraftApp) {
+    open_generative_ai(app, |f| {
+        f.insert(PAGE.into(), json!("enhance"));
+    });
 }
 
 /// The line under Generate that leads to the Local AI wizard: the setup's progress while one
@@ -983,8 +933,8 @@ pub fn finished(app: &mut PhotocraftApp, result: &Value) {
     app.ui.ai_gen.last_seed = result.get("seed").and_then(Value::as_u64).map(|s| s & SEED_MASK);
     // An animation is on the timeline: show it there, from its first frame.
     if result.get("frames").and_then(Value::as_u64).is_some_and(|n| n > 0) {
-        app.ui.timeline.open = true;
-        app.ui.timeline.playing = false;
+        let _ = crate::panel_docking::show_panel(app, "timeline", Some(true));
+        crate::timeline_ui::stop(app);
         if let Err(e) = app.run("timeline.setFrame", json!({"frame": 0})) {
             crate::notices::error(app, format!("{}: {e}", tr("Timeline")));
         }
@@ -1119,7 +1069,7 @@ fn load_button(ui: &mut egui::Ui, label: &str, words: bool) -> egui::Response {
     ui.painter().rect_stroke(rect, t.radius_sm, egui::Stroke::new(1.0, t.field_border), egui::StrokeKind::Inside);
     let color = if on { t.text } else { t.text_faint };
     let icon = if shown.is_some() { egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0)) } else { egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)) };
-    crate::icons::paint(ui, icon, "import", 14.0, color);
+    crate::ai_widgets::paint_icon(ui, icon, "import", 14.0, color);
     if let Some(label) = shown {
         ui.painter().text(icon.right_center() + vec2(6.0, 0.0), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(12.0), color);
     }
@@ -1244,7 +1194,7 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
             ];
             for (tool, icon, tip, paints) in tools {
                 let on = app.ui.tool == tool && painting == paints;
-                if !crate::icons::button(ui, icon, 24.0, on, tr(tip)).clicked() {
+                if !crate::ai_widgets::icon_button(ui, icon, 24.0, on, tr(tip)).clicked() {
                     continue;
                 }
                 // The brush works on the mask (Quick Mask, its tint over what is selected); the
@@ -1263,14 +1213,14 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
             ui.add_enabled_ui(painting, |ui| {
                 let size = app.session.tools.brush.size;
                 let mut next = None;
-                if roomy && crate::icons::button(ui, "minus", 22.0, false, tr("Smaller brush")).clicked() {
+                if roomy && crate::ai_widgets::icon_button(ui, "minus", 22.0, false, tr("Smaller brush")).clicked() {
                     next = Some(size / 1.25);
                 }
                 let mut v = size;
                 if widgets::value_field(ui, &mut v, 1.0..=2000.0, "px", 58.0).on_hover_text(tr("Brush size")).changed() {
                     next = Some(v);
                 }
-                if roomy && crate::icons::button(ui, "plus", 22.0, false, tr("Larger brush")).clicked() {
+                if roomy && crate::ai_widgets::icon_button(ui, "plus", 22.0, false, tr("Larger brush")).clicked() {
                     next = Some(size * 1.25);
                 }
                 if let Some(n) = next.filter(|n| n.is_finite()) {
@@ -1279,7 +1229,7 @@ fn mask_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool) {
             });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let marked = photocraft_engine::ai_cmds::inpaint_marked(&app.session);
-                let clear = ui.add_enabled_ui(marked, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Clear the mask"))).inner;
+                let clear = ui.add_enabled_ui(marked, |ui| crate::ai_widgets::icon_button(ui, "trash", 24.0, false, tr("Clear the mask"))).inner;
                 if clear.clicked() {
                     mask_run(app, "ai.mask", json!({"clear": true}));
                 }
@@ -1365,7 +1315,7 @@ fn fit_timeline(app: &mut PhotocraftApp, frames: usize, fps: f32) -> Result<Valu
 /// person picks (what Play shows, the Timeline panel's Export GIF… without opening it).
 #[cfg(not(target_arch = "wasm32"))]
 fn save_animation(app: &mut PhotocraftApp, frames: usize, fps: f32) {
-    app.ui.timeline.playing = false;
+    crate::timeline_ui::stop(app);
     if let Err(e) = fit_timeline(app, frames, fps).and_then(|_| crate::timeline_ui::save_gif(app)) {
         crate::notices::error(app, format!("{}: {e}", tr("Save GIF")));
     }
@@ -1373,14 +1323,13 @@ fn save_animation(app: &mut PhotocraftApp, frames: usize, fps: f32) {
 
 fn play_animation(app: &mut PhotocraftApp, ctx: &egui::Context, frames: usize, fps: f32, play: bool) {
     if !play {
-        app.ui.timeline.playing = false;
+        crate::timeline_ui::stop(app);
         return;
     }
     let ran = fit_timeline(app, frames, fps).and_then(|_| app.run("timeline.setFrame", json!({"frame": 0})));
     match ran {
         Ok(_) => {
-            app.ui.timeline.playing = true;
-            app.ui.timeline.last_time = ctx.input(|i| i.time);
+            crate::timeline_ui::play(app, ctx.input(|i| i.time));
         }
         Err(e) => crate::notices::error(app, format!("{}: {e}", tr("Play"))),
     }
@@ -1411,12 +1360,12 @@ fn animate_rows_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
                     if let Some((frames, fps)) = selected {
                         // Right to left: Save GIF sits after Play.
                         #[cfg(not(target_arch = "wasm32"))]
-                        if crate::icons::button(ui, "download", 24.0, false, tr("Save the selected animation as a GIF…")).clicked() {
+                        if crate::ai_widgets::icon_button(ui, "download", 24.0, false, tr("Save the selected animation as a GIF…")).clicked() {
                             save_animation(app, frames, fps);
                         }
-                        let playing = app.ui.timeline.playing;
+                        let playing = app.ui.timeline.playing();
                         let (icon, tip) = if playing { ("square", tr("Stop")) } else { ("play", tr("Play the selected animation on the canvas")) };
-                        if crate::icons::button(ui, icon, 24.0, playing, tip).clicked() {
+                        if crate::ai_widgets::icon_button(ui, icon, 24.0, playing, tip).clicked() {
                             play_animation(app, ui.ctx(), frames, fps, !playing);
                         }
                         ui.add_space(4.0);
@@ -1462,7 +1411,7 @@ fn animate_rows_ui(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool) {
             let t = Tokens::get(ui.ctx());
             ui.horizontal(|ui| {
                 let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
-                crate::icons::paint(ui, icon, "triangle-alert", 13.0, t.warning);
+                crate::ai_widgets::paint_icon(ui, icon, "triangle-alert", 13.0, t.warning);
                 ui.add(egui::Label::new(RichText::new(tr("No timeline, so nothing plays. Play makes one.")).color(t.text_dim).size(11.5)).truncate())
                     .on_hover_text(tr("Video layers need the document's timeline to play; deleting it (the Timeline panel's bin) stops them. Play, or the Timeline panel's Create Video Timeline, makes a new one that fits them"));
             });
@@ -1477,7 +1426,7 @@ fn advanced_heading(ui: &mut egui::Ui, open: &mut bool) {
     let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 24.0), egui::Sense::click());
     let color = if resp.hovered() { t.text } else { t.text_dim };
     let chevron = egui::Rect::from_min_size(rect.min, vec2(14.0, rect.height()));
-    crate::icons::paint(ui, chevron, if *open { "chevron-down" } else { "chevron-right" }, 12.0, color);
+    crate::ai_widgets::paint_icon(ui, chevron, if *open { "chevron-down" } else { "chevron-right" }, 12.0, color);
     let galley = ui.painter().layout_no_wrap(tr("Advanced").to_owned(), crate::theme::medium(11.5), color);
     ui.painter().galley(egui::pos2(rect.left() + 18.0, rect.center().y - galley.size().y / 2.0), galley, color);
     if resp.on_hover_text(tr("The settings few generations need: the seed and, for a change, how the model is asked and how much it is shown")).clicked() {
@@ -1513,7 +1462,7 @@ fn seed_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model, enabled
             field.on_hover_text(tr("The number the image starts from: the same seed, model, prompt and settings give the same image. Empty: the model's own setting, a new one each time unless it has a fixed seed"));
             let last = app.ui.ai_gen.last_seed;
             let (icon, tip) = if kept.is_some() { ("lock", "A new seed each time") } else { ("lock-open", "Keep the last image's seed") };
-            let lock = ui.add_enabled_ui(kept.is_some() || last.is_some(), |ui| crate::icons::button(ui, icon, 24.0, kept.is_some(), tr(tip))).inner;
+            let lock = ui.add_enabled_ui(kept.is_some() || last.is_some(), |ui| crate::ai_widgets::icon_button(ui, icon, 24.0, kept.is_some(), tr(tip))).inner;
             if lock.clicked() {
                 app.ui.ai_gen.seed = if kept.is_some() { None } else { last };
             }
@@ -1593,11 +1542,14 @@ fn change_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model, fill:
     ui.add_space(6.0);
 }
 
-/// The AI Gen panel body. With `fill` the prompt box takes the height the panel has left (the
-/// dock group: drag its edge and the prompt grows); without it the box has a fixed height.
-pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui, fill: bool) {
-    if !fill {
-        return panel_body(app, ui, None);
+/// The AI Gen panel, as the panel registry draws it: the prompt box takes the height the panel
+/// has left (drag its group's edge and the prompt grows).
+pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
+    // The dock may run the body once to measure it before the run that shows it: the panel's
+    // widgets are plain egui ones, which would act on a click in both runs (a toggle opening and
+    // closing again), so the measuring run takes no input.
+    if craft::ui::runtime::measure::active(ui.ctx()) {
+        ui.disable();
     }
     // The prompt box takes the height that is left. In a dock group too short even for a small
     // one (the tabs and a task's rows need more than the group's compact height) the panel
@@ -1647,7 +1599,7 @@ fn model_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, models: &[Model], chose
             "Load from layer: select a layer made with AI Gen"
         };
         load = ui.add_enabled_ui(!busy && source_layer.is_some(), |ui| load_button(ui, load_label, load_words)).inner.on_hover_text(tr(tip)).clicked();
-        settings = crate::icons::button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
+        settings = crate::ai_widgets::icon_button(ui, "settings", 24.0, false, tr("Model settings…")).clicked();
     });
     app.ui.ai_gen.chosen_mut().clone_from(chosen);
     if settings {
@@ -1833,7 +1785,7 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
     if laying_out && current.layout() == Some(photocraft_aigen::LayoutFormat::Fibo) {
         ui.horizontal_top(|ui| {
             let (icon, _) = ui.allocate_exact_size(vec2(16.0, 16.0), egui::Sense::hover());
-            crate::icons::paint(ui, icon, "triangle-alert", 13.0, t.warning);
+            crate::ai_widgets::paint_icon(ui, icon, "triangle-alert", 13.0, t.warning);
             let note = "Regions are experimental with FIBO 2: it places them roughly and may not follow the boxes exactly.";
             ui.add(egui::Label::new(RichText::new(tr(note)).color(t.text_dim).size(11.5)).wrap());
         });
@@ -2210,7 +2162,7 @@ fn status_bar(ui: &mut egui::Ui, status: &Status) -> Option<StatusClick> {
         ui.spacing_mut().item_spacing.x = 0.0;
         if status.tone == Tone::Warning {
             let (r, _) = ui.allocate_exact_size(vec2(STATUS_ICON, STATUS_ICON - 2.0), egui::Sense::hover());
-            crate::icons::paint(ui, egui::Rect::from_center_size(r.center() - vec2(2.0, 0.0), vec2(14.0, 14.0)), "triangle-alert", 12.0, t.warning);
+            crate::ai_widgets::paint_icon(ui, egui::Rect::from_center_size(r.center() - vec2(2.0, 0.0), vec2(14.0, 14.0)), "triangle-alert", 12.0, t.warning);
         }
         let text_width = status.text_width(width);
         let color = match status.tone {
@@ -2234,7 +2186,7 @@ fn status_bar(ui: &mut egui::Ui, status: &Status) -> Option<StatusClick> {
             let icon = |ui: &mut egui::Ui, name: &str, color: egui::Color32, sense: egui::Sense| {
                 let (r, resp) = ui.allocate_exact_size(vec2(STATUS_ICON, STATUS_ICON - 2.0), sense);
                 let color = if resp.hovered() { t.text } else { color };
-                crate::icons::paint(ui, egui::Rect::from_center_size(r.center(), vec2(14.0, 14.0)), name, 12.0, color);
+                crate::ai_widgets::paint_icon(ui, egui::Rect::from_center_size(r.center(), vec2(14.0, 14.0)), name, 12.0, color);
                 resp
             };
             if let Some(tip) = &status.cost {
@@ -2835,7 +2787,7 @@ fn group_header(ui: &mut egui::Ui, group: Group, count: usize, folded: bool, not
     let corners = if folded { egui::CornerRadius::same(r) } else { egui::CornerRadius { nw: r, ne: r, sw: 0, se: 0 } };
     ui.painter().rect_filled(rect, corners, tone.gamma_multiply(if resp.hovered() { 0.3 } else { 0.22 }));
     let chevron = egui::Rect::from_center_size(egui::pos2(rect.left() + 12.0, rect.center().y), vec2(12.0, 12.0));
-    crate::icons::paint(ui, chevron, if folded { "chevron-right" } else { "chevron-down" }, 12.0, t.text_dim);
+    crate::ai_widgets::paint_icon(ui, chevron, if folded { "chevron-right" } else { "chevron-down" }, 12.0, t.text_dim);
     let mut job = egui::text::LayoutJob::default();
     job.append(tr(group.title()), 0.0, egui::TextFormat::simple(crate::theme::medium(11.5), t.text));
     job.append(&format!("  {count}"), 0.0, egui::TextFormat::simple(egui::FontId::proportional(11.0), t.text_faint));
@@ -2993,7 +2945,7 @@ fn engine_card(ui: &mut egui::Ui, setup: &Value, f: &mut Map<String, Value>, wid
         ui.set_width(width - 26.0);
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
-            ui.add(crate::icons::image("monitor", 24.0, if route.is_empty() && !managed { t.text_faint } else { t.icon }));
+            crate::ai_widgets::icon(ui, "monitor", 24.0, if route.is_empty() && !managed { t.text_faint } else { t.icon });
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -3303,7 +3255,7 @@ pub(super) fn key_card(
             ui.label(RichText::new(state).color(color).size(11.0));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
-                let icon = crate::icons::button(ui, "external-link", 18.0, false, url);
+                let icon = crate::ai_widgets::icon_button(ui, "external-link", 18.0, false, url);
                 let link = ui.add(
                     egui::Label::new(RichText::new(format!("{} {host}", tr("Get a key at"))).color(t.accent_text).size(11.5).underline()).sense(egui::Sense::click()),
                 );
@@ -3703,13 +3655,13 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             );
                             tools.spacing_mut().item_spacing.x = 0.0;
                             if let Some((lack, icon, tip)) = &fix {
-                                if crate::icons::button(&mut tools, icon, 20.0, false, tip).clicked() {
+                                if crate::ai_widgets::icon_button(&mut tools, icon, 20.0, false, tip).clicked() {
                                     act = Some((*lack).clone());
                                 }
                                 used += 24.0;
                             }
                             if on || resp.hovered() {
-                                if crate::icons::button(&mut tools, "trash", 20.0, false, tr("Remove this model")).clicked() {
+                                if crate::ai_widgets::icon_button(&mut tools, "trash", 20.0, false, tr("Remove this model")).clicked() {
                                     remove = Some(i);
                                 }
                                 used += 24.0;
@@ -3717,12 +3669,12 @@ fn models_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
                             if on {
                                 let down = tools
                                     .add_enabled_ui(below.is_some(), |ui| {
-                                        crate::icons::button(ui, "chevron-down", 20.0, false, tr("Move down: later in the AI Gen panel's model list"))
+                                        crate::ai_widgets::icon_button(ui, "chevron-down", 20.0, false, tr("Move down: later in the AI Gen panel's model list"))
                                     })
                                     .inner;
                                 let up = tools
                                     .add_enabled_ui(above.is_some(), |ui| {
-                                        crate::icons::button(ui, "chevron-up", 20.0, false, tr("Move up: earlier in the AI Gen panel's model list"))
+                                        crate::ai_widgets::icon_button(ui, "chevron-up", 20.0, false, tr("Move up: earlier in the AI Gen panel's model list"))
                                     })
                                     .inner;
                                 if let (true, Some(to)) = (down.clicked(), below) {
@@ -4319,11 +4271,18 @@ fn browse(app: &mut PhotocraftApp, f: &mut Map<String, Value>, python: bool) {
         if python { near(&current.python).or_else(|| Some(current.folder.clone())) } else { Some(current.folder.clone()).or_else(|| near(&current.python)) }
             .filter(|d| !d.trim().is_empty());
     let extensions = Some(vec![if python { "exe" } else { "py" }.to_string()]);
-    let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Open { multiple: false, initial_dir, extensions }, |app, answer| {
-        let crate::file_dialog::FileDialogAnswer::Paths(paths) = answer else { return Ok(Value::Null) };
-        let Some(path) = paths.first() else { return Ok(Value::Null) };
-        let Some(d) = app.ui.dialogs.iter_mut().find(|d| crate::prefs_ui::is_preferences(&d.fields)) else { return Ok(Value::Null) };
-        picked(&mut d.fields, path);
+    let mut request = craft::host::PickRequest::open("comfyLaunch");
+    if let Some(ext) = extensions.as_ref().and_then(|e| e.first()) {
+        request = request.filter(if python { "Python" } else { "ComfyUI main.py" }, &[ext.as_str()]);
+    }
+    if let Some(dir) = initial_dir {
+        request = request.directory(dir);
+    }
+    let asked = app.ask_file(request, |app, answer| {
+        let craft::host::Picked::Paths(paths) = answer else { return Ok(Value::Null) };
+        let Some(path) = paths.first().map(|p| p.to_string_lossy().into_owned()) else { return Ok(Value::Null) };
+        let Some(fields) = crate::prefs_ui::generative_ai_fields(app) else { return Ok(Value::Null) };
+        picked(&mut fields.lock().unwrap_or_else(std::sync::PoisonError::into_inner), &path);
         Ok(Value::Null)
     });
     if let Err(e) = asked {
@@ -4546,6 +4505,69 @@ pub fn load_keys(app: &mut PhotocraftApp) {
     if let Some(text) = app.services.load_ai_keys.as_mut().and_then(|f| f()) {
         app.session.ai.load_keys_json(&text);
     }
+}
+
+/// A pointer event on the canvas, in document pixels: what the Regions boxes and Remove BG's dots
+/// take while they have the pointer ([`wants_pointer`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum CanvasEvent {
+    /// The primary button goes down.
+    Down { x: f64, y: f64 },
+    /// The pointer moves with the button down.
+    Move { x: f64, y: f64 },
+    /// The button comes up.
+    Up { x: f64, y: f64 },
+}
+
+/// The canvas's mapping between document pixels and the screen, as the AI overlays use it.
+pub struct ViewXform {
+    /// The canvas on screen.
+    pub rect: egui::Rect,
+    view: craft::behavior::CanvasView,
+}
+
+impl ViewXform {
+    pub fn new(view: craft::behavior::CanvasView, rect: egui::Rect) -> Self {
+        Self { rect, view }
+    }
+
+    /// The screen point of document point (`x`, `y`).
+    pub fn to_screen(&self, x: f32, y: f32) -> egui::Pos2 {
+        self.view.to_screen(craft::behavior::kurbo::Point::new(f64::from(x), f64::from(y)))
+    }
+
+    /// The document point under screen point `p`.
+    pub fn to_doc(&self, p: egui::Pos2) -> [f64; 2] {
+        let d = self.view.to_doc(p);
+        [d.x, d.y]
+    }
+}
+
+/// Whether the AI overlays take the canvas's pointer this pass: the Regions boxes being edited, or
+/// Remove BG's dots being placed. The canvas then runs their tool instead of the selected one.
+pub fn wants_pointer(app: &PhotocraftApp) -> bool {
+    regions::editing(app) || remove_bg::placing(app)
+}
+
+/// A pointer event for the AI overlays; `clicks` is 2 for the press of a double-click.
+pub fn pointer(app: &mut PhotocraftApp, ev: CanvasEvent, mods: egui::Modifiers, clicks: u32) {
+    if let CanvasEvent::Down { x, y } = ev
+        && clicks >= 2
+        && regions::double_click(app, x, y)
+    {
+        return;
+    }
+    if !regions::pointer(app, ev) {
+        remove_bg::pointer(app, ev, mods);
+    }
+}
+
+/// The AI overlays over the canvas: the Regions boxes and Remove BG's dots. `hover` is the
+/// pointer over the canvas.
+pub fn paint_canvas(app: &mut PhotocraftApp, ui: &mut egui::Ui, xf: &ViewXform, hover: Option<egui::Pos2>) {
+    let painter = ui.painter_at(xf.rect);
+    regions::canvas(app, ui, &painter, xf, hover);
+    remove_bg::canvas(app, ui, &painter, xf, hover);
 }
 
 pub mod enhance;

@@ -3,7 +3,7 @@ use photocraft_engine::Session;
 use std::time::{Duration, Instant};
 
 /// An app with the stand-in network and engine, its folders in a folder of the test's own.
-fn app(scale: demo::Scale) -> (PhotocraftApp, tempfile::TempDir) {
+fn app(scale: demo::Scale) -> (Box<PhotocraftApp>, tempfile::TempDir) {
     let dir = tempfile::tempdir().unwrap();
     let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
     demo::install(&mut app, dir.path(), scale);
@@ -38,12 +38,12 @@ fn finish(app: &mut PhotocraftApp, ctx: &egui::Context) {
 #[test]
 fn the_wizard_is_in_the_file_menu_of_the_desktop_app_only() {
     let (mut with, _dir) = app(demo::Scale::Small);
-    let items = crate::menus::menu_items(&with);
-    let at = items.iter().position(|i| i.id == OPEN).expect("File \u{203a} Set Up Local AI\u{2026}");
+    let items = crate::menus::base_rows(&with);
+    let at = items.iter().position(|i| i.command.id == OPEN).expect("File \u{203a} Set Up Local AI\u{2026}");
     assert_eq!((items[at].label.as_str(), items[at].path.clone(), items[at].enabled), ("Set Up Local AI\u{2026}", vec!["File".to_string()], true));
     // A group of its own, above File Info.
-    assert_eq!((items[at - 1].id.as_str(), items[at + 1].id.as_str(), items[at + 2].id.as_str()), ("---", "---", "file.fileInfo"));
-    assert_eq!(items.iter().filter(|i| i.id == OPEN).count(), 1);
+    assert_eq!((items[at + 1].label.as_str(), items[at + 2].command.id.as_str()), ("---", "file.fileInfo"));
+    assert_eq!(items.iter().filter(|i| i.command.id == OPEN).count(), 1);
     assert!(crate::menus::is_live(OPEN));
     // Chosen from the menu, it opens on the first screen.
     let c = ctx();
@@ -55,7 +55,7 @@ fn the_wizard_is_in_the_file_menu_of_the_desktop_app_only() {
     assert_eq!((r["page"].as_str(), with.ui.ai_setup.existing), (Some("models"), true));
     // Without the desktop app's network and folders the item is there, greyed, and says why.
     let mut without = PhotocraftApp::new(Session::new(), crate::Services::default());
-    let item = crate::menus::menu_items(&without).into_iter().find(|i| i.id == OPEN).unwrap();
+    let item = crate::menus::base_rows(&without).into_iter().find(|i| i.command.id == OPEN).unwrap();
     assert!(!item.enabled);
     assert!(crate::menus::invoke(&mut without, &c, OPEN, json!({})).unwrap_err().contains("desktop app"));
     assert!(!without.ui.ai_setup.open);
@@ -138,7 +138,7 @@ fn a_small_card_starts_on_the_light_preset() {
 }
 
 /// [`app`] before this PC was looked at.
-fn app_without_probe() -> (PhotocraftApp, tempfile::TempDir) {
+fn app_without_probe() -> (Box<PhotocraftApp>, tempfile::TempDir) {
     let (mut app, dir) = app(demo::Scale::Real);
     app.ui.ai_setup.probe = None;
     (app, dir)
@@ -256,12 +256,14 @@ fn the_wizard_is_offered_once_at_first_launch_and_again_only_to_continue() {
 fn the_preferences_page_hands_over_to_the_wizard_after_saving_itself() {
     let (mut app, _dir) = app(demo::Scale::Small);
     let c = ctx();
-    let id = crate::prefs_ui::open_preferences(&mut app, photocraft_engine::prefs::GENERATIVE_AI.0);
+    crate::prefs_ui::open_preferences(&mut app, photocraft_engine::prefs::GENERATIVE_AI.0);
     // A change made in the dialog before the button is pressed.
-    app.ui.dialog_mut(id).unwrap().fields["values"]["integrations"]["ai"]["timeoutSeconds"] = json!(777);
+    let mut f = crate::prefs_ui::generative_ai_snapshot(&mut app).unwrap();
+    f["values"]["integrations"]["ai"]["timeoutSeconds"] = json!(777);
+    crate::prefs_ui::set_generative_ai(&mut app, &f).unwrap();
     request_from_prefs(&mut app, "open");
     draw(&mut app, &c);
-    assert!(app.ui.dialogs.is_empty(), "the dialog was confirmed, not left behind the wizard");
+    assert!(!crate::prefs_ui::window_open(&app), "the dialog was confirmed, not left behind the wizard");
     assert_eq!(app.session.prefs().integrations.ai.timeout_seconds, 777);
     assert!(app.ui.ai_setup.open && app.ui.ai_setup.page == Page::Pc);
     // Remove asks first; Repair with nothing set up says so on the screen.
@@ -364,7 +366,7 @@ fn an_installed_setup_can_lose_a_model_or_everything_without_being_taken_for_a_n
     let c = ctx();
     open(&mut app);
     assert!(set_up(&app), "the record says it is installed");
-    assert_eq!(crate::menus::menu_items(&app).into_iter().find(|i| i.id == OPEN).unwrap().label, "Local AI Setup\u{2026}");
+    assert_eq!(crate::menus::base_rows(&app).into_iter().find(|i| i.command.id == OPEN).unwrap().label, "Local AI Setup\u{2026}");
     let summary = summary(&app);
     assert!(summary["text"].as_str().unwrap().contains("Installed: ComfyUI 0.45.0 \u{b7} 2 models"), "{summary}");
     assert_eq!((summary["installed"].as_bool(), summary["managed"].as_bool()), (Some(true), Some(true)));
@@ -620,9 +622,12 @@ fn draw_focused(app: &mut PhotocraftApp, ctx: &egui::Context, focused: bool) {
     ctx.run_ui(input, |ui| window(app, ui.ctx())).textures_delta.clear();
 }
 
+/// Text a stand-in writes, shared with the test.
+type Shared = std::sync::Arc<std::sync::Mutex<String>>;
+
 /// An app whose stand-in has FLUX.3 Klein (gated) ticked beside Qwen Image 2.1, on the Models
 /// screen; the token its file opens to; and what the app saved as its keys file.
-fn gated_app() -> (PhotocraftApp, tempfile::TempDir, std::sync::Arc<std::sync::Mutex<String>>, std::sync::Arc<std::sync::Mutex<String>>) {
+fn gated_app() -> (Box<PhotocraftApp>, tempfile::TempDir, Shared, Shared) {
     let (mut app, dir) = app(demo::Scale::Small);
     let accepted = demo::install(&mut app, dir.path(), demo::Scale::Gated);
     let saved = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
@@ -719,7 +724,8 @@ fn a_moved_file_or_a_refused_sign_in_is_said_as_it_is() {
     let (mut app, _dir, _accepted, saved2) = gated_app();
     draw(&mut app, &c);
     demo::sign_in(&mut app);
-    app.session.ai.set_hf(&photocraft_aisetup::hf::Credentials { access: "revoked-token".into(), ..app.session.ai.hf() });
+    let hf = app.session.ai.hf();
+    app.session.ai.set_hf(&photocraft_aisetup::hf::Credentials { access: "revoked-token".into(), ..hf });
     refresh_hf(&mut app);
     assert!(hf_flag(&app, "signedIn"));
     check_access(&mut app);
@@ -970,8 +976,7 @@ fn the_model_folders_page_says_whose_each_folder_is_and_lists_what_it_has() {
     let s = summary(&app);
     assert_eq!((s["route"].as_str(), s["managed"].as_bool()), (Some("managed"), Some(true)));
     assert!(!s["engineVersion"].as_str().unwrap().is_empty() && !s["engineFolder"].as_str().unwrap().is_empty(), "{s}");
-    let d = app.ui.dialogs.iter().position(|d| crate::prefs_ui::is_preferences(&d.fields)).unwrap();
-    let mut f = std::mem::take(&mut app.ui.dialogs[d].fields);
+    let mut f = crate::prefs_ui::generative_ai_snapshot(&mut app).unwrap();
     let c = ctx();
     // A few frames of the page and what it asks for after it: the folders are read once.
     let frames = |app: &mut PhotocraftApp, f: &mut serde_json::Map<String, Value>| {

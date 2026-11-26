@@ -48,7 +48,7 @@ fn document(depth: SampleType) -> Document {
         style: "watercolour".into(),
     }));
     // In a group: the walk reaches it.
-    doc.layers = vec![photo, other, txt, Layer::group("Group", vec![edit])];
+    doc.layers = vec![photo, other, txt, Layer::group("Group", vec![edit])].into();
     doc
 }
 

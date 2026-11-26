@@ -131,7 +131,7 @@ pub(super) fn button(app: &mut PhotocraftApp, ui: &mut egui::Ui, enabled: bool, 
         let color = if on { t.text } else { t.text_faint };
         let icon_color = if on && style.is_some() { t.accent } else { color };
         let icon = if words { egui::Rect::from_min_size(rect.left_center() + vec2(8.0, -8.0), vec2(16.0, 16.0)) } else { egui::Rect::from_center_size(rect.center(), vec2(16.0, 16.0)) };
-        crate::icons::paint(ui, icon, "palette", 14.0, icon_color);
+        crate::ai_widgets::paint_icon(ui, icon, "palette", 14.0, icon_color);
         if words {
             let room = rect.right() - 8.0 - (icon.right() + 6.0);
             let painter = ui.painter_at(rect.shrink(1.0));
@@ -238,7 +238,7 @@ fn tile(ui: &mut egui::Ui, style: Option<&'static Style>, on: bool) -> egui::Res
         None => {
             // No preset: a plain tile.
             ui.painter().rect_filled(picture, radius, t.field);
-            crate::icons::paint(ui, egui::Rect::from_center_size(picture.center(), vec2(28.0, 28.0)), "ban", 26.0, t.text_faint);
+            crate::ai_widgets::paint_icon(ui, egui::Rect::from_center_size(picture.center(), vec2(28.0, 28.0)), "ban", 26.0, t.text_faint);
         }
     }
     let border = if on {
@@ -253,7 +253,7 @@ fn tile(ui: &mut egui::Ui, style: Option<&'static Style>, on: bool) -> egui::Res
         // The check in a badge at the top right.
         let badge = egui::Rect::from_center_size(picture.right_top() + vec2(-14.0, 14.0), vec2(20.0, 20.0));
         ui.painter().circle_filled(badge.center(), 10.0, t.accent);
-        crate::icons::paint(ui, badge.shrink(3.0), "check", 13.0, t.primary_text);
+        crate::ai_widgets::paint_icon(ui, badge.shrink(3.0), "check", 13.0, t.primary_text);
     }
     let color = if on { t.text } else { t.text_dim };
     let mut job = egui::text::LayoutJob::simple_singleline(name.to_string(), egui::FontId::proportional(12.0), color);

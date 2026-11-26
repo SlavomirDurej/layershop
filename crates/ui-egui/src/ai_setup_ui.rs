@@ -23,7 +23,7 @@ use photocraft_aisetup::probe::Stage;
 
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// File › Set Up Local AI…: open the wizard. `{"page": "pc|location|models|install|ready"}`
 /// puts a screen in front, `{"route": "managed|existing"}` chooses who installs ComfyUI,
@@ -482,24 +482,14 @@ pub fn menu(app: &mut PhotocraftApp, id: &str, params: &Value) -> Option<Result<
 
 /// File › Set Up Local AI…, in a group of its own above File Info. Not in the web build, which
 /// has no disk to install to.
-pub fn insert_menu_items(app: &PhotocraftApp, items: &mut Vec<crate::menus::MenuItem>) {
-    if cfg!(target_arch = "wasm32") || items.iter().any(|i| i.id == OPEN) {
+pub fn rows(app: &PhotocraftApp, rows: &mut Vec<craft::menu::Row>) {
+    if cfg!(target_arch = "wasm32") || rows.iter().any(|r| r.command.id == OPEN) {
         return;
     }
-    let Some(at) = items.iter().position(|i| i.id == "file.fileInfo") else { return };
-    let path = vec!["File".to_string()];
+    let Some(at) = rows.iter().position(|r| r.command.id == "file.fileInfo") else { return };
     let label = if set_up(app) { "Local AI Setup…" } else { "Set Up Local AI…" };
-    let item = |id: &str, label: &str, enabled| crate::menus::MenuItem {
-        id: id.into(),
-        label: label.into(),
-        path: path.clone(),
-        shortcut: None,
-        enabled,
-        checked: None,
-        color: None,
-    };
-    items.insert(at, item("---", "---", false));
-    items.insert(at, item(OPEN, label, available(app)));
+    rows.insert(at, craft::menu::Row::separator(&["File"]));
+    rows.insert(at, craft::menu::Row::new(&["File"], OPEN, label).enabled(available(app)));
 }
 
 /// What the Preferences page asks for: open the wizard (`open`), or on a screen that does one
@@ -600,9 +590,8 @@ pub fn tick(app: &mut PhotocraftApp, ctx: &egui::Context) {
     // The Preferences dialog asked: confirm it (its draft would otherwise overwrite what a
     // setup writes), then open the wizard.
     if let Some(what) = app.ui.ai_setup.from_prefs.take() {
-        let dialog = app.ui.dialogs.iter().find(|d| crate::prefs_ui::is_preferences(&d.fields)).map(|d| d.id);
-        match dialog.map(|id| crate::dialogs::confirm(app, id)) {
-            Some(Err(e)) => crate::notices::error(app, format!("{}: {e}", tr("Preferences"))),
+        match crate::prefs_ui::confirm_window(app) {
+            Err(e) => crate::notices::error(app, format!("{}: {e}", tr("Preferences"))),
             _ => {
                 open(app);
                 match what.as_str() {
@@ -717,7 +706,7 @@ fn finished(app: &mut PhotocraftApp, ctx: &egui::Context) {
         app.ui.status_error = false;
         // Said where it will be seen: the window may have been closed for the download.
         if !app.ui.ai_setup.open {
-            crate::notices::post(app, tr("Local AI is ready"), vec![tr("Open Window › AI Gen to generate your first image.").to_string()], false, None);
+            crate::notices::post(app, tr("Local AI is ready"), vec![tr("Open Window › AI Gen to generate your first image.").to_string()], crate::notices::Tone::Neutral, None);
         }
     } else if !cancelled {
         app.ui.ai_setup.page = Page::Install;
@@ -790,7 +779,8 @@ fn removed(app: &mut PhotocraftApp) {
 }
 
 fn install(app: &mut PhotocraftApp) {
-    match app.session.execute(START, params(app)) {
+    let p = params(app);
+    match app.session.execute(START, p) {
         Ok(status) => {
             let s = &mut app.ui.ai_setup;
             (s.status, s.page) = (Some(status), Page::Install);
@@ -1318,7 +1308,7 @@ pub fn status_progress(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let inner = ui.scope(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
         let (bar, bar_resp) = ui.allocate_exact_size(vec2(90.0, 6.0), Sense::click());
-        crate::jobs_ui::bar(ui, bar, Some(fraction), &t);
+        crate::ai_widgets::progress_bar(ui, bar, Some(fraction), &t);
         let label = ui.add(egui::Label::new(RichText::new(line).color(t.text_dim).size(12.0)).selectable(false).sense(Sense::click()));
         bar_resp.union(label)
     });
@@ -1360,7 +1350,7 @@ fn info_row(ui: &mut egui::Ui, icon: (&str, Color32), title: &str, detail: &str,
         (!detail.is_empty()).then(|| ui.painter().layout(detail.to_string(), egui::FontId::proportional(12.0), t.text_faint, width - 62.0 - value_width));
     let height = 22.0 + detail_galley.as_ref().map_or(0.0, |g| g.size().y + 3.0) + 22.0;
     let rect = row_frame(ui, height.max(46.0));
-    crate::icons::paint(ui, Rect::from_min_size(rect.min + vec2(14.0, (rect.height() - 18.0) / 2.0), vec2(18.0, 18.0)), icon.0, 16.0, icon.1);
+    crate::ai_widgets::paint_icon(ui, Rect::from_min_size(rect.min + vec2(14.0, (rect.height() - 18.0) / 2.0), vec2(18.0, 18.0)), icon.0, 16.0, icon.1);
     let x = rect.left() + 46.0;
     let title_y = if detail_galley.is_some() { rect.top() + 11.0 } else { rect.center().y - 9.0 };
     ui.painter().text(pos2(x, title_y), egui::Align2::LEFT_TOP, title, crate::theme::medium(13.5), t.text);
@@ -1420,7 +1410,7 @@ fn sidebar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         }
         let number_color = if current { t.primary_text } else { t.text_faint };
         if step < page {
-            crate::icons::paint(ui, Rect::from_center_size(centre, vec2(14.0, 14.0)), "check", 12.0, t.text_dim);
+            crate::ai_widgets::paint_icon(ui, Rect::from_center_size(centre, vec2(14.0, 14.0)), "check", 12.0, t.text_dim);
         } else {
             ui.painter().text(centre, egui::Align2::CENTER_CENTER, (i + 1).to_string(), egui::FontId::proportional(11.5), number_color);
         }
@@ -1564,7 +1554,7 @@ fn page_checking(app: &PhotocraftApp, ui: &mut egui::Ui) {
     let height = MARK + 18.0 + title.size().y + 6.0 + sub.size().y + 28.0 + ROW * Stage::ALL.len() as f32;
     let mut y = (area.center().y - height / 2.0).max(area.top());
     let centre = area.center().x;
-    crate::brand::paint_mark(ui, Rect::from_center_size(pos2(centre, y + MARK / 2.0), vec2(MARK, MARK)));
+    crate::ai_widgets::paint_mark(ui, Rect::from_center_size(pos2(centre, y + MARK / 2.0), vec2(MARK, MARK)));
     y += MARK + 18.0;
     let title_height = title.size().y;
     painter.galley(pos2(centre - title.size().x / 2.0, y), title, t.text);
@@ -1581,7 +1571,7 @@ fn page_checking(app: &PhotocraftApp, ui: &mut egui::Ui) {
         let icon = Rect::from_center_size(pos2(left + 9.0, y + 10.0), vec2(18.0, 18.0));
         let (title_color, detail_color) = if step > current { (t.text_faint, t.text_faint) } else { (t.text, t.text_dim) };
         if step < current {
-            crate::icons::paint(ui, icon, "check", 16.0, t.accent);
+            crate::ai_widgets::paint_icon(ui, icon, "check", 16.0, t.accent);
         } else if step == current {
             egui::Spinner::new().size(16.0).color(t.accent).paint_at(ui, icon);
         } else {
@@ -1783,19 +1773,30 @@ fn folder_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, engine: bool) {
     ui.add(egui::Label::new(RichText::new(tr(about)).color(t.text_faint).size(11.5)).wrap());
     if pick {
         let current = if engine { app.ui.ai_setup.engine_dir.clone() } else { app.ui.ai_setup.models_dir.clone() };
-        let asked =
-            app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: Some(current).filter(|d| !d.trim().is_empty()) }, move |app, answer| {
-                if let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer {
-                    let s = &mut app.ui.ai_setup;
-                    *(if engine { &mut s.engine_dir } else { &mut s.models_dir }) = path;
-                }
-                Ok(Value::Null)
-            });
+        let mut request = craft::host::PickRequest::folder("aiSetupFolder");
+        if !current.trim().is_empty() {
+            request = request.directory(current);
+        }
+        let asked = app.ask_file(request, move |app, answer| {
+            if let Some(path) = picked_folder(answer) {
+                let s = &mut app.ui.ai_setup;
+                *(if engine { &mut s.engine_dir } else { &mut s.models_dir }) = path;
+            }
+            Ok(Value::Null)
+        });
         if let Err(e) = asked {
             app.ui.ai_setup.note = format!("{}: {e}", tr("Could not open the folder dialog"));
         }
     }
     ui.add_space(12.0);
+}
+
+/// The folder a folder dialog answered with, if it gave one.
+fn picked_folder(answer: craft::host::Picked) -> Option<String> {
+    match answer {
+        craft::host::Picked::Paths(paths) => paths.into_iter().next().map(|p| p.to_string_lossy().into_owned()),
+        _ => None,
+    }
 }
 
 /// The engine this app installs: models folders the user already has, read beside its own.
@@ -1819,8 +1820,8 @@ fn own_folders(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     }
     let full = app.ui.ai_setup.extra_models_dirs.len() >= photocraft_aisetup::plan::MAX_EXTRA_MODELS_DIRS;
     if ui.add_enabled_ui(!full, |ui| widgets::secondary_button(ui, tr("Add Folder…"), 120.0)).inner.clicked() {
-        let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: None }, |app, answer| {
-            if let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer {
+        let asked = app.ask_file(craft::host::PickRequest::folder("aiSetupModels"), |app, answer| {
+            if let Some(path) = picked_folder(answer) {
                 match own_folder(&path) {
                     Ok(dir) if app.ui.ai_setup.extra_models_dirs.iter().any(|d| same_folder(d, &dir)) => {}
                     Ok(dir) => {
@@ -2143,7 +2144,7 @@ fn gated_state(app: &PhotocraftApp, ui: &mut egui::Ui, id: &str) {
         "ready" => {
             ui.label(small(tr("Ready to download"), t.accent_text));
             let (mark, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-            crate::icons::paint(ui, mark, "check", 12.0, t.accent_text);
+            crate::ai_widgets::paint_icon(ui, mark, "check", 12.0, t.accent_text);
         }
         "licence" => {
             ui.label(small(tr("Licence to accept (below)"), t.warning));
@@ -2256,7 +2257,7 @@ fn hf_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             .horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 3.0;
                 let (mark, _) = ui.allocate_exact_size(vec2(12.0, 12.0), Sense::hover());
-                crate::icons::paint(ui, mark, if app.ui.ai_setup.token_open { "chevron-down" } else { "chevron-right" }, 11.0, t.text_dim);
+                crate::ai_widgets::paint_icon(ui, mark, if app.ui.ai_setup.token_open { "chevron-down" } else { "chevron-right" }, 11.0, t.text_dim);
                 action(ui, tr("Use an access token instead"), t.text_dim).clicked()
             })
             .inner;
@@ -2367,7 +2368,7 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     let (done, total) = (number(&progress, "/bytesDone"), number(&progress, "/bytesTotal"));
     if total > 0 {
         let (bar, _) = ui.allocate_exact_size(vec2(ui.available_width(), 8.0), Sense::hover());
-        crate::jobs_ui::bar(ui, bar, Some((done as f64 / total as f64).clamp(0.0, 1.0) as f32), &t);
+        crate::ai_widgets::progress_bar(ui, bar, Some((done as f64 / total as f64).clamp(0.0, 1.0) as f32), &t);
         ui.add_space(4.0);
         let speed = progress.get("speed").and_then(Value::as_f64).unwrap_or(0.0);
         let mut line = format!("{} / {}", size(done), size(total));
@@ -2438,10 +2439,10 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     let mut child = ui.new_child(UiBuilder::new().max_rect(mark));
                     child.add(egui::Spinner::new().size(14.0).color(t.accent));
                 }
-                "done" => crate::icons::paint(ui, mark, "check", 14.0, t.accent),
-                "failed" => crate::icons::paint(ui, mark, "x", 14.0, t.danger),
-                "skipped" => crate::icons::paint(ui, mark, "info", 14.0, t.warning),
-                _ => crate::icons::paint(ui, mark, "circle", 14.0, t.text_faint),
+                "done" => crate::ai_widgets::paint_icon(ui, mark, "check", 14.0, t.accent),
+                "failed" => crate::ai_widgets::paint_icon(ui, mark, "x", 14.0, t.danger),
+                "skipped" => crate::ai_widgets::paint_icon(ui, mark, "info", 14.0, t.warning),
+                _ => crate::ai_widgets::paint_icon(ui, mark, "circle", 14.0, t.text_faint),
             }
             let (step_done, step_total) = (number(step, "/done"), number(step, "/total"));
             let right = match (state, step_total) {
@@ -2478,7 +2479,7 @@ fn page_install(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                 // can't say how far it is (starting the engine, rendering) still shows it works.
                 let track = Rect::from_min_max(pos2(rect.left() + 36.0, rect.bottom() - 6.0), pos2(rect.right() - 12.0, rect.bottom() - 3.0));
                 let fraction = (step_total > 0).then(|| (step_done as f64 / step_total as f64).clamp(0.0, 1.0) as f32);
-                crate::jobs_ui::bar(ui, track, fraction, &t);
+                crate::ai_widgets::progress_bar(ui, track, fraction, &t);
             }
             ui.add_space(4.0);
         }
@@ -2615,7 +2616,7 @@ fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             Page::Install if !running(app) => {
                 if !failure(app).is_empty() {
                     let (mark, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
-                    crate::icons::paint(ui, mark, "x", 13.0, t.danger);
+                    crate::ai_widgets::paint_icon(ui, mark, "x", 13.0, t.danger);
                     ui.label(RichText::new(tr("The setup stopped with an error.")).color(t.danger).size(12.0));
                     let r = ui.add(egui::Label::new(RichText::new(tr("Show error")).color(t.accent).size(12.0)).sense(Sense::click()));
                     if r.on_hover_text(tr("The whole message, to read or copy")).on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {
@@ -2720,7 +2721,7 @@ fn footer_buttons(app: &mut PhotocraftApp, ui: &mut egui::Ui, plan: &Value, can_
         Page::Ready => {
             if widgets::primary_button(ui, tr("Open AI Gen"), 120.0).clicked() {
                 app.ui.ai_setup.open = false;
-                let _ = crate::ai_gen_ui::menu(app, crate::ai_gen_ui::PANEL, &json!({"show": true}));
+                let _ = crate::panel_docking::show_panel(app, crate::ai_gen_ui::ID, Some(true));
             }
             if widgets::secondary_button(ui, tr("Add Models…"), 110.0).clicked() {
                 app.ui.ai_setup.page = Page::Models;
@@ -2756,7 +2757,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
             let (rect, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
             // The title row.
             let title = Rect::from_min_size(rect.min, vec2(w, 40.0));
-            crate::brand::paint_mark(ui, Rect::from_min_size(title.min + vec2(14.0, 10.0), vec2(20.0, 20.0)));
+            crate::ai_widgets::paint_mark(ui, Rect::from_min_size(title.min + vec2(14.0, 10.0), vec2(20.0, 20.0)));
             ui.painter().text(
                 pos2(title.left() + 44.0, title.center().y),
                 egui::Align2::LEFT_CENTER,
@@ -2765,7 +2766,7 @@ pub fn window(app: &mut PhotocraftApp, ctx: &egui::Context) {
                 t.text_dim,
             );
             let mut bar = ui.new_child(UiBuilder::new().max_rect(title.shrink2(vec2(10.0, 8.0))).layout(Layout::right_to_left(Align::Center)));
-            close = crate::icons::button(&mut bar, "x", 24.0, false, tr("Close")).clicked();
+            close = crate::ai_widgets::icon_button(&mut bar, "x", 24.0, false, tr("Close")).clicked();
             ui.painter().line_segment([title.left_bottom(), title.right_bottom()], Stroke::new(1.0, t.separator));
             // The steps on the left.
             let side = Rect::from_min_max(pos2(rect.left(), title.bottom()), pos2(rect.left() + SIDEBAR, rect.bottom()));
@@ -3135,7 +3136,7 @@ fn sign_in_question(app: &mut PhotocraftApp, ctx: &egui::Context) {
             let (dot, _) = ui.allocate_exact_size(vec2(22.0, 22.0), Sense::hover());
             if done {
                 ui.painter().circle_filled(dot.center(), 10.0, t.accent);
-                crate::icons::paint(ui, Rect::from_center_size(dot.center(), vec2(13.0, 13.0)), "check", 11.0, t.primary_text);
+                crate::ai_widgets::paint_icon(ui, Rect::from_center_size(dot.center(), vec2(13.0, 13.0)), "check", 11.0, t.primary_text);
             } else {
                 ui.painter().circle_stroke(dot.center(), 10.0, Stroke::new(1.0, t.field_border));
                 ui.painter().text(dot.center(), egui::Align2::CENTER_CENTER, n, egui::FontId::proportional(11.5), t.text_dim);

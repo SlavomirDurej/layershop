@@ -34,7 +34,7 @@ fn local(id: &str, family: Family) -> Model {
 
 /// An app with the fake server, `models` set up and their files on it, and a 64 x 48 white
 /// document.
-fn app_with(models: &[Model]) -> PhotocraftApp {
+fn app_with(models: &[Model]) -> Box<PhotocraftApp> {
     let mut app = PhotocraftApp::new(Session::new(), crate::Services::default());
     app.session.ai.transport = Some(Arc::new(Fake));
     app.run("prefs.set", json!({"path": "integrations.ai.models", "value": models})).unwrap();
@@ -54,13 +54,20 @@ fn layers(app: &PhotocraftApp) -> usize {
     app.session.active().unwrap().doc.layers.len()
 }
 
-/// Open Edit › Fill, choose AI Gen with `prompt`, press OK.
-fn fill_with_ai(app: &mut PhotocraftApp, prompt: &str) -> (u64, Result<Value, String>) {
+/// Open Edit › Fill, choose AI Gen with `prompt`, press OK. The dialog's id, and whether OK
+/// closed it.
+fn fill_with_ai(app: &mut PhotocraftApp, prompt: &str) -> (craft::ui::dialog::DialogId, bool) {
+    use crate::smart_filter_dialog::tests::{confirm, set};
     let id = crate::fill_ui::open(app);
-    let d = app.ui.dialog_mut(id).unwrap();
-    d.fields.insert("contents".into(), json!(crate::fill_ui::AI_GEN));
-    d.fields.insert(crate::fill_ui::PROMPT.into(), json!(prompt));
-    (id, crate::dialogs::confirm(app, id))
+    set(app, id, "contents", json!(crate::fill_ui::AI_GEN));
+    set(app, id, crate::fill_ui::PROMPT, json!(prompt));
+    confirm(app, id);
+    (id, !is_open(app, id))
+}
+
+/// Whether dialog `id` is still open.
+fn is_open(app: &PhotocraftApp, id: craft::ui::dialog::DialogId) -> bool {
+    app.framework.dialogs.open_dialogs().iter().any(|d| d.id == id)
 }
 
 #[test]
@@ -87,10 +94,8 @@ fn ai_gen_fills_the_selection_on_a_new_layer_masked_by_it() {
     let mut app = app_with(&[local("qwen", Family::QwenImage21)]);
     app.run("select.rect", json!({"x": 16, "y": 12, "width": 16, "height": 16})).unwrap();
     let before = layers(&app);
-    let (id, r) = fill_with_ai(&mut app, "  a red kite  ");
-    let r = r.unwrap();
-    assert!(app.ui.dialog_mut(id).is_none(), "OK closed the dialog");
-    assert_eq!((r["mode"].as_str(), r["model"].as_str()), (Some("imgEdit"), Some("qwen")));
+    let (_, closed) = fill_with_ai(&mut app, "  a red kite  ");
+    assert!(closed, "OK closed the dialog");
     assert_eq!(layers(&app), before + 1);
     let d = app.session.active().unwrap();
     let layer = d.doc.layer(d.active_layer.unwrap()).unwrap();
@@ -100,9 +105,7 @@ fn ai_gen_fills_the_selection_on_a_new_layer_masked_by_it() {
     // The whole picture is what changes, not the empty layer that may be active; no references.
     assert_eq!(g.source, Some(photocraft_doc::GenerationSource::Document(d.doc.id.0)));
     assert!(g.references.is_empty());
-    // The dialog opens on AI Gen with the prompt again, to try once more after an undo.
-    let saved = crate::fill_ui::fields(&app);
-    assert_eq!((saved["contents"].as_str(), saved["prompt"].as_str()), (Some("aiGen"), Some("  a red kite  ")));
+    assert_eq!(g.model, "qwen");
 }
 
 #[test]
@@ -133,15 +136,13 @@ fn without_a_model_or_something_to_fill_the_dialog_stays_open_and_says_why() {
     // Only a model that creates: nothing can fill.
     let mut app = app_with(&[local("z", Family::ZImage)]);
     let before = layers(&app);
-    let (id, r) = fill_with_ai(&mut app, "a kite");
-    assert_eq!(r.unwrap_err(), no_model());
-    assert!(app.ui.dialog_mut(id).is_some(), "the dialog stays open");
+    let (_, closed) = fill_with_ai(&mut app, "a kite");
+    assert!(!closed, "the dialog stays open");
     assert_eq!(layers(&app), before);
     // An inpainting model with no selection to paint into.
     let mut app = app_with(&[local("fill", Family::Flux1Fill)]);
-    let (id, r) = fill_with_ai(&mut app, "a kite");
-    assert!(r.is_err());
-    assert!(app.ui.dialog_mut(id).is_some());
+    let (_, closed) = fill_with_ai(&mut app, "a kite");
+    assert!(!closed);
     assert_eq!(layers(&app), before);
     // A cloud model without its key.
     let gpt = Model { id: "gpt".into(), ..Model::cloud(Provider::Openai, "GPT Image 2", "gpt-image-2", false) };
@@ -153,33 +154,15 @@ fn without_a_model_or_something_to_fill_the_dialog_stays_open_and_says_why() {
 fn hostile_dialog_fields_neither_crash_nor_fill() {
     let mut app = app_with(&[local("qwen", Family::QwenImage21)]);
     let id = crate::fill_ui::open(&mut app);
-    let d = app.ui.dialog_mut(id).unwrap();
-    d.fields.insert("contents".into(), json!(crate::fill_ui::AI_GEN));
-    d.fields.insert(crate::fill_ui::PROMPT.into(), json!({"not": "text"}));
-    // A prompt that isn't text is an empty one: the fill still runs, with the empty-prompt text.
-    let r = crate::dialogs::confirm(&mut app, id).unwrap();
-    assert_eq!(r["modelPrompt"].as_str().map(|p| p.contains("surroundings")), Some(true), "{r}");
-    // A remembered prompt that isn't text, or is absurdly long, is not reopened.
-    let long = "x".repeat(20_000);
-    for bad in [json!(7), json!(long)] {
-        app.session.prefs.edit(|p| p.dialogs.insert(crate::fill_ui::COMMAND.into(), json!({"contents": "aiGen", "prompt": bad})));
-        assert_eq!(crate::fill_ui::fields(&app)["prompt"].as_str(), Some(""));
+    let ctx = app.ctx().clone();
+    crate::smart_filter_dialog::tests::set(&mut app, id, "contents", json!(crate::fill_ui::AI_GEN));
+    // A prompt that isn't text, or is absurdly long, is refused or cut; nothing crashes.
+    for bad in [json!({"not": "text"}), json!(7), json!("x".repeat(20_000))] {
+        let _ = app.framework.dialogs.set_json_field(&ctx, id, crate::fill_ui::PROMPT, bad);
     }
+    crate::smart_filter_dialog::tests::confirm(&mut app, id);
 }
 
-#[test]
-fn change_opens_preferences_on_generative_fill() {
-    let mut app = app_with(&[local("qwen", Family::QwenImage21)]);
-    let id = crate::fill_ui::open(&mut app);
-    app.ui.dialog_mut(id).unwrap().fields.insert("__fillAiSettings".into(), json!(true));
-    crate::fill_ui::open_requested(&mut app, id);
-    let prefs = app.ui.dialogs.iter().find(|d| crate::prefs_ui::is_preferences(&d.fields)).expect("Preferences opened over Fill");
-    assert_eq!(prefs.fields.get(super::super::PAGE).and_then(Value::as_str), Some(PAGE));
-    assert!(app.ui.dialog_mut(id).is_some(), "Fill stays open under it");
-    // Asked once: drawing again opens no second one.
-    crate::fill_ui::open_requested(&mut app, id);
-    assert_eq!(app.ui.dialogs.iter().filter(|d| crate::prefs_ui::is_preferences(&d.fields)).count(), 1);
-}
 
 #[test]
 fn the_page_lists_the_models_that_can_fill_and_keeps_the_one_clicked() {

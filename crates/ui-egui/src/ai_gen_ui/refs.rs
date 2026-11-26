@@ -25,7 +25,7 @@ use serde_json::{Value, json};
 use super::{edit_label, edit_source, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// `source` with a layer of the active document named by its document too
 /// ([`SourceRef::DocumentLayer`]), as the panel's lists name it.
@@ -197,7 +197,7 @@ pub(super) fn chips(app: &mut PhotocraftApp, ui: &mut egui::Ui, busy: bool, max:
                     body.on_hover_text(chip_tip(&r.name, &picture, state, number));
                 }
                 if addable
-                    && crate::icons::button(ui, "plus", 22.0, false, tr("Add a picture to refer to: a layer, a document, or a layer of another open document"))
+                    && crate::ai_widgets::icon_button(ui, "plus", 22.0, false, tr("Add a picture to refer to: a layer, a document, or a layer of another open document"))
                         .clicked()
                 {
                     add = true;
@@ -328,7 +328,7 @@ fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: S
                     widgets::checker(p, thumb_rect, 4.0);
                     p.image(tex, thumb_rect, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
                 }
-                None => crate::icons::paint(ui, thumb_rect, "image", 13.0, t.icon),
+                None => crate::ai_widgets::paint_icon(ui, thumb_rect, "image", 13.0, t.icon),
             }
         }
         let text_pos = pos2(rect.left() + lead, rect.center().y - galley.size().y / 2.0);
@@ -336,7 +336,7 @@ fn chip(ui: &mut egui::Ui, label: &str, thumb: Option<egui::TextureId>, state: S
         if close.hovered() {
             ui.painter().rect_filled(close_rect, CLOSE / 2.0, t.hover);
         }
-        crate::icons::paint(ui, close_rect, "x", 10.0, if close.hovered() { t.text } else { t.text_dim });
+        crate::ai_widgets::paint_icon(ui, close_rect, "x", 10.0, if close.hovered() { t.text } else { t.text_dim });
     }
     let clicked = close.clicked();
     (body, clicked)
@@ -367,7 +367,7 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, i: usize, offered: &[(Sour
                     change = Some((Entry::Keep(i, name), Some(format!("ai-ref-name-{i}"))));
                 }
             }
-            if crate::icons::button(ui, "check", 22.0, false, tr("Done")).clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+            if crate::ai_widgets::icon_button(ui, "check", 22.0, false, tr("Done")).clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
                 keep = false;
             }
         });
@@ -493,7 +493,7 @@ impl Thumb<'_> {
             Thumb::Layer(px, frame) => {
                 let mut v = [0.0f32; 8];
                 let n = px.channels().min(v.len());
-                Some(crate::app::thumb_image(*frame, side, |x, y| {
+                Some(crate::ai_widgets::thumb_image(*frame, side, |x, y| {
                     let Some(buf) = v.get_mut(..n) else { return [0.0; 4] };
                     px.read_pixel(x, y, buf);
                     photocraft_raster::to_rgba(&px.format(), buf)
@@ -535,7 +535,7 @@ fn thumb_source<'a>(s: &'a Session, picture: &'a AiPicture) -> Option<(u64, Thum
         AiPicture::Layer(id) => {
             let px = d.doc.layer(photocraft_doc::LayerId(*id))?.surface()?;
             let frame = px.content_bounds().intersect(&d.doc.bounds());
-            Some((crate::surface_fingerprint(px), Thumb::Layer(px, frame)))
+            Some((crate::ai_widgets::surface_fingerprint(px), Thumb::Layer(px, frame)))
         }
         AiPicture::Document => Some((d.revision, Thumb::Document(&d.doc))),
         AiPicture::Image { png, .. } => Some((0, Thumb::Png(png))),

@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use super::{ACTION, FILES, SELECTED, SETUP, STATUS, Standing, failed, model_of, status_line, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
-use crate::widgets;
+use crate::ai_widgets as widgets;
 
 /// Dialog fields: what `ai.setup.modelFolders` listed (`[{path, kind, found, files}]`), and the
 /// folders opened to show their files (by path).
@@ -178,7 +178,7 @@ fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: bool
         let mut header = egui::Rect::NOTHING;
         ui.horizontal_top(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            header = header.union(ui.add(crate::icons::image("folder", 22.0, if found { t.icon } else { t.text_faint })).rect);
+            header = header.union(crate::ai_widgets::icon(ui, "folder", 22.0, if found { t.icon } else { t.text_faint }).rect);
             ui.vertical(|ui| {
                 let name = ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 6.0;
@@ -197,21 +197,21 @@ fn row(ui: &mut egui::Ui, f: &mut Map<String, Value>, entry: &Value, yours: bool
                     let room = vec2(ui.available_width(), field.rect.height());
                     ui.allocate_ui_with_layout(room, egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        let chevron = crate::icons::button(ui, if open { "chevron-down" } else { "chevron-right" }, 24.0, false, if open { tr("Hide its files") } else { tr("List its files") });
+                        let chevron = crate::ai_widgets::icon_button(ui, if open { "chevron-down" } else { "chevron-right" }, 24.0, false, if open { tr("Hide its files") } else { tr("List its files") });
                         if chevron.clicked() {
                             clicked = Some(open);
                         }
                         if yours {
-                            let remove = ui.add_enabled_ui(!busy, |ui| crate::icons::button(ui, "trash", 24.0, false, tr("Stop reading this folder (nothing in it is deleted)"))).inner;
+                            let remove = ui.add_enabled_ui(!busy, |ui| crate::ai_widgets::icon_button(ui, "trash", 24.0, false, tr("Stop reading this folder (nothing in it is deleted)"))).inner;
                             if remove.clicked() {
                                 f.insert(CONFIRM.into(), json!(path));
                             }
                         }
-                        let show = ui.add_enabled_ui(found, |ui| crate::icons::button(ui, "folder-open", 24.0, false, tr(open_label()))).inner;
+                        let show = ui.add_enabled_ui(found, |ui| crate::ai_widgets::icon_button(ui, "folder-open", 24.0, false, tr(open_label()))).inner;
                         if show.clicked() {
                             f.insert(ACTION.into(), json!(format!("{SHOW}{path}")));
                         }
-                        if crate::icons::button(ui, "rotate-cw", 24.0, false, tr("Read the folder again")).clicked() {
+                        if crate::ai_widgets::icon_button(ui, "rotate-cw", 24.0, false, tr("Read the folder again")).clicked() {
                             f.insert(ACTION.into(), json!(LIST));
                         }
                     });
@@ -473,12 +473,11 @@ pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &
     match action {
         LIST => list(app, f),
         ADD => {
-            let asked = app.ask_file(crate::file_dialog::FileDialogRequest::Folder { initial_dir: None }, |app, answer| {
-                let crate::file_dialog::FileDialogAnswer::FolderTo(path) = answer else { return Ok(Value::Null) };
+            let asked = app.ask_folder(|app, path| {
                 let mut folders = saved(app);
                 let picked = crate::ai_setup_ui::own_folder(&path);
-                let Some(d) = app.ui.dialogs.iter().position(|d| crate::prefs_ui::is_preferences(&d.fields)) else { return Ok(Value::Null) };
-                let mut fields = std::mem::take(&mut app.ui.dialogs[d].fields);
+                let Some(shared) = crate::prefs_ui::generative_ai_fields(app) else { return Ok(Value::Null) };
+                let mut fields = std::mem::take(&mut *shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
                 match picked {
                     // Picked again: nothing changes.
                     Ok(dir) if folders.contains(&dir) => {}
@@ -488,9 +487,7 @@ pub(super) fn act(app: &mut PhotocraftApp, f: &mut Map<String, Value>, action: &
                     }
                     Err(why) => failed(&mut fields, &why),
                 }
-                if let Some(dialog) = app.ui.dialogs.get_mut(d) {
-                    dialog.fields = fields;
-                }
+                *shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = fields;
                 Ok(Value::Null)
             });
             if let Err(e) = asked {
