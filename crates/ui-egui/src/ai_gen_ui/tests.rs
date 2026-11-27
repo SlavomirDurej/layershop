@@ -1217,7 +1217,7 @@ fn references_are_named_chips_the_document_keeps() {
     assert_eq!(refs::kept(&app.session)[1].name, "Max");
 }
 
-/// The prompt names references with @: what it sends, how it shows them, and the names it offers.
+/// The prompt names references with @: what it sends and the names it offers.
 #[test]
 fn the_prompt_mentions_references_by_name_and_offers_them_after_an_at() {
     // What the prompt sends: all of them while it mentions none, then those it mentions.
@@ -1226,11 +1226,6 @@ fn the_prompt_mentions_references_by_name_and_offers_them_after_an_at() {
     assert_eq!(refs::sent("put image 4 behind them", &names), [(All, Some(2)), (All, Some(3)), (All, Some(4))]);
     assert_eq!(refs::sent("@max hugs @Luna", &names), [(Mentioned, Some(2)), (Mentioned, Some(3)), (No, None)]);
     assert_eq!(refs::sent("@Max waves", &names), [(No, None), (Mentioned, Some(2)), (No, None)]);
-    // The prompt shows a mention in the accent colour, on a tint; other @words stay plain.
-    let job = refs::prompt_job("@Luna meets @Bob", &["Luna", "Max"], egui::FontId::proportional(12.0), egui::Color32::WHITE, egui::Color32::BLUE, 100.0);
-    let colored: Vec<(&str, egui::Color32)> =
-        job.sections.iter().map(|s| (&job.text[s.byte_range.start.0..s.byte_range.end.0], s.format.color)).filter(|(t, _)| !t.is_empty()).collect();
-    assert_eq!(colored, [("@Luna", egui::Color32::BLUE), (" meets @Bob", egui::Color32::WHITE)]);
     // Typing @ offers the names; Tab or a click puts the one taken in, and a space after it.
     let names = ["Luna", "Max", "Lucas"];
     assert_eq!(refs::completion_at("hug @", 5, &names), Some((4..5, vec![0, 1, 2])));
@@ -1242,8 +1237,15 @@ fn the_prompt_mentions_references_by_name_and_offers_them_after_an_at() {
     assert_eq!(refs::completion_at("hug @zz", 7, &names), None);
     assert_eq!(refs::completion_at("🦆 @L", 4, &names), Some(("🦆 ".len().."🦆 @L".len(), vec![0, 2])));
     assert_eq!(refs::completion_at("x", 99, &names), None);
-    assert_eq!(refs::complete("hug @lu now", 4..7, "Luna"), ("hug @Luna now".into(), 9));
-    assert_eq!(refs::complete("hug @lu", 4..7, "Luna"), ("hug @Luna ".into(), 10));
+    assert_eq!(refs::completion_text("hug @lu now", 4..7, "Luna"), "@Luna");
+    assert_eq!(refs::completion_text("hug @lu", 4..7, "Luna"), "@Luna ");
+    // The prompt's completer reads the caret in bytes: after an emoji, the names still fit.
+    use craft::ui::primitives::Completer as _;
+    let completer = refs::Names(names.iter().map(|n| n.to_string()).collect());
+    let mut offered = Vec::new();
+    let text = "🦆 @L";
+    assert_eq!(completer.complete(text, text.len(), &mut offered), Some("🦆 ".len()..text.len()));
+    assert_eq!(offered.iter().map(|c| c.insert.as_str()).collect::<Vec<_>>(), ["@Luna ", "@Lucas "]);
 }
 
 #[test]
@@ -1514,6 +1516,101 @@ mod clicks {
         let mut h = Harness::builder().with_size(vec2(1440.0, 2400.0)).with_max_steps(64).with_context(ctx).build_eframe(move |_| app);
         h.run_steps(8);
         h
+    }
+
+    /// A key press as the window sends it: the press, the text it types, the release.
+    fn key(h: &mut Harness<'_, Box<PhotocraftApp>>, key: egui::Key, text: Option<&str>, modifiers: Modifiers) {
+        h.input_mut().events.push(egui::Event::ModifiersChanged(modifiers));
+        h.input_mut().events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+        if let Some(text) = text {
+            h.input_mut().events.push(egui::Event::Text(text.into()));
+        }
+        h.input_mut().events.push(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+        h.input_mut().events.push(egui::Event::ModifiersChanged(Modifiers::NONE));
+        h.run_steps(3);
+    }
+
+    /// #16: the prompt keeps the keys typed into it. A letter that is a shortcut (F, full screen; B, the Brush) is
+    /// typed and runs nothing, Ctrl+Z undoes the typing and not the document, and Escape leaves the field with its
+    /// text and the selection (the mask of a fill) kept.
+    #[test]
+    fn typing_in_the_prompt_runs_no_shortcut() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        app.run("layer.new.layer", json!({"name": "added"})).unwrap();
+        app.run("select.rect", json!({"x": 4, "y": 4, "width": 20, "height": 20})).unwrap();
+        let mut h = showing(app);
+        let field = h.query_all_by_label("Prompt").find(|n| n.accesskit_node().role() == egui::accesskit::Role::MultilineTextInput);
+        let at = field.expect("the prompt box").rect().center();
+        click(&mut h, at);
+        let layers = |h: &Harness<'_, Box<PhotocraftApp>>| h.state().session.active().unwrap().doc.walk().len();
+        let (mode, tool, before) = (h.state().ui.view.screen_mode, h.state().ui.tool, layers(&h));
+        key(&mut h, egui::Key::F, Some("f"), Modifiers::NONE);
+        key(&mut h, egui::Key::B, Some("b"), Modifiers::NONE);
+        assert_eq!(h.state().ui.ai_gen.prompt, "fb", "the letters are typed");
+        assert_eq!((h.state().ui.view.screen_mode, h.state().ui.tool), (mode, tool), "and run no shortcut");
+        key(&mut h, egui::Key::Z, None, Modifiers::COMMAND | Modifiers::CTRL);
+        assert_eq!(layers(&h), before, "Ctrl+Z leaves the document's history alone");
+        assert!(h.state().ui.ai_gen.prompt.len() < 2, "and undoes the typing: {:?}", h.state().ui.ai_gen.prompt);
+        key(&mut h, egui::Key::C, Some("c"), Modifiers::NONE);
+        let typed = h.state().ui.ai_gen.prompt.clone();
+        key(&mut h, egui::Key::Escape, None, Modifiers::NONE);
+        assert_eq!(h.state().ui.ai_gen.prompt, typed, "Escape keeps the text");
+        assert!(h.state().session.active().unwrap().doc.selection.is_some(), "and the selection");
+    }
+
+    /// The prompt box is as tall as its text: it grows with a longer prompt and stops at the room the panel leaves it,
+    /// where the prompt scrolls inside.
+    #[test]
+    fn the_prompt_box_grows_with_its_text_up_to_its_room() {
+        let mut app = app();
+        add_model(&mut app, z_image("z"));
+        app.run("file.new", json!({"width": 64, "height": 48})).unwrap();
+        let mut h = showing(app);
+        let height_with =|h: &mut Harness<'_, Box<PhotocraftApp>>, prompt: String| {
+            h.state_mut().ui.ai_gen.prompt = prompt;
+            h.run_steps(4);
+            let field = h.query_all_by_label("Prompt").find(|n| n.accesskit_node().role() == egui::accesskit::Role::MultilineTextInput);
+            field.expect("the prompt box").rect().height()
+        };
+        let empty = height_with(&mut h, String::new());
+        let six = height_with(&mut h, "a line\n".repeat(6));
+        let long = height_with(&mut h, "a line\n".repeat(400));
+        assert!(six > empty, "six lines {six} grow past the empty box {empty}");
+        assert!(long >= six && long < 1300.0, "a long prompt stops at the room: {long}");
+    }
+
+    /// #16: a long dropdown's search field, in the list's popup, keeps what is typed into it (L is the Lasso's key)
+    /// and Enter picks the first option left.
+    #[test]
+    fn typing_in_a_dropdowns_search_narrows_it_and_runs_no_shortcut() {
+        use crate::app::framework::BuildApp as _;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        const NAMES: [&str; 12] = ["alpha", "bravo", "charlie", "delta", "echo", "foxtrot", "golf", "hotel", "india", "juliet", "kilo", "lima"];
+        let picked = Rc::new(Cell::new(0usize));
+        let shown = Rc::clone(&picked);
+        let body = move |ui: &mut egui::Ui, _: &mut PhotocraftApp| {
+            egui::CentralPanel::default().show(ui, |ui| {
+                let options: Vec<(usize, &str)> = NAMES.iter().copied().enumerate().collect();
+                let mut current = shown.get();
+                widgets::dropdown_search(ui, "test-search", "Pick", &mut current, &options, 200.0);
+                shown.set(current);
+            });
+        };
+        let mut h = Harness::builder().with_size(vec2(900.0, 700.0)).with_max_steps(64).build_app(body, app());
+        h.run_steps(4);
+        let at = h.get_by_label("Pick").rect().center();
+        click(&mut h, at);
+        let tool = h.state().ui.tool;
+        key(&mut h, egui::Key::L, Some("l"), Modifiers::NONE);
+        key(&mut h, egui::Key::I, Some("i"), Modifiers::NONE);
+        key(&mut h, egui::Key::M, Some("m"), Modifiers::NONE);
+        assert_eq!(h.state().ui.tool, tool, "the letters run no shortcut");
+        assert!(h.query_by_label("charlie").is_none() && h.query_by_label("lima").is_some(), "the list narrows to what is typed");
+        key(&mut h, egui::Key::Enter, None, Modifiers::NONE);
+        assert_eq!(NAMES[picked.get()], "lima");
     }
 
     #[test]

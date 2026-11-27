@@ -326,22 +326,49 @@ pub fn elided_label(ui: &mut Ui, text: &str, max_w: f32) -> Response {
 
 // ----------------------------------------------------------------------------- text and numbers
 
-/// A one-line text field `width` points wide (the room there is when 0), with `hint` while empty.
-pub fn text_field(ui: &mut Ui, id: egui::Id, text: &mut String, hint: &str, width: f32, mono: bool) -> Response {
-    text_field_ex(ui, id, text, hint, width, mono, None)
+/// What a text field did in a pass ([`show_text`]).
+pub(crate) struct Typed {
+    /// The text changed in this pass.
+    pub changed: bool,
+    /// Enter (Ctrl+Enter in a field of several lines) submitted it, in a field made with `submits()`.
+    pub submitted: bool,
+    /// The keyboard focus left the field in this pass: a click elsewhere, Tab or Escape.
+    pub left: bool,
+    /// The field's response: its rect, and its hover for a tooltip.
+    pub response: Response,
 }
 
-/// [`text_field`] that takes at most `char_limit` characters.
-pub fn text_field_ex(ui: &mut Ui, id: egui::Id, text: &mut String, hint: &str, width: f32, mono: bool, char_limit: Option<usize>) -> Response {
+/// Shows `field` (a framework text field, plain text) `width` points wide, the room there is when 0, as tall as its
+/// lines (`lines`, growing with its text up to `max_lines`). `key` names the field among its neighbours, so fields
+/// that share a label keep their own typing.
+///
+/// The AI screens type into the framework's text field, never egui's own `TextEdit`: the framework keeps the letters,
+/// Ctrl+Z and the other editing keys in a text field it knows, and runs them as the app's shortcuts in an egui widget
+/// it doesn't (#16: F went full screen and Ctrl+Z undid the document from the prompt). Escape keeps the text, as
+/// egui's field did. A field is never held taller than its lines: the framework centres the text on the field's
+/// height.
+pub(crate) fn show_text(ui: &mut Ui, key: impl egui::AsIdSalt, width: f32, field: craft::ui::text::TextField<'_>) -> Typed {
+    use craft::ui::contract::{Props as _, Show as _, Sizing};
     let width = if width > 0.0 { width } else { ui.available_width() };
-    let mut edit = egui::TextEdit::singleline(text).id(id).hint_text(tl!(hint)).desired_width(width - 8.0);
-    if mono {
-        edit = edit.font(theme::mono(12.0));
-    }
-    if let Some(limit) = char_limit {
-        edit = edit.char_limit(limit);
-    }
-    ui.add(edit)
+    let room = ui.available_size_before_wrap().y.max(ui.spacing().interact_size.y);
+    let field = field.keeps_on_escape().id_salt(("ai-text", key)).sizing(Sizing::FillWidth);
+    let out = ui.allocate_ui_with_layout(vec2(width, room), egui::Layout::top_down(egui::Align::Min), |ui| {
+        ui.set_width(width);
+        field.show(ui)
+    });
+    let shown = out.inner;
+    Typed { changed: shown.value().is_some(), submitted: shown.submitted, left: shown.text_lost_focus, response: shown.response }
+}
+
+/// A one-line text field `width` points wide (the room there is when 0), named `label`, with `hint` while empty.
+pub(crate) fn text_field(ui: &mut Ui, key: impl egui::AsIdSalt, label: &str, text: &mut String, hint: &str, width: f32, mono: bool) -> Typed {
+    let field = plain(label, text).placeholder(tl!(hint).to_string());
+    show_text(ui, key, width, if mono { field.mono() } else { field })
+}
+
+/// A plain text field named `label` (English, shown in the UI language) that edits `text` as it is typed.
+pub(crate) fn plain<'a>(label: &str, text: &'a mut String) -> craft::ui::text::TextField<'a> {
+    craft::ui::text::TextField::new(tl!(label).to_string(), craft::ui::contract::Bind::bound(text))
 }
 
 /// A number typed as text: digits with `.` or `,` as the decimal mark, an optional sign. Long
@@ -449,11 +476,11 @@ fn dropdown_with<T: PartialEq + Clone>(
         let mut query: String = ui.data(|d| d.get_temp(query_id)).unwrap_or_default();
         let mut pick_first = false;
         if searching {
-            let field = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tl!("Search")).desired_width(width - 16.0));
-            if !field.has_focus() && query.is_empty() {
-                field.request_focus();
-            }
-            pick_first = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            use craft::ui::contract::Props as _;
+            // The list opens ready to type into.
+            let field = plain("Search", &mut query).placeholder(tl!("Search").to_string()).submits();
+            let field = field.request_focus(craft::ui::runtime::focus::FocusRequest::WhenNone);
+            pick_first = show_text(ui, ("dropdown-search", id), width - 16.0, field).submitted;
             ui.data_mut(|d| d.insert_temp(query_id, query.clone()));
         }
         let filtering = searching && !query.trim().is_empty();

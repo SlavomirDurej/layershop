@@ -21,6 +21,8 @@ use crate::PhotocraftApp;
 use super::{CanvasEvent as ToolEvent, ViewXform};
 use crate::state::Tool;
 use crate::theme::Tokens;
+use crate::ai_widgets as widgets;
+use craft::ui::contract::Props as _;
 
 /// How near a corner (screen pixels) a press grabs it to resize.
 const HANDLE_REACH: f32 = 7.0;
@@ -486,15 +488,11 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, 
                         ui.horizontal_top(|ui| {
                             label(ui, "Prompt");
                             let mut caption = r.caption.clone();
-                            let field = ui.add(
-                                egui::TextEdit::multiline(&mut caption)
-                                    .id(egui::Id::unique("ai-region-caption").with(r.id))
-                                    .hint_text(tr("What goes in this box"))
-                                    .char_limit(photocraft_engine::ai_regions_cmds::MAX_TEXT)
-                                    .desired_rows(2)
-                                    .desired_width(f32::INFINITY),
-                            );
-                            if field.changed() {
+                            let field = widgets::plain("Prompt", &mut caption)
+                                .placeholder(tr("What goes in this box"))
+                                .limit(photocraft_engine::ai_regions_cmds::MAX_TEXT)
+                                .lines(2);
+                            if widgets::show_text(ui, ("ai-region-caption", r.id), 0.0, field).changed {
                                 set(app, r.id, json!({"caption": caption}), Some(format!("ai-region-caption-{}", r.id)));
                             }
                         });
@@ -529,13 +527,8 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, r: &AiRegion, busy: bool, 
                             ui.horizontal(|ui| {
                                 label(ui, "Words");
                                 let mut words = r.text.clone();
-                                let field = ui.add(
-                                    egui::TextEdit::singleline(&mut words)
-                                        .id(egui::Id::unique("ai-region-words").with(r.id))
-                                        .hint_text(tr("The exact words"))
-                                        .desired_width(f32::INFINITY),
-                                );
-                                if field.changed() {
+                                let field = widgets::plain("Words", &mut words).placeholder(tr("The exact words"));
+                                if widgets::show_text(ui, ("ai-region-words", r.id), 0.0, field).changed {
                                     set(app, r.id, json!({"text": words}), Some(format!("ai-region-words-{}", r.id)));
                                 }
                             });
@@ -905,21 +898,14 @@ fn type_caption(app: &mut PhotocraftApp, ctx: &egui::Context, xf: &ViewXform, r:
         egui::Frame::new().fill(Color32::from_black_alpha(225)).stroke(Stroke::new(1.0, color32(r.color))).corner_radius(3.0).inner_margin(4.0).show(
             ui,
             |ui| {
-                let field = ui.add(
-                    egui::TextEdit::multiline(&mut caption)
-                        .id(egui::Id::unique("ai-region-caption").with(r.id))
-                        .hint_text(tr("Describe what goes here"))
-                        .desired_width(width)
-                        .desired_rows(2)
-                        .frame(egui::Frame::NONE)
-                        .text_color(Color32::from_gray(245)),
-                );
+                // Ctrl+Enter submits; Escape, like a click elsewhere, leaves the field.
+                let mut field = widgets::plain("Prompt", &mut caption).placeholder(tr("Describe what goes here")).lines(2).submits();
                 if focus {
-                    field.request_focus();
+                    field = field.request_focus(craft::ui::runtime::focus::FocusRequest::Take);
                 }
-                changed = field.changed();
-                let keys = ui.input(|i| i.key_pressed(egui::Key::Escape) || (i.key_pressed(egui::Key::Enter) && i.modifiers.command));
-                done = keys || (field.lost_focus() && !focus);
+                let field = widgets::show_text(ui, ("ai-region-typing", r.id), width, field);
+                changed = field.changed;
+                done = field.submitted || (field.left && !focus);
                 let hint = egui::RichText::new(tr("Esc or Ctrl+Enter when done")).size(10.5).color(t.text_faint);
                 ui.label(hint);
             },

@@ -280,7 +280,9 @@ pub(super) fn page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<S
         }
         label(ui, "Empty prompt:");
         ui.vertical(|ui| {
-            ui.add(egui::TextEdit::multiline(&mut s.empty_prompt).desired_rows(3).desired_width(field))
+            let empty = widgets::plain("Empty prompt", &mut s.empty_prompt).lines(3);
+            widgets::show_text(ui, "ai-fill-empty-prompt", field, empty)
+                .response
                 .on_hover_text(tr("What the model is told when the Fill dialog's prompt is left empty."));
             if s.empty_prompt.trim() != photocraft_aigen::fill::DEFAULT_EMPTY_PROMPT && link(ui, tr("Restore the default")) {
                 s.empty_prompt = photocraft_aigen::fill::DEFAULT_EMPTY_PROMPT.to_string();

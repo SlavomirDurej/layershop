@@ -19,6 +19,7 @@ use super::{ACTION, GOTO, KEY_FOCUS, KEY_FOCUS_ONCE, KEYS, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::ai_widgets as widgets;
+use craft::ui::contract::Props as _;
 
 /// The engine command that enhances.
 pub const ENHANCE: &str = "ai.enhancePrompt";
@@ -823,7 +824,8 @@ fn model_picker(ui: &mut egui::Ui, s: &mut EnhanceSettings, f: &mut Map<String, 
             if listed.is_empty() && !asked && has_key && !busy {
                 ask = true;
             }
-            ui.add(egui::TextEdit::singleline(&mut filter).hint_text(tr("Filter, or type a model id")).desired_width(f32::INFINITY)).request_focus();
+            let field = widgets::plain("Filter", &mut filter).placeholder(tr("Filter, or type a model id"));
+            widgets::show_text(ui, ("ai-enhance-filter", p.key()), 0.0, field.request_focus(craft::ui::runtime::focus::FocusRequest::Take));
             ui.add_space(2.0);
             let wanted = filter.trim().to_ascii_lowercase();
             if ui.selectable_label(current.is_none(), format!("{} {}", p.default_model(), tr("(default)"))).clicked() {
@@ -925,7 +927,7 @@ fn settings_tab(ui: &mut egui::Ui, s: &mut EnhanceSettings, f: &mut Map<String, 
     ui.add_space(6.0);
     let saved = s.instructions_text().to_string();
     let mut text = f.get(EDITING).and_then(Value::as_str).map_or_else(|| saved.clone(), str::to_string);
-    ui.add(egui::TextEdit::multiline(&mut text).desired_width(width).desired_rows(12).hint_text(tr("Empty: the built-in instructions")));
+    widgets::show_text(ui, "ai-enhance-instructions", width, widgets::plain("Instructions", &mut text).lines(12).placeholder(tr("Empty: the built-in instructions")));
     let edited = text.trim() != saved.trim();
     let built_in = text.trim() == DEFAULT_INSTRUCTIONS.trim() || text.trim().is_empty();
     ui.add_space(6.0);

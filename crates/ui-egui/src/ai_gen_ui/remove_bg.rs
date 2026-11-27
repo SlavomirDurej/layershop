@@ -496,13 +496,10 @@ pub(super) fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, job: Option<&phot
         }
         Keep::Describe => {
             ui.add_enabled_ui(!busy, |ui| {
-                let field = ui.add(
-                    egui::TextEdit::singleline(&mut app.ui.ai_gen.remove_bg.phrase)
-                        .id_salt("ai-remove-bg-phrase")
-                        .hint_text(tr("What to keep: \u{201c}couple\u{201d}, \u{201c}woman in red\u{201d}\u{2026}"))
-                        .desired_width(ui.available_width()),
-                );
-                submit = field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                let field = widgets::plain("What to keep", &mut app.ui.ai_gen.remove_bg.phrase)
+                    .placeholder(tr("What to keep: \u{201c}couple\u{201d}, \u{201c}woman in red\u{201d}\u{2026}"))
+                    .submits();
+                submit = widgets::show_text(ui, "ai-remove-bg-phrase", 0.0, field).submitted;
             });
             ui.add_space(6.0);
         }

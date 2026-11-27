@@ -28,6 +28,7 @@ use serde_json::{Map, Value, json};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::ai_widgets as widgets;
+use craft::ui::contract::Props as _;
 
 /// The panel's id in the panel registry and the workspace.
 pub const ID: &str = "aiGen";
@@ -1461,13 +1462,11 @@ fn seed_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Model, enabled
             let mut text = kept.map(|s| s.to_string()).unwrap_or_default();
             let hint = if current.seed >= 0 { current.seed.to_string() } else { tr("Random").to_string() };
             let width = (ui.available_width() - 30.0).max(60.0);
-            // As tall as the row's other fields, whatever the font: the rows have a set height.
-            let edit = egui::TextEdit::singleline(&mut text).hint_text(hint).desired_width(width);
-            let field = ui.add(edit.margin(egui::Margin::symmetric(4, 0)).min_size(vec2(0.0, 24.0)).align(egui::Align2::LEFT_CENTER));
-            if field.changed() {
+            let field = widgets::show_text(ui, "ai-gen-seed", width, widgets::plain("Seed", &mut text).placeholder(hint));
+            if field.changed {
                 app.ui.ai_gen.seed = typed_seed(&text, kept);
             }
-            field.on_hover_text(tr("The number the image starts from: the same seed, model, prompt and settings give the same image. Empty: the model's own setting, a new one each time unless it has a fixed seed"));
+            field.response.on_hover_text(tr("The number the image starts from: the same seed, model, prompt and settings give the same image. Empty: the model's own setting, a new one each time unless it has a fixed seed"));
             let last = app.ui.ai_gen.last_seed;
             let (icon, tip) = if kept.is_some() { ("lock", "A new seed each time") } else { ("lock-open", "Keep the last image's seed") };
             let lock = ui.add_enabled_ui(kept.is_some() || last.is_some(), |ui| crate::ai_widgets::icon_button(ui, icon, 24.0, kept.is_some(), tr(tip))).inner;
@@ -1818,56 +1817,32 @@ fn panel_body(app: &mut PhotocraftApp, ui: &mut egui::Ui, room: Option<f32>) {
             Some(left) => (left - if option_row { ROW + line_gap } else { 0.0 }).clamp(MIN_PROMPT_HEIGHT, 1200.0),
             None => PROMPT_HEIGHT,
         };
-        // A prompt longer than the box scrolls inside it instead of pushing Generate away.
-        // An instruction's references: `@Name` shows in the accent colour, and typing `@` offers
-        // the names.
+        // The box starts two lines tall and grows with the prompt, up to the room `height` leaves it; a
+        // longer prompt scrolls inside it instead of pushing Generate away. (The framework's field
+        // centres its text on its height, so a box held taller than its text would show a short
+        // prompt in its middle.) An instruction calls its references `@Name`: typing `@` offers the
+        // names.
+        let line = ui.text_style_height(&egui::TextStyle::Body).max(1.0);
+        // The field adds its padding to its lines: a little is kept for it, so the box never runs past `height`.
+        let most = ((height - 16.0) / line).floor().max(2.0) as usize;
         let names: Vec<String> = if edit { refs::kept(&app.session).into_iter().map(|r| r.name).filter(|n| !n.is_empty()).collect() } else { Vec::new() };
-        let names: Vec<&str> = names.iter().map(String::as_str).collect();
-        if edit {
-            refs::before_prompt(ui, &mut app.ui.ai_gen.prompt);
-        }
-        // A scroll area is never shorter than its least scrolled height (64 by default): held
-        // to the box's, a short panel gets the two-line box it was measured for.
-        let area = egui::ScrollArea::vertical().id_salt("ai-gen-prompt").max_height(height).min_scrolled_height(height);
-        let shown = area.auto_shrink([false, false]).show(ui, |ui| {
-            let font = egui::TextStyle::Body.resolve(ui.style());
-            let color = ui.visuals().override_text_color.unwrap_or_else(|| ui.visuals().widgets.inactive.text_color());
-            let mut layouter = |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| {
-                ui.painter().layout_job(refs::prompt_job(text.as_str(), &names, font.clone(), color, t.accent, wrap))
-            };
-            let mut edit_box = egui::TextEdit::multiline(&mut app.ui.ai_gen.prompt)
-                .id(refs::prompt_id())
-                .hint_text(tr(match kind {
-                    GenerationMode::Inpaint => "Describe what to paint in the selection…",
-                    GenerationMode::Img2img => "Describe what the picture should become…",
-                    GenerationMode::ImgEdit if !names.is_empty() => "Say what to change, calling a reference by name: \u{201c}@Luna sits on the bench\u{201d}…",
-                    GenerationMode::ImgEdit => "Say what to change: \u{201c}make the jacket red leather\u{201d}…",
-                    GenerationMode::Txt2img if laying_out => "Describe the whole scene: the setting, the light, the style…",
-                    GenerationMode::Txt2img => "Describe what to generate…",
-                }))
-                .desired_width(width)
-                // Its height is `min_size`'s: four rows (the default) would scroll a short box.
-                .desired_rows(1)
-                .min_size(vec2(width, height))
-                .margin(egui::Margin::symmetric(4, 2));
-            if edit {
-                // While names are offered for an `@`, Tab takes the first instead of moving on.
-                let tab = refs::offering(ui.ctx());
-                edit_box = edit_box.layouter(&mut layouter).event_filter(egui::EventFilter {
-                    horizontal_arrows: true,
-                    vertical_arrows: true,
-                    tab,
-                    ..Default::default()
-                });
-            }
-            let output = edit_box.show(ui);
-            typed = output.response.changed();
-            submit = output.response.has_focus() && ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter));
-            if edit {
-                refs::after_prompt(ui, &output, &app.ui.ai_gen.prompt, &names);
-            }
+        let hint = tr(match kind {
+            GenerationMode::Inpaint => "Describe what to paint in the selection…",
+            GenerationMode::Img2img => "Describe what the picture should become…",
+            GenerationMode::ImgEdit if !names.is_empty() => "Say what to change, calling a reference by name: \u{201c}@Luna sits on the bench\u{201d}…",
+            GenerationMode::ImgEdit => "Say what to change: \u{201c}make the jacket red leather\u{201d}…",
+            GenerationMode::Txt2img if laying_out => "Describe the whole scene: the setting, the light, the style…",
+            GenerationMode::Txt2img => "Describe what to generate…",
         });
-        prompt_rect = shown.inner_rect;
+        // Ctrl+Enter generates; Enter starts a new line.
+        let mut field = widgets::plain("Prompt", &mut app.ui.ai_gen.prompt).placeholder(hint).lines(2).max_lines(most).submits();
+        if !names.is_empty() {
+            field = field.complete(refs::Names(names));
+        }
+        let shown = widgets::show_text(ui, "ai-gen-prompt", width, field);
+        typed = shown.changed;
+        submit = shown.submitted;
+        prompt_rect = shown.response.rect;
     });
     enhance::after_prompt(app, ui, prompt_rect, enhancing.as_ref(), typed);
     // The scene of the selected layer made with regions is kept in it as it is typed.
@@ -2538,7 +2513,8 @@ fn label(ui: &mut egui::Ui, text: &str) {
 fn text_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &str, hint: &str) {
     label(ui, title);
     let mut s = text_of(obj, key);
-    ui.add(egui::TextEdit::singleline(&mut s).desired_width(field_width(ui)).hint_text(hint));
+    let width = field_width(ui);
+    widgets::show_text(ui, ("ai-text-row", key), width, widgets::plain(title, &mut s).placeholder(hint.to_string()));
     obj.insert(key.into(), json!(s));
     ui.end_row();
 }
@@ -2577,7 +2553,8 @@ fn file_row(ui: &mut egui::Ui, obj: &mut Map<String, Value>, key: &str, title: &
             widgets::dropdown_search(ui, &format!("ai-file-{key}"), tr(title), &mut cur, &options, field_width(ui));
         }
         None => {
-            ui.add(egui::TextEdit::singleline(&mut cur).desired_width(field_width(ui)).hint_text(tr("Not set")));
+            let width = field_width(ui);
+            widgets::show_text(ui, ("ai-file-row", key), width, widgets::plain(title, &mut cur).placeholder(tr("Not set")));
         }
     }
     obj.insert(key.into(), json!(cur));
@@ -3034,7 +3011,7 @@ fn server_page(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<Strin
         label(ui, "Address");
         ui.horizontal(|ui| {
             let mut url = text_of(ai, "comfyUrl");
-            ui.add(egui::TextEdit::singleline(&mut url).desired_width(240.0).hint_text("http://127.0.0.1:8188"));
+            widgets::show_text(ui, "ai-comfy-url", 240.0, widgets::plain("Address", &mut url).placeholder("http://127.0.0.1:8188"));
             ai.insert("comfyUrl".into(), json!(url));
             let connect = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Connect"), 80.0)).inner;
             if connect.on_hover_text(tr("Check the server (starting it if that is switched on below) and read the model files it has")).clicked() {
@@ -3141,7 +3118,7 @@ fn launch_settings(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<S
             ui.horizontal(|ui| {
                 let mut v = text_of(&launch, key);
                 // "Not set", not a sample path: a sample reads as if the field were filled in.
-                ui.add(egui::TextEdit::singleline(&mut v).desired_width(300.0).hint_text(tr("Not set"))).on_hover_text(tr(tip));
+                widgets::show_text(ui, ("ai-launch", key), 300.0, widgets::plain(title, &mut v).placeholder(tr("Not set"))).response.on_hover_text(tr(tip));
                 launch.insert(key.into(), json!(v));
                 // Python has no file type to filter by outside Windows: there the path is typed.
                 if (key != "python" || cfg!(windows)) && ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Browse…"), 72.0)).inner.clicked() {
@@ -3152,7 +3129,8 @@ fn launch_settings(ui: &mut egui::Ui, ai: &mut Map<String, Value>, f: &mut Map<S
         }
         label(ui, "Arguments");
         let mut v = text_of(&launch, "args");
-        ui.add(egui::TextEdit::multiline(&mut v).desired_rows(3).desired_width(380.0).hint_text(tr("Not set (main.py)")))
+        widgets::show_text(ui, "ai-launch-args", 380.0, widgets::plain("Arguments", &mut v).lines(3).placeholder(tr("Not set (main.py)")))
+            .response
             .on_hover_text(tr("The script and its options, as on ComfyUI's command line. Leave out --port: the address above decides it"));
         // One line: a pasted command line with line breaks is still one command.
         launch.insert("args".into(), json!(v.replace(['\r', '\n'], " ")));
@@ -3276,10 +3254,14 @@ pub(super) fn key_card(
         ui.horizontal(|ui| {
             let hint = if saved { tr("Saved. Paste a new key to replace it") } else { tr("Paste your API key") };
             let field_width = if saved { ui.available_width() - 90.0 } else { ui.available_width() };
-            let field = ui.add(egui::TextEdit::singleline(&mut key).password(true).desired_width(field_width.max(120.0)).hint_text(hint));
+            let named = craft::ui::text::TextField::new(format!("{label} {}", tr("API key")), craft::ui::contract::Bind::bound(&mut key));
+            let mut field = named.masked().placeholder(hint);
             if front && *focus_once {
-                field.request_focus();
-                field.scroll_to_me(Some(egui::Align::Center));
+                field = field.request_focus(craft::ui::runtime::focus::FocusRequest::Take);
+            }
+            let field = widgets::show_text(ui, ("ai-key", name), field_width.max(120.0), field);
+            if front && *focus_once {
+                field.response.scroll_to_me(Some(egui::Align::Center));
             }
             if saved {
                 widgets::checkbox(ui, &mut remove, tr("Remove"));
@@ -4067,7 +4049,9 @@ fn model_settings(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Option<&
                 let mut text = text_of(m, "workflow");
                 ui.vertical(|ui| {
                     ui.set_max_width(field_width(ui) + 8.0);
-                    ui.add(egui::TextEdit::multiline(&mut text).desired_rows(6).desired_width(field_width(ui)).font(egui::TextStyle::Monospace).hint_text("{ \"1\": { \"class_type\": … } }"));
+                    let width = field_width(ui);
+                    let field = widgets::plain("Workflow", &mut text).lines(6).mono().placeholder("{ \"1\": { \"class_type\": … } }");
+                    widgets::show_text(ui, "ai-workflow", width, field);
                     ui.label(
                         RichText::new(tr("ComfyUI › Workflow › Export (API). Use %prompt%, %negative%, %width%, %height%, %seed%, %steps% and %cfg% where those values go."))
                             .color(t.text_faint)

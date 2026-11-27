@@ -1766,7 +1766,7 @@ fn folder_row(app: &mut PhotocraftApp, ui: &mut egui::Ui, engine: bool) {
     ui.horizontal(|ui| {
         let s = &mut app.ui.ai_setup;
         let value = if engine { &mut s.engine_dir } else { &mut s.models_dir };
-        widgets::text_field(ui, egui::Id::unique(("ai-setup-folder", engine)), value, tr("Choose a folder"), ui.available_width() - 96.0, false);
+        widgets::text_field(ui, ("ai-setup-folder", engine), title, value, "Choose a folder", ui.available_width() - 96.0, false);
         pick = widgets::secondary_button(ui, tr("Browse…"), 84.0).clicked();
     });
     ui.add_space(3.0);
@@ -1909,7 +1909,7 @@ fn page_location(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let busy = app.ui.ai_setup.server_job.is_some();
         let mut go = false;
         ui.horizontal(|ui| {
-            widgets::text_field(ui, egui::Id::unique("ai-setup-url"), &mut app.ui.ai_setup.url, "http://127.0.0.1:8188", ui.available_width() - 96.0, true);
+            widgets::text_field(ui, "ai-setup-url", "Address", &mut app.ui.ai_setup.url, "http://127.0.0.1:8188", ui.available_width() - 96.0, true);
             go = ui.add_enabled_ui(!busy, |ui| widgets::secondary_button(ui, tr("Connect"), 84.0)).inner.clicked();
         });
         if go {
@@ -2275,7 +2275,7 @@ fn hf_panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
     if app.ui.ai_setup.token_open {
         ui.horizontal(|ui| {
             let hint = if signed && via == "token" { tr("Saved. Paste a new one to replace it") } else { tr("Paste a read token") };
-            ui.add(egui::TextEdit::singleline(&mut app.ui.ai_setup.token).password(true).desired_width(260.0).hint_text(hint));
+            widgets::show_text(ui, "ai-setup-token", 260.0, widgets::plain("Hugging Face token", &mut app.ui.ai_setup.token).masked().placeholder(hint));
             let typed = !app.ui.ai_setup.token.trim().is_empty();
             if ui.add_enabled_ui(typed, |ui| widgets::secondary_button(ui, tr("Save"), 64.0)).inner.clicked() {
                 save_token(app);

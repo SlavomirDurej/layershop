@@ -1,8 +1,7 @@
 //! A change by instruction's references: the pictures the active document keeps for its edits
 //! to refer to (`ai.references`, saved with it in PSD and `.pcraft` files), shown as chips under
-//! the source and named as the prompt calls them. A chip named Luna is `@Luna` in the prompt,
-//! which shows the mention in the accent colour while it names a chip; typing `@` offers the
-//! names (Tab takes the first). When the prompt mentions any chip only the mentioned ones are
+//! the source and named as the prompt calls them. A chip named Luna is `@Luna` in the prompt;
+//! typing `@` offers the names (Tab takes the first). When the prompt mentions any chip only the mentioned ones are
 //! sent (the others show faint); a prompt that mentions none sends them all, as image 2, image 3,
 //! … (the engine's [`photocraft_engine::ai_refs`]).
 //!
@@ -355,11 +354,12 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, i: usize, offered: &[(Sour
         ui.horizontal(|ui| {
             edit_label(ui, tr("Name"));
             let mut text = r.name.clone();
-            let id = egui::Id::unique(("ai-gen-ref-name", i));
             let width = (ui.available_width() - 30.0).max(60.0);
-            let field = widgets::text_field_ex(ui, id, &mut text, tr("e.g. Luna"), width, false, Some(MAX_NAME + 4))
-                .on_hover_text(tr("The name the prompt calls it by: type @ and the name. Letters, digits, _ and -"));
-            if field.changed() {
+            let named = widgets::plain("Name", &mut text).placeholder(tr("e.g. Luna")).limit(MAX_NAME + 4).submits();
+            let field = widgets::show_text(ui, ("ai-gen-ref-name", i), width, named);
+            let (submitted, changed) = (field.submitted, field.changed);
+            field.response.on_hover_text(tr("The name the prompt calls it by: type @ and the name. Letters, digits, _ and -"));
+            if changed {
                 // A space typed is a `_` (names are one word); what a name can't hold is left out.
                 let name = ai_refs::clean_name(&text.replace(char::is_whitespace, "_"));
                 // A name another reference has is shown, not set: the document can't keep two.
@@ -367,7 +367,7 @@ fn editor(app: &mut PhotocraftApp, ui: &mut egui::Ui, i: usize, offered: &[(Sour
                     change = Some((Entry::Keep(i, name), Some(format!("ai-ref-name-{i}"))));
                 }
             }
-            if crate::ai_widgets::icon_button(ui, "check", 22.0, false, tr("Done")).clicked() || (field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+            if crate::ai_widgets::icon_button(ui, "check", 22.0, false, tr("Done")).clicked() || submitted {
                 keep = false;
             }
         });
@@ -544,21 +544,6 @@ fn thumb_source<'a>(s: &'a Session, picture: &'a AiPicture) -> Option<(u64, Thum
 
 // ---------- The prompt ----------
 
-/// The prompt laid out with its mentions of `names` in `mention`, on a tint of it.
-pub(super) fn prompt_job(text: &str, names: &[&str], font: egui::FontId, color: Color32, mention: Color32, wrap: f32) -> egui::text::LayoutJob {
-    let mut job = egui::text::LayoutJob { wrap: egui::text::TextWrapping { max_width: wrap, ..Default::default() }, ..Default::default() };
-    let plain = egui::TextFormat { font_id: font.clone(), color, ..Default::default() };
-    let marked = egui::TextFormat { font_id: font, color: mention, background: mention.gamma_multiply(0.18), ..Default::default() };
-    let mut from = 0;
-    for m in ai_refs::mentions(text, names) {
-        job.append(text.get(from..m.range.start).unwrap_or(""), 0.0, plain.clone());
-        job.append(text.get(m.range.clone()).unwrap_or(""), 0.0, marked.clone());
-        from = m.range.end;
-    }
-    job.append(text.get(from..).unwrap_or(""), 0.0, plain);
-    job
-}
-
 /// The `@` being typed before the cursor (`cursor`, in characters) and the names it may become:
 /// the bytes of `@` and what follows it up to the cursor, and the indices of the names that
 /// begin with that, but not a name typed out already. `None` when the cursor is not after one.
@@ -579,103 +564,24 @@ pub(super) fn completion_at(text: &str, cursor: usize, names: &[&str]) -> Option
     (!fits.is_empty()).then_some((at..end, fits))
 }
 
-/// `text` with `range` (an `@` being typed) replaced by `@name` and a space, and the cursor's
-/// place after them, in characters.
-pub(super) fn complete(text: &str, range: Range<usize>, name: &str) -> (String, usize) {
-    let (head, tail) = (text.get(..range.start).unwrap_or(""), text.get(range.end..).unwrap_or(""));
-    let space = if tail.starts_with(char::is_whitespace) { "" } else { " " };
-    let inserted = format!("@{name}{space}");
-    let cursor = head.chars().count() + inserted.chars().count();
-    (format!("{head}{inserted}{tail}"), cursor)
+/// What a completion puts in place of the `@` being typed at `range` (bytes of `text`): `@name`,
+/// and a space after it unless one follows.
+pub(super) fn completion_text(text: &str, range: Range<usize>, name: &str) -> String {
+    let space = if text.get(range.end..).is_some_and(|tail| tail.starts_with(char::is_whitespace)) { "" } else { " " };
+    format!("@{name}{space}")
 }
 
-/// The prompt's id, so a completion can put the cursor after the name it typed.
-pub(super) fn prompt_id() -> egui::Id {
-    egui::Id::unique("ai-gen-prompt-text")
-}
+/// The prompt's completions: after an `@` the names of the references that begin with what
+/// follows it; Tab or a click takes one ([`completion_at`]).
+pub(super) struct Names(pub Vec<String>);
 
-/// A completion to apply to the prompt: from Tab on the frame it was offered, or a click on it.
-#[derive(Clone, Default)]
-struct Pending {
-    range: Range<usize>,
-    name: String,
-}
-
-fn pending_id() -> egui::Id {
-    prompt_id().with("complete")
-}
-
-fn offered_id() -> egui::Id {
-    prompt_id().with("offered")
-}
-
-/// Are names being offered for an `@` in the prompt? Then Tab takes the first, and the prompt
-/// keeps the focus (its event filter takes Tab).
-pub(super) fn offering(ctx: &egui::Context) -> bool {
-    ctx.data(|d| d.get_temp::<Pending>(offered_id())).is_some()
-}
-
-/// Before the prompt is drawn: apply a completion clicked last frame, or one Tab takes now (the
-/// key is the completion's, not focus'), putting the cursor after it.
-pub(super) fn before_prompt(ui: &egui::Ui, prompt: &mut String) {
-    let ctx = ui.ctx();
-    let mut pending: Option<Pending> = ctx.data_mut(|d| d.remove_temp(pending_id()));
-    let focused = ctx.memory(|m| m.has_focus(prompt_id()));
-    if pending.is_none()
-        && focused
-        && let Some(first) = ctx.data(|d| d.get_temp::<Pending>(offered_id()))
-        && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Tab))
-    {
-        pending = Some(first);
+impl craft::ui::primitives::Completer for Names {
+    fn complete(&self, text: &str, caret: usize, out: &mut Vec<craft::ui::primitives::Completion>) -> Option<Range<usize>> {
+        let names: Vec<&str> = self.0.iter().map(String::as_str).collect();
+        let cursor = text.get(..caret)?.chars().count();
+        let (range, fits) = completion_at(text, cursor, &names)?;
+        let offered = fits.iter().filter_map(|i| names.get(*i)).map(|name| craft::ui::primitives::Completion::new(format!("@{name}"), completion_text(text, range.clone(), name)));
+        out.extend(offered);
+        Some(range)
     }
-    let Some(p) = pending else { return };
-    if prompt.get(p.range.clone()).is_none_or(|s| !s.starts_with('@')) {
-        return;
-    }
-    let (text, cursor) = complete(prompt, p.range, &p.name);
-    *prompt = text;
-    let mut state = egui::TextEdit::load_state(ctx, prompt_id()).unwrap_or_default();
-    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(egui::text::CCursor::new(cursor))));
-    state.store(ctx, prompt_id());
-    ctx.memory_mut(|m| m.request_focus(prompt_id()));
-}
-
-/// After the prompt is drawn: offer the names the `@` before the cursor may become, under it.
-pub(super) fn after_prompt(ui: &egui::Ui, output: &egui::text_edit::TextEditOutput, prompt: &str, names: &[&str]) {
-    let ctx = ui.ctx();
-    let cursor = output.cursor_range.filter(|r| r.is_empty() && output.response.has_focus()).map(|r| r.primary.index.0);
-    let found = cursor.and_then(|c| completion_at(prompt, c, names).map(|f| (c, f)));
-    let Some((c, (range, fits))) = found else {
-        ctx.data_mut(|d| d.remove::<Pending>(offered_id()));
-        return;
-    };
-    let first = fits.first().and_then(|i| names.get(*i)).map(|n| Pending { range: range.clone(), name: n.to_string() });
-    ctx.data_mut(|d| match first {
-        Some(p) => {
-            d.insert_temp(offered_id(), p);
-        }
-        None => d.remove::<Pending>(offered_id()),
-    });
-    let t = Tokens::get(ctx);
-    let at = output.galley_pos + output.galley.pos_from_cursor(egui::text::CCursor::new(c)).left_bottom().to_vec2();
-    egui::Area::new(prompt_id().with("names")).order(egui::Order::Foreground).fixed_pos(at + vec2(0.0, 2.0)).show(ctx, |ui| {
-        egui::Frame::popup(ui.style()).inner_margin(4.0).show(ui, |ui| {
-            for (k, i) in fits.iter().enumerate() {
-                let Some(name) = names.get(*i) else { continue };
-                let text = RichText::new(format!("@{name}")).color(t.accent);
-                let label = if k == 0 { format!("{}  ", tr("Tab")) } else { String::new() };
-                let row = ui.horizontal(|ui| {
-                    let r = ui.add(egui::Button::new(text).frame(false));
-                    if !label.is_empty() {
-                        ui.label(RichText::new(label).color(t.text_faint).size(super::NOTE_SIZE));
-                    }
-                    r
-                });
-                if row.inner.clicked() {
-                    ctx.data_mut(|d| d.insert_temp(pending_id(), Pending { range: range.clone(), name: name.to_string() }));
-                    ctx.request_repaint();
-                }
-            }
-        });
-    });
 }

@@ -21,6 +21,7 @@ use super::{edit_label, field_width, open_settings, text_of, tr};
 use crate::PhotocraftApp;
 use crate::theme::Tokens;
 use crate::ai_widgets as widgets;
+use craft::ui::contract::Props as _;
 
 /// The strengths the panel's slider and the field beside it run over: [`LORA_STRENGTHS`].
 const SLIDER: std::ops::RangeInclusive<f32> = *LORA_STRENGTHS.start() as f32..=*LORA_STRENGTHS.end() as f32;
@@ -125,11 +126,12 @@ pub(super) fn section(app: &mut PhotocraftApp, ui: &mut egui::Ui, current: &Mode
                         let search_id = ui.make_persistent_id("ai-lora-search");
                         let mut query: String = ui.data(|d| d.get_temp(search_id)).unwrap_or_default();
                         if current.loras.len() >= widgets::SEARCH_FROM {
-                            let field = ui.add(egui::TextEdit::singleline(&mut query).hint_text(tr("Search")).desired_width(f32::INFINITY));
+                            let mut field = widgets::plain("Search", &mut query).placeholder(tr("Search"));
                             if ui.data(|d| d.get_temp::<bool>(search_id.with("focused"))).is_none() {
-                                field.request_focus();
+                                field = field.request_focus(craft::ui::runtime::focus::FocusRequest::Take);
                                 ui.data_mut(|d| d.insert_temp(search_id.with("focused"), true));
                             }
+                            widgets::show_text(ui, "ai-lora-search", 0.0, field);
                             ui.data_mut(|d| d.insert_temp(search_id, query.clone()));
                         }
                         let mut shown = 0;
@@ -231,7 +233,7 @@ pub(super) fn library(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Opti
             let buttons = 3.0 * 26.0;
             let file_width = (width - buttons).max(80.0);
             if server.is_empty() {
-                ui.add(egui::TextEdit::singleline(&mut lora.file).desired_width(file_width).hint_text(tr("File in models/loras")));
+                widgets::show_text(ui, ("ai-lora-file", id.as_str(), i), file_width, widgets::plain("LoRA file", &mut lora.file).placeholder(tr("File in models/loras")));
             } else {
                 let mut names = server.clone();
                 if !lora.file.is_empty() && !names.contains(&lora.file) {
@@ -262,7 +264,8 @@ pub(super) fn library(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Opti
             ui.spacing_mut().item_spacing.x = 6.0;
             let derived = photocraft_aigen::model::label_of("", &lora.file);
             let name_width = (width - 6.0 - 60.0 - 50.0).max(80.0);
-            ui.add(egui::TextEdit::singleline(&mut lora.name).desired_width(name_width).hint_text(derived))
+            widgets::show_text(ui, ("ai-lora-name", id.as_str(), i), name_width, widgets::plain("Name", &mut lora.name).placeholder(derived))
+                .response
                 .on_hover_text(tr("The name the AI Gen panel shows. Empty: one made from the file"));
             ui.label(RichText::new(tr("Strength")).color(t.text_dim));
             let mut s = lora.strength;
@@ -275,7 +278,9 @@ pub(super) fn library(ui: &mut egui::Ui, m: &mut Map<String, Value>, files: Opti
         });
         ui.end_row();
         ui.label("");
-        ui.add(egui::TextEdit::singleline(&mut lora.trigger).desired_width(width).hint_text(tr("Trigger words, added to the prompt while it is used")))
+        let trigger = widgets::plain("Trigger words", &mut lora.trigger).placeholder(tr("Trigger words, added to the prompt while it is used"));
+        widgets::show_text(ui, ("ai-lora-trigger", id.as_str(), i), width, trigger)
+            .response
             .on_hover_text(tr("Many LoRAs only show their effect when the prompt has the words they were trained with (their page says which). These are added to the prompt the model is given, unless the prompt has them already"));
         ui.end_row();
     }
