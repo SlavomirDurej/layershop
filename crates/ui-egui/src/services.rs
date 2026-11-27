@@ -332,6 +332,8 @@ pub type AutomationReadFn = Box<dyn FnMut(&str) -> Result<AutomationReadResult, 
 
 /// Write bytes through the desktop control session's authorized write root.
 pub type AutomationWriteFn = Box<dyn FnMut(&str, &[u8]) -> Result<(), String>>;
+/// Name a validated automation destination for a later interactive Save.
+pub type AutomationSavePathFn = Box<dyn Fn(&str) -> Result<String, String>>;
 
 /// Load a directory-form `.pcraft` through the authorized read root, returning its display
 /// name (the file name) and the loaded document. `Ok(None)` marks a regular file: the
@@ -358,6 +360,7 @@ pub struct AutomationServices {
     pub open_pcraft: Option<AutomationOpenPcraftFn>,
     pub locate: Option<AutomationLocateFn>,
     pub save: Option<SaveFileFn>,
+    pub save_path: Option<AutomationSavePathFn>,
     pub command: Option<AutomationCommandFn>,
     pub authorize: Option<AutomationAuthorizeFn>,
 }
@@ -534,6 +537,7 @@ pub struct Services {
     /// Background save over the automation write authority (`app.save`, #2017): same worker
     /// contract as `save_file`, but the bytes go through the capability-scoped workspace.
     pub automation_save: Option<SaveFileFn>,
+    pub automation_save_path: Option<AutomationSavePathFn>,
     /// Show an Open or Save dialog without waiting for it (see `file_dialog`). The web build's file path until
     /// the framework's web `Files` exists (FW-264).
     #[cfg(target_arch = "wasm32")]
@@ -686,6 +690,7 @@ impl Services {
         self.automation_open_pcraft = a.open_pcraft;
         self.automation_locate = a.locate;
         self.automation_save = a.save;
+        self.automation_save_path = a.save_path;
         self.automation_command = a.command;
         self.automation_authorize = a.authorize;
     }

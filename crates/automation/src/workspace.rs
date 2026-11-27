@@ -188,6 +188,14 @@ impl AuthorizedWorkspace {
         self.write_stream(path, &mut |w| w.write_all(bytes))
     }
 
+    /// Name a capability-scoped destination for a later interactive Save. Automation must
+    /// still write through the held directory capability.
+    pub fn desktop_save_path(&self, path: &str) -> Result<String, AutomationError> {
+        let root = self.write.as_ref().ok_or_else(|| AutomationError::BadRequest(format!("{DENIED}: write authority is absent")))?;
+        let relative = request_path(path, Some(root))?;
+        root.path.join(relative).into_os_string().into_string().map_err(|_| path_error(path, "desktop save path is not UTF-8"))
+    }
+
     /// [`Self::write`] with the file's bytes produced by `write` straight into the temporary
     /// file (it may seek back to patch lengths), so a large PSD/PSB is never held in memory
     /// whole (#5333). The same refusals, the same atomic replace.

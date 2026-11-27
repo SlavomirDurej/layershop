@@ -247,6 +247,7 @@ use prefs::pressure_curve_ui;
 #[cfg(not(target_arch = "wasm32"))]
 pub use services::AgentAutomationFn;
 pub use services::AutomationReadResult;
+pub use services::AutomationSavePathFn;
 pub(crate) use services::SAVE_OPTIONS_OPEN;
 #[cfg(test)]
 pub(crate) use services::saved_revision_after_write;
